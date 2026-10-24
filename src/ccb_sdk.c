@@ -184,7 +184,7 @@ ccb_status ccb_sdk_find_java(char **out, int *major_out) {
 }
 
 // Parse kotlinc -version stderr: "info: kotlinc-jvm 2.4.21 (JRE ...)".
-static char *ccb_parse_kotlin_version(const char *text) {
+char *ccb_sdk_parse_kotlin_version(const char *text) {
   const char *v = strstr(text, "kotlinc-jvm ");
   if (v == NULL) {
     return NULL;
@@ -385,13 +385,26 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
         s->kotlinc = on_path;
       }
     }
+    if (s->kotlinc == NULL && s->sdk_home != NULL) {
+      // Setup-installed compiler: <sdk-home>/kotlinc. Last resort,
+      // after explicit config, KOTLIN_HOME, and PATH.
+      char *installed_home = ccb_path_join(s->sdk_home, "kotlinc");
+      char *installed = ccb_path_join(installed_home, "bin/kotlinc");
+      if (access(installed, X_OK) == 0) {
+        s->kotlin_home = installed_home;
+        s->kotlinc = installed;
+      } else {
+        free(installed_home);
+        free(installed);
+      }
+    }
     if (s->kotlinc == NULL) {
       ccb_sdk_diag(diags, "CCB-E2004", "kotlinc not found: set [sdk] kotlin_home in ccb.toml or KOTLIN_HOME");
     } else {
       char *argv[] = { s->kotlinc, "-version", NULL };
       ccb_proc_result r;
       if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
-        s->kotlin_version = ccb_parse_kotlin_version(r.err);
+        s->kotlin_version = ccb_sdk_parse_kotlin_version(r.err);
         if (s->kotlin_version == NULL || s->kotlin_version[0] != '2') {
           ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
         }

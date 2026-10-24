@@ -294,7 +294,7 @@ not agent-oriented. CCB must satisfy all of the following:
 | Command | Purpose |
 |---|---|
 | `ccb init [dir]` | Scaffold a minimal project: `ccb.toml`, manifest, one Kotlin Activity, `res/`, `.gitignore`. Must work offline. |
-| `ccb setup` | Provision the toolchain: install SDK command-line tools, platform, and build-tools (checksum-verified downloads) when missing. This is the only command allowed network access; builds stay hermetic. |
+| `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), and the official kotlinc 2.4.21 compiler into the SDK home when missing. This is the only command allowed network access; builds stay hermetic. |
 | `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. |
 | `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`. |
 | `ccb clean` | Remove the build directory only. Never touches sources. |

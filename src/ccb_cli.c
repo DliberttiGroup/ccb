@@ -18,6 +18,7 @@
 #include "ccb_preview_diff.h"
 #include "ccb_cli.h"
 #include <unistd.h>
+#include <sys/stat.h>
 
 #define CCB_VERSION "0.1.0"
 
@@ -25,6 +26,9 @@
 // to bootstrap an SDK. Verified against the complete download
 // (commandlinetools-linux-11076708_latest.zip, 153607504 bytes).
 #define CCB_CMDLINE_SHA256 "2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258"
+#define CCB_KOTLIN_VERSION "2.4.21"
+#define CCB_KOTLIN_URL "https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip"
+#define CCB_KOTLIN_SHA256 "7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd"
 
 static const char *CCB_USAGE =
   "usage: ccb [--json] [--verbose] [--config PATH] [--variant debug|release]\n"
@@ -32,7 +36,7 @@ static const char *CCB_USAGE =
   "\n"
   "commands:\n"
   "  init [dir] [--package PKG] [--name NAME]  scaffold a new project\n"
-  "  setup                                     install missing SDK components\n"
+  "  setup [--yes]                             install missing SDK components\n"
   "  check [--preview-gate] [--no-preview-gate]\n"
   "                                            validate config + toolchain\n"
   "  build [--preview-gate] [--no-preview-gate]  build the APK\n"
@@ -52,6 +56,7 @@ typedef struct {
   int verbose;
   int dry_run;
   int explain;
+  int yes;
   const char *config_path;
   const char *variant;
   const char *command;
@@ -369,20 +374,415 @@ static int ccb_download(const char *url, const char *dest) {
   return ok ? 0 : -1;
 }
 
+// ---------- setup: JDK install ----------
+
+typedef enum {
+  CCB_JDKINST_NONE,
+  CCB_JDKINST_TERMUX,
+  CCB_JDKINST_APT,
+  CCB_JDKINST_DNF,
+  CCB_JDKINST_YUM,
+  CCB_JDKINST_PACMAN,
+  CCB_JDKINST_ZYPPER,
+  CCB_JDKINST_APK
+} ccb_jdkinst;
+
+typedef struct {
+  ccb_jdkinst kind;
+  const char *display;  // "pkg", "apt-get", ... (string literal, not owned)
+  char *path;           // resolved installer binary (owned)
+  char *sudo_path;      // resolved sudo (owned, NULL unless needs_sudo)
+  int needs_sudo;       // distro installer, not running as root
+} ccb_jdkinst_info;
+
+static void ccb_detect_jdkinst(ccb_jdkinst_info *out) {
+  out->kind = CCB_JDKINST_NONE;
+  out->display = NULL;
+  out->path = NULL;
+  out->sudo_path = NULL;
+  out->needs_sudo = 0;
+  // Termux: $PREFIX with a pkg binary.
+  const char *prefix = getenv("PREFIX");
+  if (prefix != NULL) {
+    char *pkg = ccb_path_join(prefix, "bin/pkg");
+    if (access(pkg, X_OK) == 0) {
+      out->kind = CCB_JDKINST_TERMUX;
+      out->display = "pkg";
+      out->path = pkg;
+      return;
+    }
+    free(pkg);
+  }
+  static const struct {
+    ccb_jdkinst kind;
+    const char *name;
+  } cands[] = {
+    { CCB_JDKINST_APT, "apt-get" },
+    { CCB_JDKINST_DNF, "dnf" },
+    { CCB_JDKINST_YUM, "yum" },
+    { CCB_JDKINST_PACMAN, "pacman" },
+    { CCB_JDKINST_ZYPPER, "zypper" },
+    { CCB_JDKINST_APK, "apk" },
+  };
+  for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+    char *p = ccb_sdk_find_on_path(cands[i].name);
+    if (p == NULL) {
+      continue;
+    }
+    if (getuid() != 0) {
+      char *sudo = ccb_sdk_find_on_path("sudo");
+      if (sudo == NULL) {
+        // No way to gain root: no distro installer is usable.
+        free(p);
+        return;
+      }
+      out->sudo_path = sudo;
+      out->needs_sudo = 1;
+    }
+    out->kind = cands[i].kind;
+    out->display = cands[i].name;
+    out->path = p;
+    return;
+  }
+}
+
+// Run one installer step: [sudo] <installer> <cmd...>. Prints the
+// step's stderr on failure. Returns 0 on success, -1 otherwise.
+static int ccb_run_jdkinst_cmd(const ccb_jdkinst_info *inst, char *const cmd[]) {
+  size_t n = 0;
+  while (cmd[n] != NULL) {
+    n++;
+  }
+  char **argv = ccb_xcalloc(n + 3, sizeof(char *));
+  size_t k = 0;
+  if (inst->needs_sudo) {
+    argv[k++] = inst->sudo_path;
+  }
+  argv[k++] = inst->path;
+  for (size_t i = 0; i < n; i++) {
+    argv[k++] = cmd[i];
+  }
+  argv[k] = NULL;
+  ccb_proc_result r;
+  ccb_status rc = ccb_proc_run(argv, NULL, NULL, &r);
+  int ok = rc == CCB_OK && r.exit_code == 0;
+  if (!ok) {
+    fputs(r.err != NULL ? r.err : "", stderr);
+  }
+  ccb_proc_result_free(&r);
+  free(argv);
+  return ok ? 0 : -1;
+}
+
+static int ccb_install_jdk(const ccb_jdkinst_info *inst) {
+  switch (inst->kind) {
+    case CCB_JDKINST_TERMUX: {
+      char *cmd[] = { "install", "-y", "openjdk-17", NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_APT: {
+      char *upd[] = { "update", NULL };
+      if (ccb_run_jdkinst_cmd(inst, upd) != 0) {
+        return -1;
+      }
+      char *cmd[] = { "install", "-y", "openjdk-17-jdk", NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_DNF:
+    case CCB_JDKINST_YUM: {
+      char *cmd[] = { "install", "-y", "java-17-openjdk-devel", NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_PACMAN: {
+      char *cmd[] = { "-Sy", "--noconfirm", "jdk17-openjdk", NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_ZYPPER: {
+      char *cmd[] = { "install", "-y", "java-17-openjdk-devel", NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_APK: {
+      char *cmd[] = { "add", "openjdk17", NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    default:
+      return -1;
+  }
+}
+
+// Returns 1 when the user answered yes, 0 otherwise (no, EOF, no TTY).
+static int ccb_prompt_yes(const char *question) {
+  if (!isatty(STDIN_FILENO)) {
+    return 0;
+  }
+  fprintf(stderr, "%s [y/N] ", question);
+  fflush(stderr);
+  char line[128];
+  if (fgets(line, sizeof(line), stdin) == NULL) {
+    return 0;
+  }
+  return line[0] == 'y' || line[0] == 'Y';
+}
+
+// Point JAVA_HOME at the resolved JDK when it is unset and a JDK home
+// can be derived: Termux's JDK dir first, else the java path's parent
+// of bin/. Only affects this process and its children (sdkmanager).
+static void ccb_configure_java_home(const char *java_path) {
+  if (getenv("JAVA_HOME") != NULL) {
+    return;
+  }
+  const char *prefix = getenv("PREFIX");
+  if (prefix != NULL) {
+    char *cand = ccb_path_join3(prefix, "lib/jvm/java-17-openjdk", "bin/java");
+    if (access(cand, X_OK) == 0) {
+      char *home = ccb_path_join(prefix, "lib/jvm/java-17-openjdk");
+      setenv("JAVA_HOME", home, 1);
+      free(home);
+    }
+    free(cand);
+    if (getenv("JAVA_HOME") != NULL) {
+      return;
+    }
+  }
+  const char *suffix = "/bin/java";
+  size_t plen = strlen(java_path);
+  size_t slen = strlen(suffix);
+  if (plen > slen && strcmp(java_path + plen - slen, suffix) == 0) {
+    char *home = ccb_xstrndup(java_path, plen - slen);
+    setenv("JAVA_HOME", home, 1);
+    free(home);
+  }
+}
+
+// ---------- setup: kotlinc install ----------
+
+// First executable kotlinc candidate for a home dir, mirroring the
+// resolver: bin/kotlinc, then <home>/kotlinc/bin/kotlinc. NULL when
+// the home is unset, not a dir, or holds no executable kotlinc.
+static char *ccb_setup_kotlinc_candidate(const char *home) {
+  if (home == NULL || !ccb_path_is_dir(home)) {
+    return NULL;
+  }
+  char *direct = ccb_path_join3(home, "bin", "kotlinc");
+  if (access(direct, X_OK) == 0) {
+    return direct;
+  }
+  free(direct);
+  char *nested_home = ccb_path_join(home, "kotlinc");
+  char *nested = ccb_path_join(nested_home, "bin/kotlinc");
+  free(nested_home);
+  if (access(nested, X_OK) == 0) {
+    return nested;
+  }
+  free(nested);
+  return NULL;
+}
+
+// Probe for a usable kotlinc 2.x in resolver order: [sdk] kotlin_home,
+// KOTLIN_HOME, PATH, <sdk-home>/kotlinc (the setup-installed one).
+// Returns 1 when usable, 0 when none found, -1 when one was found
+// but is not 2.x. On 1 and -1, *path_out holds its path (owned) and
+// *version_out its parsed version (owned, NULL when unparseable).
+static int ccb_setup_probe_kotlinc(const ccb_config *cfg, const char *sdk_home,
+    char **path_out, char **version_out) {
+  *path_out = NULL;
+  *version_out = NULL;
+  char *cand = ccb_setup_kotlinc_candidate(cfg != NULL ? cfg->kotlin_home : NULL);
+  if (cand == NULL) {
+    cand = ccb_setup_kotlinc_candidate(getenv("KOTLIN_HOME"));
+  }
+  if (cand == NULL) {
+    cand = ccb_sdk_find_on_path("kotlinc");
+  }
+  if (cand == NULL && sdk_home != NULL) {
+    char *home = ccb_path_join(sdk_home, "kotlinc");
+    char *bin = ccb_path_join(home, "bin/kotlinc");
+    free(home);
+    if (access(bin, X_OK) == 0) {
+      cand = bin;
+    } else {
+      free(bin);
+    }
+  }
+  if (cand == NULL) {
+    return 0;
+  }
+  char *argv[] = { cand, "-version", NULL };
+  ccb_proc_result r;
+  char *ver = NULL;
+  if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
+    ver = ccb_sdk_parse_kotlin_version(r.err);
+  }
+  ccb_proc_result_free(&r);
+  *path_out = cand;
+  *version_out = ver;
+  return ver != NULL && ver[0] == '2' ? 1 : -1;
+}
+
+// Download the official kotlinc compiler into <sdk-home>/kotlinc and
+// verify it runs and reports 2.x. CCB_KOTLIN_URL overrides the
+// download source (a custom URL skips the pinned checksum unless
+// CCB_KOTLIN_SHA256 is also set); CCB_KOTLIN_SHA256 overrides the
+// expected hash. Returns 0 on success, -1 on failure (error printed).
+static int ccb_setup_install_kotlinc(const char *sdk_home) {
+  const char *url = getenv("CCB_KOTLIN_URL");
+  int url_custom = url != NULL;
+  if (url == NULL) {
+    url = CCB_KOTLIN_URL;
+  }
+  const char *sha = getenv("CCB_KOTLIN_SHA256");
+  if (sha == NULL && !url_custom) {
+    sha = CCB_KOTLIN_SHA256;
+  }
+  fprintf(stderr, "kotlinc not found, downloading the official compiler (%s)...\n",
+    CCB_KOTLIN_VERSION);
+  char *tmp = ccb_path_join(sdk_home, "kotlin.zip");
+  if (ccb_download(url, tmp) != 0) {
+    fprintf(stderr, "error: download failed: %s\n", url);
+    free(tmp);
+    return -1;
+  }
+  if (sha != NULL) {
+    char hex[65];
+    if (ccb_sha256_file(tmp, hex) != CCB_OK || strcmp(hex, sha) != 0) {
+      fprintf(stderr, "error: downloaded kotlinc archive failed checksum verification\n");
+      remove(tmp);
+      free(tmp);
+      return -1;
+    }
+  } else {
+    fprintf(stderr, "note: checksum verification skipped for custom kotlinc URL\n");
+  }
+  char *unzip_dir = ccb_path_join(sdk_home, "kotlin-tmp");
+  ccb_remove_recursive(unzip_dir);
+  if (ccb_mkdir_p(unzip_dir) != CCB_OK) {
+    free(unzip_dir);
+    remove(tmp);
+    free(tmp);
+    return -1;
+  }
+  char *unzip = ccb_sdk_find_on_path("unzip");
+  char *unzip_argv[] = { unzip == NULL ? "unzip" : unzip, "-q", tmp, "-d", unzip_dir, NULL };
+  ccb_proc_result r;
+  int unzip_ok = unzip != NULL && ccb_proc_run(unzip_argv, NULL, NULL, &r) == CCB_OK && r.exit_code == 0;
+  ccb_proc_result_free(&r);
+  free(unzip);
+  remove(tmp);
+  free(tmp);
+  if (!unzip_ok) {
+    fprintf(stderr, "error: cannot unzip kotlinc archive (is `unzip` on PATH?)\n");
+    ccb_remove_recursive(unzip_dir);
+    free(unzip_dir);
+    return -1;
+  }
+  char *src = ccb_path_join(unzip_dir, "kotlinc");
+  char *dst = ccb_path_join(sdk_home, "kotlinc");
+  if (!ccb_path_is_dir(src)) {
+    fprintf(stderr, "error: kotlinc archive did not contain a kotlinc/ directory\n");
+    free(src);
+    free(dst);
+    ccb_remove_recursive(unzip_dir);
+    free(unzip_dir);
+    return -1;
+  }
+  ccb_remove_recursive(dst);
+  if (rename(src, dst) != 0) {
+    fprintf(stderr, "error: cannot install kotlinc into %s\n", dst);
+    free(src);
+    free(dst);
+    ccb_remove_recursive(unzip_dir);
+    free(unzip_dir);
+    return -1;
+  }
+  free(src);
+  ccb_remove_recursive(unzip_dir);
+  free(unzip_dir);
+  // The official zip preserves exec bits; make the entry point
+  // executable regardless so a mode-stripping unzip cannot break it.
+  char *bin = ccb_path_join(dst, "bin/kotlinc");
+  chmod(bin, 0755);
+  char *argv[] = { bin, "-version", NULL };
+  ccb_proc_result vr;
+  char *ver = NULL;
+  int ok = 0;
+  if (ccb_proc_run(argv, NULL, NULL, &vr) == CCB_OK) {
+    ver = ccb_sdk_parse_kotlin_version(vr.err);
+    ok = ver != NULL && ver[0] == '2';
+  }
+  ccb_proc_result_free(&vr);
+  if (!ok) {
+    fprintf(stderr, "error: installed kotlinc at %s failed verification\n", dst);
+    free(bin);
+    free(dst);
+    free(ver);
+    return -1;
+  }
+  fprintf(stderr, "kotlinc %s installed at %s\n", ver, dst);
+  free(bin);
+  free(dst);
+  free(ver);
+  return 0;
+}
+
 static int ccb_cmd_setup(ccb_args *a) {
-  // sdkmanager is a Java program: fail fast with a clear message when
-  // no usable JDK is present, instead of downloading cmdline-tools
-  // first and then failing at the sdkmanager step with a generic
-  // error (and a proxy note that does not apply).
+  // sdkmanager is a Java program. When no usable JDK is present, offer
+  // to install one (Termux pkg or the distro package manager) instead
+  // of failing at the sdkmanager step with a generic error.
   {
     char *java = NULL;
     int java_major = 0;
     if (ccb_sdk_find_java(&java, &java_major) != CCB_OK) {
-      fprintf(stderr,
-        "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
-        "Install a JDK and set JAVA_HOME, or put java 17+ on PATH.\n");
-      return 3;
+      ccb_jdkinst_info inst;
+      ccb_detect_jdkinst(&inst);
+      if (inst.kind == CCB_JDKINST_NONE) {
+        fprintf(stderr,
+          "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
+          "No supported package installer found (Termux pkg, apt-get, dnf, yum, pacman, zypper, apk).\n"
+          "Install a JDK 17+ manually and set JAVA_HOME, or put java 17+ on PATH.\n");
+        return 3;
+      }
+      int go = 0;
+      if (a->yes) {
+        go = 1;
+      } else if (isatty(STDIN_FILENO)) {
+        ccb_str q;
+        ccb_str_init(&q);
+        ccb_str_append(&q, "Java 17+ not found. Install OpenJDK 17 via ");
+        ccb_str_append(&q, inst.display);
+        ccb_str_append(&q, "?");
+        go = ccb_prompt_yes(q.buf);
+        ccb_str_free(&q);
+        if (!go) {
+          fprintf(stderr, "setup aborted: Java 17+ is required.\n");
+        }
+      } else {
+        fprintf(stderr,
+          "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
+          "Run `ccb setup` in a terminal to install OpenJDK 17 via %s, or pass --yes to install automatically.\n",
+          inst.display);
+      }
+      if (!go) {
+        free(inst.path);
+        free(inst.sudo_path);
+        return 3;
+      }
+      fprintf(stderr, "Installing OpenJDK 17 via %s...\n", inst.display);
+      int irc = ccb_install_jdk(&inst);
+      free(inst.path);
+      free(inst.sudo_path);
+      if (irc != 0) {
+        fprintf(stderr, "error: failed to install OpenJDK 17 via %s.\n", inst.display);
+        return 3;
+      }
+      if (ccb_sdk_find_java(&java, &java_major) != CCB_OK) {
+        fprintf(stderr,
+          "error: installed OpenJDK 17 via %s but java 17+ is still not found.\n"
+          "Set JAVA_HOME or put java 17+ on PATH, then run `ccb setup` again.\n",
+          inst.display);
+        return 3;
+      }
     }
+    ccb_configure_java_home(java);
     free(java);
   }
   ccb_diag_list diags;
@@ -623,6 +1023,38 @@ static int ccb_cmd_setup(ccb_args *a) {
       ccb_config_free(cfg);
       return 3;
     }
+  }
+  // Kotlin: when no usable kotlinc 2.x resolves, install the official
+  // compiler into the SDK home, where the resolver picks it up as a
+  // last resort (after [sdk] kotlin_home, KOTLIN_HOME, and PATH).
+  // Automatic, like the SDK component install: the destination is
+  // CCB's own directory, not a system package.
+  {
+    char *kpath = NULL;
+    char *kver = NULL;
+    int kprobe = ccb_setup_probe_kotlinc(cfg, sdk_home, &kpath, &kver);
+    if (kprobe == 1) {
+      fprintf(stderr, "kotlinc %s found at %s\n", kver, kpath);
+    } else {
+      if (kprobe == -1) {
+        fprintf(stderr,
+          "warning: found kotlinc %s at %s, which is not 2.x; installing %s into the SDK home.\n"
+          "Builds will keep picking the old one until it is removed or [sdk] kotlin_home / KOTLIN_HOME points at %s/kotlinc.\n",
+          kver != NULL ? kver : "unversioned", kpath, CCB_KOTLIN_VERSION, sdk_home);
+      }
+      if (ccb_setup_install_kotlinc(sdk_home) != 0) {
+        free(kpath);
+        free(kver);
+        ccb_str_free(&platform);
+        ccb_str_free(&bt);
+        free(sdkmanager);
+        free(default_home);
+        ccb_config_free(cfg);
+        return 3;
+      }
+    }
+    free(kpath);
+    free(kver);
   }
   printf("SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
   ccb_str_free(&platform);
@@ -2277,6 +2709,8 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
         a->dry_run = 1;
       } else if (strcmp(flag, "--explain") == 0) {
         a->explain = 1;
+      } else if (strcmp(flag, "--yes") == 0) {
+        a->yes = 1;
       } else if (strcmp(flag, "--config") == 0) {
         if (value == NULL) {
           if (i + 1 >= argc) {

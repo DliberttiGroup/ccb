@@ -38,6 +38,9 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
 void ccb_sdk_free(ccb_sdk *sdk);
 // Find an executable on PATH. Returns a malloc'd absolute path or NULL.
 char *ccb_sdk_find_on_path(const char *name);
+// Parse kotlinc -version stderr ("info: kotlinc-jvm 2.4.21 (JRE ...)").
+// Returns a malloc'd version string ("2.4.21") or NULL when unparseable.
+char *ccb_sdk_parse_kotlin_version(const char *text);
 // Resolve a usable java exactly the way ccb_sdk_resolve does:
 // $JAVA_HOME/bin/java, else java on PATH, with major version >= 17.
 // On success *out holds a malloc'd path and *major_out the major

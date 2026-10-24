@@ -14,7 +14,8 @@
 - SDK home: `[sdk] home` in `ccb.toml`, then `ANDROID_HOME`, then
   `ANDROID_SDK_ROOT`, then `~/Android/Sdk`.
 - Kotlin home: `[sdk] kotlin_home`, then `KOTLIN_HOME`, then `kotlinc`
-  on PATH. Both the distribution root (`…/kotlinc`) and its parent are
+  on PATH, then `<sdk-home>/kotlinc` (the setup-installed compiler,
+  last resort). Both the distribution root (`…/kotlinc`) and its parent are
   accepted: if `$KOTLIN_HOME/bin/kotlinc` is missing but
   `$KOTLIN_HOME/kotlinc/bin/kotlinc` exists, the nested layout is used.
 - Java: `$JAVA_HOME/bin/java`, then `java` on PATH.
@@ -25,8 +26,9 @@
 
 Installs the missing components for the current project (or the
 defaults: platform android-35, build-tools 35.0.0) via `sdkmanager`.
-Order: (1) fail fast when no JDK 17+ is available, with a message
-naming Java instead of a generic sdkmanager failure; (2) bootstrap
+Order: (1) when no JDK 17+ is available, offer to install one (see
+"Installing a missing JDK" below) instead of failing at the
+sdkmanager step with a generic error; (2) bootstrap
 `cmdline-tools` from Google's official archive
 (`commandlinetools-linux-11076708_latest.zip`), verified against a
 pinned SHA-256 before unzipping, when none are present; (3) accept
@@ -37,6 +39,66 @@ a fresh SDK) is reported as missing components, never as success.
 A config that was found but fails to load is an error, not a
 silent fallback to the default SDK home; defaults apply only when
 no `ccb.toml` exists at all.
+
+## Installing a missing JDK
+
+When `ccb setup` finds no JDK 17+, it installs OpenJDK 17 with the
+platform's package manager instead of stopping:
+
+- Termux: `pkg install -y openjdk-17` (detected via `$PREFIX/bin/pkg`).
+- Regular Linux: `apt-get` (Debian/Ubuntu, `openjdk-17-jdk`),
+  `dnf`/`yum` (`java-17-openjdk-devel`), `pacman`
+  (`jdk17-openjdk`), `zypper` (`java-17-openjdk-devel`), or `apk`
+  (`openjdk17`) — whichever is on PATH. When not running as root,
+  the command runs under `sudo` if available; without root or sudo
+  there is no usable installer and setup reports that.
+- Any other platform, or no installer found: setup prints a plain
+  manual-install message (install a JDK 17+, set `JAVA_HOME` or put
+  `java` on PATH) and exits 3.
+
+The install is interactive by default: on a TTY, setup asks
+"Install OpenJDK 17 via <installer>? [y/N]" and installs only on
+"y"/"yes"; any other answer aborts setup. Pass `--yes` to install
+without asking (for scripts and non-TTY runs). Without `--yes` and
+without a TTY, setup refuses to install unattended and tells you to
+run it in a terminal or pass `--yes`. After installing, setup
+re-resolves `java` and fails if it is still not found, so a package
+manager that reports success without delivering a usable JDK is not
+mistaken for success. When `JAVA_HOME` is unset, setup also points it
+at the resolved JDK for its own sdkmanager invocations (Termux's
+`$PREFIX/lib/jvm/java-17-openjdk` when present, else the `java`
+path's parent of `bin/`).
+
+Note: setup installs the JDK and the Android SDK, not kotlinc —
+kotlinc is still a manual install (or a future setup step), and
+`ccb doctor` keeps reporting it when missing.
+
+## Installing a missing kotlinc
+
+When `ccb setup` finds no usable kotlinc 2.x (missing, or an older
+one), it installs the official Kotlin compiler 2.4.21 into the SDK
+home (`<sdk-home>/kotlinc`), where the resolver picks it up as a
+last resort (after `[sdk] kotlin_home`, `KOTLIN_HOME`, and PATH).
+The install is automatic, like the SDK component install: the
+destination is CCB's own directory, not a system package, so there
+is no prompt and `--yes` is not needed for this step. The archive
+comes from JetBrains' official GitHub release
+(`kotlin-compiler-2.4.21.zip`) and is verified against a pinned
+SHA-256 before unzipping; after installing, setup runs the new
+`kotlinc -version` and fails if it does not report 2.x.
+
+When a non-2.x kotlinc is found (e.g. an old one on PATH), setup
+still installs 2.4.21 but warns that builds will keep picking the
+old one until it is removed or `[sdk] kotlin_home` / `KOTLIN_HOME`
+points at the SDK-home install — the SDK-home copy is last in
+resolution order and never shadows an explicit config, env, or PATH
+kotlinc.
+
+Overrides (mirrors, offline testing): `CCB_KOTLIN_URL` replaces the
+download source, and `CCB_KOTLIN_SHA256` replaces the expected
+hash. A custom URL without a custom hash skips checksum
+verification, with a notice — the pinned hash only applies to the
+official release. The install needs `unzip` on PATH.
 
 ## Known limitation: authenticated egress proxies
 
