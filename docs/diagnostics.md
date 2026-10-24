@@ -18,6 +18,8 @@ error).
 | CCB-E1007 | Wrong value type for a key |
 | CCB-E1008 | TOML parse error (with line number) |
 | CCB-E1009 | Config file not found |
+| CCB-E1010 | Module dependency cycle (names the cycle path, e.g. `a -> b -> a`) |
+| CCB-E1011 | Module depends on an unknown module (names the module and the dependency) |
 
 `ccb check` reports every config problem at once, not just the first.
 
@@ -60,6 +62,7 @@ error).
 | CCB-E3019 | Maven resolution failed: unresolvable coordinate, malformed or unsupported POM, or artifact not found in any configured repository |
 | CCB-E3020 | Maven checksum mismatch: downloaded or cached file does not match its published or recorded checksum |
 | CCB-E3021 | Maven artifact not in the local cache; run `ccb setup` to prefetch it (builds never download) |
+| CCB-E3022 | Library module name collides with a declared AAR's base name (their extraction paths would overwrite each other) |
 
 ## Preview (exit 1 unless noted)
 

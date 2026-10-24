@@ -293,7 +293,148 @@ void ccb_config_free(ccb_config *c) {
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
   ccb_free_str_array(c->ndk_sources, c->ndk_sources_count);
   ccb_free_str_array(c->ndk_cflags, c->ndk_cflags_count);
+  for (size_t i = 0; i < c->modules_count; i++) {
+    ccb_module *m = &c->modules[i];
+    free(m->name);
+    free(m->dir);
+    ccb_free_str_array(m->depends, m->depends_count);
+    free(m->manifest);
+    free(m->res);
+    free(m->assets);
+    free(m->kotlin_dir);
+    free(m->java_dir);
+    free(m->package);
+  }
+  free(c->modules);
   free(c);
+}
+
+// ---------- library modules ----------
+
+// Find a parsed module by name, or NULL.
+static ccb_module *ccb_find_module(ccb_config *c, const char *name) {
+  for (size_t i = 0; i < c->modules_count; i++) {
+    if (strcmp(c->modules[i].name, name) == 0) {
+      return &c->modules[i];
+    }
+  }
+  return NULL;
+}
+
+// Validate the module graph and reorder modules topologically
+// (dependencies first). An unknown dependency is CCB-E1011; a cycle is
+// CCB-E1010 naming the cycle path. Returns 1 when the graph is usable;
+// on failure the config still fails to load, so the order is left
+// as-is.
+static int ccb_sort_modules(ccb_validator *v, ccb_config *c) {
+  int ok = 1;
+  for (size_t i = 0; i < c->modules_count; i++) {
+    for (size_t j = 0; j < c->modules[i].depends_count; j++) {
+      if (ccb_find_module(c, c->modules[i].depends[j]) == NULL) {
+        ccb_vdiagf(v, "CCB-E1011", "module '%s' depends on unknown module '%s'",
+          c->modules[i].name, c->modules[i].depends[j]);
+        ok = 0;
+      }
+    }
+  }
+  if (!ok) {
+    return 0;
+  }
+  // Kahn-style placement: repeatedly place a module whose dependencies
+  // are all placed. Quadratic in the module count, which is tiny.
+  char *placed = ccb_xcalloc(c->modules_count == 0 ? 1 : c->modules_count, 1);
+  ccb_module *sorted = ccb_xmalloc(
+    (c->modules_count == 0 ? 1 : c->modules_count) * sizeof(*sorted));
+  size_t nsorted = 0;
+  while (nsorted < c->modules_count) {
+    int progress = 0;
+    for (size_t i = 0; i < c->modules_count; i++) {
+      if (placed[i]) {
+        continue;
+      }
+      int ready = 1;
+      for (size_t j = 0; j < c->modules[i].depends_count; j++) {
+        ccb_module *d = ccb_find_module(c, c->modules[i].depends[j]);
+        size_t di = (size_t)(d - c->modules);
+        if (!placed[di]) {
+          ready = 0;
+          break;
+        }
+      }
+      if (ready) {
+        sorted[nsorted++] = c->modules[i];
+        placed[i] = 1;
+        progress = 1;
+      }
+    }
+    if (!progress) {
+      break;
+    }
+  }
+  if (nsorted < c->modules_count) {
+    // Stuck: the unplaced modules contain a cycle. Walk from the first
+    // unplaced module through unplaced dependencies until a module
+    // repeats; that repeat closes the cycle path.
+    size_t start = 0;
+    while (placed[start]) {
+      start++;
+    }
+    size_t *path = ccb_xmalloc((c->modules_count + 1) * sizeof(*path));
+    size_t npath = 0;
+    size_t cur = start;
+    size_t close_at = 0;
+    int found = 0;
+    while (!found) {
+      path[npath++] = cur;
+      size_t next = c->modules_count;
+      for (size_t j = 0; j < c->modules[cur].depends_count; j++) {
+        ccb_module *d = ccb_find_module(c, c->modules[cur].depends[j]);
+        size_t di = (size_t)(d - c->modules);
+        if (!placed[di]) {
+          next = di;
+          break;
+        }
+      }
+      // An unplaced module always has an unplaced dependency, else it
+      // would have been placed; the walk must repeat within the set.
+      // The guard keeps a future edit from turning this into an
+      // out-of-bounds read: without a next step, report the path.
+      if (next == c->modules_count) {
+        close_at = 0;
+        found = 1;
+        break;
+      }
+      for (size_t k = 0; k < npath; k++) {
+        if (path[k] == next) {
+          close_at = k;
+          found = 1;
+          break;
+        }
+      }
+      cur = next;
+    }
+    ccb_str msg;
+    ccb_str_init(&msg);
+    ccb_str_append(&msg, "module dependency cycle: ");
+    for (size_t k = close_at; k < npath; k++) {
+      if (k > close_at) {
+        ccb_str_append(&msg, " -> ");
+      }
+      ccb_str_append(&msg, c->modules[path[k]].name);
+    }
+    ccb_str_append(&msg, " -> ");
+    ccb_str_append(&msg, c->modules[path[close_at]].name);
+    ccb_vdiag(v, "CCB-E1010", msg.buf);
+    ccb_str_free(&msg);
+    free(path);
+    free(sorted);
+    free(placed);
+    return 0;
+  }
+  memcpy(c->modules, sorted, c->modules_count * sizeof(*sorted));
+  free(sorted);
+  free(placed);
+  return 1;
 }
 
 ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_config **out, ccb_diag_list *diags) {
@@ -745,6 +886,132 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
         }
       }
     }
+  }
+
+  // [modules.<name>] library modules. The standard layout under
+  // <dir> mirrors [paths]: src/main/AndroidManifest.xml (required),
+  // src/main/res, src/main/assets, src/main/kotlin, src/main/java
+  // (each optional; absent means the module has no such input).
+  {
+    static const char *module_keys[] = { "dir", "depends" };
+    for (size_t ti = 0; ti < doc->count; ti++) {
+      const char *tname = doc->tables[ti].name;
+      if (strcmp(tname, "modules") == 0) {
+        ccb_vdiagf(&v, "CCB-E1001", "unknown table '[%s]'", tname, "");
+        continue;
+      }
+      if (strncmp(tname, "modules.", 8) != 0) {
+        continue;
+      }
+      const char *mod_name = tname + 8;
+      if (mod_name[0] == '\0' || strchr(mod_name, '.') != NULL) {
+        ccb_vdiagf(&v, "CCB-E1001", "unknown table '[%s]'", tname, "");
+        continue;
+      }
+      if (strchr(mod_name, '/') != NULL || strchr(mod_name, '\\') != NULL ||
+          strcmp(mod_name, ".") == 0 || strcmp(mod_name, "..") == 0) {
+        ccb_vdiagf(&v, "CCB-E1005", "invalid module name '%s'", mod_name, "");
+        continue;
+      }
+      if (ccb_find_module(c, mod_name) != NULL) {
+        ccb_vdiagf(&v, "CCB-E1005", "duplicate module '%s'", mod_name, "");
+        continue;
+      }
+      ccb_check_unknown_keys(&v, tname, module_keys, 2);
+      size_t mi = c->modules_count++;
+      c->modules = ccb_xrealloc(c->modules,
+        c->modules_count * sizeof(*c->modules));
+      ccb_module *m = &c->modules[mi];
+      memset(m, 0, sizeof(*m));
+      m->name = ccb_xstrdup(mod_name);
+      char *dir = NULL;
+      if (!ccb_get_str(&v, tname, "dir", &dir)) {
+        if (!ccb_key_present(doc, tname, "dir")) {
+          ccb_vdiagf(&v, "CCB-E1004", "missing required key '%s.dir'", tname, "");
+        }
+      } else {
+        m->dir = ccb_resolve(c->project_root, dir);
+        free(dir);
+      }
+      ccb_get_str_array(&v, tname, "depends", &m->depends,
+        &m->depends_count);
+      if (m->dir != NULL) {
+        if (!ccb_path_is_dir(m->dir)) {
+          ccb_vdiagf(&v, "CCB-E1006", "module directory does not exist: %s",
+            m->dir, "");
+        } else {
+          m->manifest = ccb_path_join3(m->dir, "src/main",
+            "AndroidManifest.xml");
+          if (!ccb_path_exists(m->manifest) || ccb_path_is_dir(m->manifest)) {
+            ccb_vdiagf(&v, "CCB-E1006", "module manifest does not exist: %s",
+              m->manifest, "");
+          } else {
+            // Package from the manifest (same text search the app
+            // manifest check and the AAR scan use).
+            char *text = NULL;
+            size_t len = 0;
+            if (ccb_read_file(m->manifest, &text, &len) == CCB_OK) {
+              const char *pk = strstr(text, "package=\"");
+              if (pk != NULL) {
+                pk += 9;
+                const char *end = strchr(pk, '"');
+                if (end != NULL) {
+                  m->package = ccb_xstrndup(pk, (size_t)(end - pk));
+                }
+              }
+              free(text);
+            }
+            if (m->package == NULL || m->package[0] == '\0') {
+              ccb_vdiagf(&v, "CCB-E1005",
+                "module '%s' manifest must declare a package attribute",
+                mod_name, "");
+            } else if (c->package != NULL &&
+                strcmp(m->package, c->package) == 0) {
+              ccb_vdiagf(&v, "CCB-E1005",
+                "module '%s' package must differ from the app package",
+                mod_name, "");
+            } else {
+              for (size_t k = 0; k < mi; k++) {
+                if (c->modules[k].package != NULL &&
+                    strcmp(c->modules[k].package, m->package) == 0) {
+                  ccb_vdiagf(&v, "CCB-E1005",
+                    "modules '%s' and '%s' share a package",
+                    c->modules[k].name, mod_name);
+                  break;
+                }
+              }
+            }
+          }
+          // Optional standard-layout inputs: present only when the
+          // directory exists on disk.
+          char *p = ccb_path_join3(m->dir, "src/main", "res");
+          if (ccb_path_is_dir(p)) {
+            m->res = p;
+          } else {
+            free(p);
+          }
+          p = ccb_path_join3(m->dir, "src/main", "assets");
+          if (ccb_path_is_dir(p)) {
+            m->assets = p;
+          } else {
+            free(p);
+          }
+          p = ccb_path_join3(m->dir, "src/main", "kotlin");
+          if (ccb_path_is_dir(p)) {
+            m->kotlin_dir = p;
+          } else {
+            free(p);
+          }
+          p = ccb_path_join3(m->dir, "src/main", "java");
+          if (ccb_path_is_dir(p)) {
+            m->java_dir = p;
+          } else {
+            free(p);
+          }
+        }
+      }
+    }
+    ccb_sort_modules(&v, c);
   }
 
   // Path existence checks (only when no earlier error already explains

@@ -68,8 +68,9 @@ Gradle is the wrong tool for small, agent-driven Android work:
 
 ## 3. Non-goals (v1)
 
-- Not a Gradle replacement for large multi-module apps. Single app module
-  only in v1.
+- Not a Gradle replacement for large multi-module apps. One app
+  module; library modules are supported (see §4.3). Dynamic feature
+  modules remain out of scope.
 - No Gradle dependency resolution. Dependencies are local files or Maven
   coordinates declared in TOML (see §5.4); Gradle itself (daemon, build
   scripts, plugins) is out of scope.
@@ -190,6 +191,40 @@ c_sources = ["app/src/main/cpp/native.c"]
   source (`config`, `env`, or `default`) for both tools, and the
   effective paths participate in the cache fingerprints, so switching
   tools invalidates the affected stages.
+
+### 4.3 Library modules
+
+A project may declare library modules as `[modules.<name>]` tables
+in the root `ccb.toml` (full rules in `docs/modules.md`):
+
+```toml
+[modules.base]
+dir = "libbase"
+
+[modules.core]
+dir = "libcore"
+depends = ["base"]
+```
+
+- `dir` (required): the module root. Standard layout under it:
+  `src/main/AndroidManifest.xml` (required), `src/main/res`,
+  `src/main/assets`, `src/main/kotlin`, `src/main/java` (each
+  optional).
+- `depends` (optional): other module names. Modules build in
+  topological order, dependencies first; a cycle is a hard error
+  naming the cycle (`CCB-E1010`), an unknown dependency is a hard
+  error naming it (`CCB-E1011`).
+- Each module builds into an intermediate AAR consumed through the
+  existing dependency machinery (§5.4, §5.2): manifest merges,
+  res merges at link, classes dex, assets package. The app module is
+  the only APK/AAB output.
+- A module manifest must declare a package different from the app
+  package and from every other module's package.
+- Library R fields are non-final (the module link generates R.java,
+  CCB de-finalizes it, the app link assigns final IDs), so library
+  code may reference its own and its dependencies' R classes.
+- Module outputs participate in app fingerprints: changing a library
+  rebuilds the app (see §5.11).
 
 ## 5. Build pipeline
 
@@ -356,6 +391,44 @@ pipeline; APK stays the default. The bundle reuses every stage it can:
 - Out of scope: split APK generation (use `bundletool build-apks`),
   asset packs, dynamic feature modules, Play signing key upload.
   `ccb install` / `ccb run` remain APK-only.
+
+### 5.11 Library modules
+
+Between the deps step and the manifest merge, CCB builds each
+declared library module (§4.3) in topological order into an
+intermediate AAR (`build/intermediates/modules/<name>/<name>.aar`):
+`classes.jar` (when the module has Kotlin/Java sources), the module
+manifest, raw `res/` and `assets/` trees. The module AARs join the
+declared AARs in the merge list (declared first, then modules in
+topological order), so every later stage treats them as local AARs:
+manifest merge (§5.2), res compile/link (§5.2), compile classpath
+(§5.3), dex inputs (§5.5), assets (§5.7).
+
+- Module resources compile (`aapt2 compile`) and link (`aapt2 link`
+  against the module manifest) to generate R.java for the module
+  package, but only when the module has code that can reference R;
+  a resources-only module skips the link. Generated R fields are
+  de-finalized before compiling, so they resolve at runtime against
+  the app's R class (see `docs/modules.md`).
+- Module `classes.jar` excludes generated R classes: the app link
+  generates the real R class for the module package, and shipping
+  both would make d8 reject the duplicate.
+- Module fingerprints cover tool versions, module inputs, declared
+  deps, and upstream module outputs (AAR + generated R.java), so a
+  changed library rebuilds its dependents. App fingerprints cover
+  module outputs: the compile-code fingerprint hashes classpath jar
+  contents (not just paths), the dex fingerprint hashes classes
+  jars, and res/manifest inputs flow through their own fingerprints.
+  A comment-only library change rebuilds only that module: identical
+  class bytes mean an identical AAR hash, so dependents skip.
+- Planning modes (`--explain`, `--dry-run`) never execute module
+  builds; the merge step reads module manifests from their source
+  files (the AAR manifest is a copy), and dex/package fingerprints
+  skip intermediates that do not exist yet, so planning works on a
+  fresh tree.
+- Out of scope: per-module deps/NDK/signing, dynamic feature
+  modules, Maven publishing, cross-module resource namespacing
+  beyond what aapt2 already does.
 
 ## 6. Agent-oriented interface (the distinctive part)
 
@@ -870,8 +943,11 @@ crashes on input it does not understand, and never silently guesses.
 4. **Manifest merging?** Implemented: the AAR manifest merge subset
    (components, permissions, features; app-wins conflicts) — see §5.2.
 5. **Windows?** v2 platform, or Linux/macOS only by design?
-6. **Multi-module?** Stay single-module, or support library modules
-   (each with its own `ccb.toml`) in v2?
+6. **Multi-module?** Implemented: library modules via
+   `[modules.<name>]` tables (standard `src/main` layout,
+   topological build into intermediate AARs consumed through the
+   existing deps + manifest-merge machinery) — see §4.3, §5.11, and
+   `docs/modules.md`. Dynamic feature modules stay out of scope.
 7. **Name expansion.** "Custom C Builder" is a placeholder. Keep CCB as
    a bare name, or pick a real expansion?
 8. **Preview scope.** Extend preview to Android XML layouts and/or

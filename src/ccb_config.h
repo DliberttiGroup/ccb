@@ -7,6 +7,22 @@
 #include "ccb_common.h"
 #include "ccb_diag.h"
 
+// A library module: [modules.<name>] in ccb.toml. After load the
+// modules array is in topological order (dependencies first).
+typedef struct {
+  char *name;
+  char *dir; // absolute module root
+  char **depends;
+  size_t depends_count;
+  // Standard-layout paths under dir (NULL when absent on disk).
+  char *manifest; // <dir>/src/main/AndroidManifest.xml (required)
+  char *res; // <dir>/src/main/res
+  char *assets; // <dir>/src/main/assets
+  char *kotlin_dir; // <dir>/src/main/kotlin
+  char *java_dir; // <dir>/src/main/java
+  char *package; // from the module manifest (required)
+} ccb_module;
+
 typedef struct {
   // Meta.
   char *config_path;
@@ -90,6 +106,10 @@ typedef struct {
   char **preview_binding_keys;
   char **preview_binding_values;
   size_t preview_binding_count;
+  // [modules.<name>] library modules, in topological order
+  // (dependencies first). Empty when the project is single-module.
+  ccb_module *modules;
+  size_t modules_count;
 } ccb_config;
 
 // Search upward from start_dir for ccb.toml. When explicit is non-NULL it
