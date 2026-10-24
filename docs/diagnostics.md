@@ -63,6 +63,7 @@ error).
 | CCB-E3020 | Maven checksum mismatch: downloaded or cached file does not match its published or recorded checksum |
 | CCB-E3021 | Maven artifact not in the local cache; run `ccb setup` to prefetch it (builds never download) |
 | CCB-E3022 | Library module name collides with a declared AAR's base name (their extraction paths would overwrite each other) |
+| CCB-E3023 | Maven lockfile mismatch: the resolved tree deviates from `ccb.lock` (version, packaging, hash, missing, or stale entry), or the lockfile is malformed; run `ccb setup` to regenerate it |
 
 ## Preview (exit 1 unless noted)
 

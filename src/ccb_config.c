@@ -218,6 +218,63 @@ static int ccb_config_maven_coord_ok(const char *s) {
   return 1;
 }
 
+// One field of a maven_exclude entry: non-empty, no path-unsafe
+// characters, never "." or ".." (same rules as coordinate fields).
+static int ccb_config_maven_excl_part_ok(const char *s, size_t n) {
+  if (n == 0) {
+    return 0;
+  }
+  for (size_t k = 0; k < n; k++) {
+    char ch = s[k];
+    if (ch <= ' ' || ch == '/' || ch == '\\' || ch == ':' || ch == 0x7f) {
+      return 0;
+    }
+  }
+  if ((n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.')) {
+    return 0;
+  }
+  return 1;
+}
+
+// Validate a maven_exclude entry: "group:artifact" or
+// "group:artifact:version", every field passing the part rules.
+static int ccb_config_maven_exclude_ok(const char *s) {
+  const char *c1 = strchr(s, ':');
+  const char *c2 = c1 != NULL ? strchr(c1 + 1, ':') : NULL;
+  if (c1 == NULL) {
+    return 0;
+  }
+  if (c2 != NULL && strchr(c2 + 1, ':') != NULL) {
+    return 0;
+  }
+  if (!ccb_config_maven_excl_part_ok(s, (size_t)(c1 - s)) ||
+      !ccb_config_maven_excl_part_ok(c1 + 1, c2 != NULL ?
+        (size_t)(c2 - (c1 + 1)) : strlen(c1 + 1))) {
+    return 0;
+  }
+  if (c2 != NULL && !ccb_config_maven_excl_part_ok(c2 + 1, strlen(c2 + 1))) {
+    return 0;
+  }
+  return 1;
+}
+
+// Split a "group:artifact" or "group:artifact:version" string into
+// its group and artifact fields (no allocation; views into s).
+// Returns 0 when there is no ':' or either field is empty.
+static int ccb_config_maven_ga(const char *s, const char **g, size_t *glen,
+    const char **a, size_t *alen) {
+  const char *c1 = strchr(s, ':');
+  if (c1 == NULL) {
+    return 0;
+  }
+  const char *c2 = strchr(c1 + 1, ':');
+  *g = s;
+  *glen = (size_t)(c1 - s);
+  *a = c1 + 1;
+  *alen = c2 != NULL ? (size_t)(c2 - (c1 + 1)) : strlen(c1 + 1);
+  return *glen > 0 && *alen > 0;
+}
+
 static int ccb_key_present(const ccb_toml_doc *doc, const char *table_name, const char *key) {
   const ccb_toml_table *t = ccb_toml_find_table(doc, table_name);
   return ccb_toml_find_value(t, key) != NULL;
@@ -290,6 +347,7 @@ void ccb_config_free(ccb_config *c) {
   ccb_free_str_array(c->jars, c->jars_count);
   ccb_free_str_array(c->aars, c->aars_count);
   ccb_free_str_array(c->maven, c->maven_count);
+  ccb_free_str_array(c->maven_exclude, c->maven_exclude_count);
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
   ccb_free_str_array(c->ndk_sources, c->ndk_sources_count);
   ccb_free_str_array(c->ndk_cflags, c->ndk_cflags_count);
@@ -431,7 +489,9 @@ static int ccb_sort_modules(ccb_validator *v, ccb_config *c) {
     free(placed);
     return 0;
   }
-  memcpy(c->modules, sorted, c->modules_count * sizeof(*sorted));
+  if (c->modules_count > 0) {
+    memcpy(c->modules, sorted, c->modules_count * sizeof(*sorted));
+  }
   free(sorted);
   free(placed);
   return 1;
@@ -487,7 +547,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     static const char *debug_keys[] = { "store", "alias" };
     static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
     static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules" };
-    static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central" };
+    static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central", "maven_exclude" };
     static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
     static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
     ccb_check_unknown_keys(&v, "", root_keys, 1);
@@ -497,7 +557,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     ccb_check_unknown_keys(&v, "signing.debug", debug_keys, 2);
     ccb_check_unknown_keys(&v, "signing.release", release_keys, 4);
     ccb_check_unknown_keys(&v, "build", build_keys, 5);
-    ccb_check_unknown_keys(&v, "deps", deps_keys, 4);
+    ccb_check_unknown_keys(&v, "deps", deps_keys, 5);
     ccb_check_unknown_keys(&v, "ndk", ndk_keys, 3);
     ccb_check_unknown_keys(&v, "preview", preview_keys, 9);
   }
@@ -764,11 +824,61 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   ccb_get_str_array(&v, "deps", "aars", &c->aars, &c->aars_count);
   ccb_get_str_array(&v, "deps", "maven", &c->maven, &c->maven_count);
   ccb_get_bool(&v, "deps", "maven_central", &c->maven_central);
+  ccb_get_str_array(&v, "deps", "maven_exclude", &c->maven_exclude,
+    &c->maven_exclude_count);
   for (size_t i = 0; i < c->maven_count; i++) {
     if (!ccb_config_maven_coord_ok(c->maven[i])) {
       ccb_vdiagf(&v, "CCB-E1005",
         "maven coordinate '%s' must be 'group:artifact:version' with an exact version (no ranges, LATEST, RELEASE, or -SNAPSHOT)",
         c->maven[i], "");
+    }
+  }
+  for (size_t i = 0; i < c->maven_exclude_count; i++) {
+    const char *ex = c->maven_exclude[i];
+    if (!ccb_config_maven_exclude_ok(ex)) {
+      ccb_vdiagf(&v, "CCB-E1005",
+        "maven_exclude '%s' must be 'group:artifact' or 'group:artifact:version'",
+        ex, "");
+      continue;
+    }
+    // Excluding a direct dependency is a config error: the exclusion
+    // would remove something the project explicitly declares. An
+    // unversioned exclusion matches every version; a versioned one
+    // matches only that exact version, so excluding some other version
+    // of a direct dependency is allowed.
+    const char *eg = NULL;
+    const char *ea = NULL;
+    size_t eglen = 0;
+    size_t ealen = 0;
+    if (!ccb_config_maven_ga(ex, &eg, &eglen, &ea, &ealen)) {
+      continue;
+    }
+    const char *ec2 = strchr(ea, ':');
+    const char *ev = ec2 != NULL ? ec2 + 1 : NULL;
+    size_t evlen = ec2 != NULL ? strlen(ec2 + 1) : 0;
+    for (size_t j = 0; j < c->maven_count; j++) {
+      const char *dg = NULL;
+      const char *da = NULL;
+      size_t dglen = 0;
+      size_t dalen = 0;
+      if (!ccb_config_maven_ga(c->maven[j], &dg, &dglen, &da, &dalen)) {
+        continue;
+      }
+      if (dglen != eglen || dalen != ealen || memcmp(dg, eg, dglen) != 0 ||
+          memcmp(da, ea, dalen) != 0) {
+        continue;
+      }
+      if (ev != NULL) {
+        const char *dc2 = strchr(c->maven[j], ':');
+        const char *dc3 = dc2 != NULL ? strchr(dc2 + 1, ':') : NULL;
+        if (dc3 == NULL || strlen(dc3 + 1) != evlen ||
+            memcmp(dc3 + 1, ev, evlen) != 0) {
+          continue;
+        }
+      }
+      ccb_vdiagf(&v, "CCB-E1005",
+        "maven_exclude '%s' matches direct dependency '%s'; remove one of them",
+        ex, c->maven[j]);
     }
   }
   for (size_t i = 0; i < c->jars_count; i++) {

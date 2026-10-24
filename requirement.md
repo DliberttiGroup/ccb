@@ -300,9 +300,14 @@ version.
   (`~/.cache/ccb/maven2`), and the resolved AARs/JARs feed this stage
   exactly like local files. Exact versions only; packaging comes from
   the POM; transitive resolution is breadth-first nearest-wins over
-  compile + runtime scopes. `ccb setup` prefetches the cache (it is
-  the only command allowed network access); builds and `ccb check`
-  resolve cache-only and fail with `CCB-E3021` on a miss. Full rules
+  compile + runtime scopes. `[deps] maven_exclude` suppresses
+  artifacts (`group:artifact` for every version, or
+  `group:artifact:version` for one version), checked before
+  nearest-wins; excluding a direct dependency is a config error.
+  `ccb setup` prefetches the cache and writes the resolved tree to
+  `ccb.lock` in the project root; builds and `ccb check` resolve
+  cache-only, fail with `CCB-E3021` on a miss, and fail with
+  `CCB-E3023` on any deviation from a present lockfile. Full rules
   in `docs/maven.md`.
 
 ### 5.5 Stage 4 — Dex (`d8`, or `r8` for release)
@@ -936,8 +941,9 @@ crashes on input it does not understand, and never silently guesses.
 2. **Remote dependencies?** Implemented: a minimal Maven resolver
    (Google Maven + opt-in Central, exact versions, POM packaging,
    transitive nearest-wins, checksum-verified cache, setup-time
-   prefetch, cache-only builds) — see §5.4 and `docs/maven.md`. A
-   lockfile remains a v2 follow-up.
+   prefetch, cache-only builds) — see §5.4 and `docs/maven.md`.
+   Follow-ups implemented: dependency exclusions (`maven_exclude`)
+   and a `ccb.lock` lockfile (setup writes, check/build enforce).
 3. **Compose?** Add the Compose compiler plugin path in v2, or declare
    Compose out of scope?
 4. **Manifest merging?** Implemented: the AAR manifest merge subset

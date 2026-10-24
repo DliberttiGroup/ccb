@@ -16,11 +16,18 @@
 // -SNAPSHOT — rejected at config load); Google Maven by default,
 // Maven Central only when `[deps] maven_central = true`; transitive
 // resolution over compile + runtime scopes (test/provided/optional
-// skipped), nearest-wins on version conflict, cycle-safe. Checksums:
-// a published .sha256 (else .sha1) is verified on download and a
-// mismatch fails with CCB-E3020; when a repo publishes no checksum,
-// the computed SHA-256 is recorded in a `.ccb-sha256` sidecar next to
-// the cached file and verified on later cache hits.
+// skipped), nearest-wins on version conflict, cycle-safe. Exclusions
+// (`[deps] maven_exclude`, "group:artifact" or
+// "group:artifact:version") suppress an artifact wherever it is
+// reached, checked before nearest-wins; excluding a direct
+// dependency is a config error. Checksums: a published .sha256 (else
+// .sha1) is verified on download and a mismatch fails with
+// CCB-E3020; when a repo publishes no checksum, the computed SHA-256
+// is recorded in a `.ccb-sha256` sidecar next to the cached file and
+// verified on later cache hits. Lockfile: `ccb setup` writes the
+// resolved tree to `ccb.lock` in the project root; cache-only
+// resolution enforces it when present, failing with CCB-E3023 on any
+// version, packaging, hash, or set mismatch.
 #ifndef CCB_MAVEN_H
 #define CCB_MAVEN_H
 
@@ -31,15 +38,34 @@
 // Resolved artifacts. All paths are malloc'd cache paths owned by the
 // struct; free with ccb_maven_result_free. Order is deterministic:
 // direct dependencies in declared order, then transitive dependencies
-// level by level (BFS).
+// level by level (BFS). entries carries the same tree with
+// coordinates, packaging, and hashes for the lockfile; aars/jars are
+// the cache paths the deps step consumes.
+typedef struct {
+  char *group;
+  char *artifact;
+  char *version;
+  char *packaging; // "aar", "jar", or "pom" (pom has no artifact file)
+  char *sha256; // hex of the artifact file, or of the POM for pom
+  char *path; // cache path of the artifact, or of the POM for pom
+} ccb_maven_entry;
+
 typedef struct {
   char **aars;
   size_t aars_count;
   char **jars;
   size_t jars_count;
+  ccb_maven_entry *entries;
+  size_t entries_count;
 } ccb_maven_result;
 
 void ccb_maven_result_free(ccb_maven_result *r);
+
+// Free a standalone entries array (its strings and the array itself).
+// Callers that take ownership of the aars/jars paths instead of
+// freeing the whole result use this for the entries they do not
+// consume.
+void ccb_maven_entries_free(ccb_maven_entry *entries, size_t count);
 
 // Parse a `group:artifact:version` coordinate. Returns 1 and fills
 // malloc'd *group, *artifact, *version on success; returns 0 without
@@ -63,5 +89,14 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
 // custom cache locations). NULL when no base is available; the
 // caller frees the result.
 char *ccb_maven_cache_dir(void);
+
+// Write the resolved tree as ccb.lock in the project root, one
+// coordinate per line sorted by group:artifact, with packaging and
+// artifact hash. Called by `ccb setup` after a successful prefetch;
+// `ccb check` and `ccb build` enforce the file when it exists (see
+// ccb_maven_resolve). Fails with a diagnostic when there is no
+// project root or the file cannot be written.
+ccb_status ccb_maven_write_lockfile(const ccb_config *cfg,
+  const ccb_maven_result *r, ccb_diag_list *diags);
 
 #endif

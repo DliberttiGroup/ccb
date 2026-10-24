@@ -81,6 +81,12 @@ typedef struct {
   char **maven;
   size_t maven_count;
   int maven_central; // [deps] maven_central: also search Maven Central
+  // [deps] maven_exclude: "group:artifact" (every version) or
+  // "group:artifact:version" (that version only). An excluded artifact
+  // never resolves, even transitively; excluding a direct dependency
+  // is a config error at load.
+  char **maven_exclude;
+  size_t maven_exclude_count;
   // [ndk]
   int has_ndk;
   char **ndk_abis;

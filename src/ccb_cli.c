@@ -1735,6 +1735,21 @@ static int ccb_cmd_setup(ccb_args *a) {
     }
     fprintf(stderr, "maven: prefetched %zu artifacts (%zu aar, %zu jar)\n",
       mv.aars_count + mv.jars_count, mv.aars_count, mv.jars_count);
+    // The lockfile records exactly what was prefetched; builds and
+    // checks enforce it from here on. A lockfile that cannot be
+    // written fails setup: a half-ready project must not read "ready".
+    if (ccb_maven_write_lockfile(cfg, &mv, &diags) != CCB_OK) {
+      ccb_print_diags(a, &diags);
+      ccb_diag_list_free(&diags);
+      ccb_maven_result_free(&mv);
+      ccb_str_free(&platform);
+      ccb_str_free(&bt);
+      free(sdkmanager);
+      free(default_home);
+      ccb_config_free(cfg);
+      return 3;
+    }
+    fprintf(stderr, "maven: lockfile written to ccb.lock\n");
     ccb_maven_result_free(&mv);
   }
   ccb_setup_final_pass(cfg, compile_sdk, build_tools);
@@ -1881,7 +1896,18 @@ static int ccb_cmd_check(ccb_args *a) {
     ccb_json_escape(&s, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
     ccb_str_append(&s, ",\"kotlin\":");
     ccb_json_escape(&s, sdk->kotlin_version);
-    ccb_str_appendf(&s, ",\"java\":%d}", sdk->java_major);
+    ccb_str_appendf(&s, ",\"java\":%d", sdk->java_major);
+    if (have_maven && cfg->maven_exclude_count > 0) {
+      ccb_str_append(&s, ",\"maven_excluded\":[");
+      for (size_t i = 0; i < cfg->maven_exclude_count; i++) {
+        if (i > 0) {
+          ccb_str_append_c(&s, ',');
+        }
+        ccb_json_escape(&s, cfg->maven_exclude[i]);
+      }
+      ccb_str_append_c(&s, ']');
+    }
+    ccb_str_append_c(&s, '}');
     printf("%s\n", s.buf);
     ccb_str_free(&s);
   } else {
@@ -1897,6 +1923,16 @@ static int ccb_cmd_check(ccb_args *a) {
     if (have_maven) {
       printf("  maven: %zu artifacts (%zu aar, %zu jar)\n",
         mv_aars + mv_jars, mv_aars, mv_jars);
+    }
+    if (have_maven && cfg->maven_exclude_count > 0) {
+      printf("  maven: excluded ");
+      for (size_t i = 0; i < cfg->maven_exclude_count; i++) {
+        if (i > 0) {
+          printf(", ");
+        }
+        printf("%s", cfg->maven_exclude[i]);
+      }
+      printf("\n");
     }
   }
   ccb_sdk_free(sdk);

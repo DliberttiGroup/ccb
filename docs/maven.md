@@ -24,6 +24,12 @@ maven_central = true
   alongside `maven`.
 - `maven_central`: when `true`, Maven Central is searched after
   Google Maven. Default `false`: Google Maven only.
+- `maven_exclude`: an array of exclusions, each `group:artifact`
+  (every version) or `group:artifact:version` (that version only).
+  An excluded artifact never resolves, even transitively. Excluding
+  a direct dependency is a config error at load with `CCB-E1005`
+  naming both the exclusion and the dependency; excluding some other
+  version of a direct dependency is allowed.
 
 ## Repositories
 
@@ -79,10 +85,13 @@ Direct and transitive dependencies resolve from POM
   is never fetched: a POM whose coordinates depend on a fetched
   parent (or on `dependencyManagement` from a parent) fails with
   `CCB-E3019`.
-- Exclusions are ignored in v1: an excluded transitive dependency
-  still resolves. If an exclusion matters to a build, declare the
-  conflict away by pinning the version directly (nearest-wins makes
-  the direct declaration win).
+- Exclusions (`[deps] maven_exclude`) are checked before
+  nearest-wins: an excluded artifact never enters the seen set, so
+  an excluded version can never win, and another version of the same
+  artifact from a later path can win instead. The excluded artifact's
+  own transitive dependencies are pruned with it: they are never
+  queued. With `--verbose`, each skipped exclusion prints as
+  `maven: <g:a:v>: excluded, skipping`.
 - Profiles are ignored entirely: neither profile properties nor
   profile dependencies resolve. A POM that only declares a dependency
   inside a profile behaves as if it had no such dependency.
@@ -135,7 +144,36 @@ download cache:
   just means running `ccb setup` again.
 
 `ccb check` reports the resolved set on success:
-`maven: N artifacts (A aar, J jar)`.
+`maven: N artifacts (A aar, J jar)`. When exclusions are configured,
+check also reports them: `maven: excluded <g:a>, ...` (and a
+`maven_excluded` array in `--json` output).
+
+## Lockfile (`ccb.lock`)
+
+`ccb setup` writes the fully resolved tree to `ccb.lock` in the
+project root after a successful prefetch, and `ccb check` and
+`ccb build` enforce it whenever it is present:
+
+- Format: one coordinate per line, sorted by `group:artifact`,
+  with packaging and the artifact's SHA-256:
+  `com.example:lib:1.0 aar <sha256>`. Comment lines (`#`) are
+  ignored. For `pom` packaging (no artifact file) the recorded hash
+  is the POM's hash, so a changed BOM still fails enforcement.
+- Enforcement is exact: a resolved version, packaging, or hash that
+  differs from the lockfile fails with `CCB-E3023` naming the
+  coordinate, as does a resolved coordinate missing from the
+  lockfile or a locked coordinate that no longer resolves. A stale
+  lockfile never silently resolves something else: run `ccb setup`
+  to regenerate it (setup re-resolves from the declarations and
+  overwrites the file, even when a stale lockfile is present).
+- No lockfile means no enforcement: pre-lockfile projects behave
+  exactly as before. A project with no `[deps] maven` never writes
+  or consults a lockfile, so removing all Maven coordinates leaves
+  a stale `ccb.lock` harmlessly in place.
+- The lockfile is a project file: commit it. It is what makes a
+  checkout reproducible without trusting the cache: the cache is
+  keyed by coordinate, but the lockfile pins the exact tree
+  (including transitive versions) and every artifact hash.
 
 ## Limitations (v1, deliberate)
 
@@ -143,11 +181,7 @@ download cache:
   beyond nearest-wins.
 - Google Maven + opt-in Maven Central only; no authenticated or
   private repositories (no credential handling exists).
-- No lockfile: the cache is keyed by coordinate, and a
-  re-resolve after a cache wipe re-downloads the same pinned
-  versions. Reproducibility comes from the pinned coordinates, not
-  from a lockfile (a lockfile is the recorded v2 follow-up).
-- Parent POMs are not fetched; exclusions are ignored (see above).
+- Parent POMs are not fetched.
 - No signature (PGP) verification: checksums only.
 
 ## Troubleshooting
@@ -165,3 +199,10 @@ download cache:
   artifact actually lives on Central (then set `maven_central`).
 - `CCB-E1005 ... maven coordinate ...`: the declared coordinate is
   malformed or unpinned. Fix the string in `ccb.toml`.
+- `CCB-E1005 ... maven_exclude ... matches direct dependency ...`:
+  the exclusion removes something the project declares directly.
+  Remove the exclusion or the direct coordinate.
+- `CCB-E3023 ...`: the resolved tree deviates from `ccb.lock`
+  (version, packaging, hash, missing, or stale entry), or the
+  lockfile is malformed. Run `ccb setup` to regenerate it from the
+  current declarations.

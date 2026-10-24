@@ -364,9 +364,12 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
       p->cfg->jars[p->cfg->jars_count++] = mv.jars[i];
     }
     // Ownership of the paths moved into cfg; only the arrays themselves
-    // are freed here (result_free would free the paths too).
+    // are freed here (result_free would free the paths too). The
+    // lockfile entries are not consumed by the build, so they are
+    // freed in full.
     free(mv.aars);
     free(mv.jars);
+    ccb_maven_entries_free(mv.entries, mv.entries_count);
   }
   // Directories.
   p->intermediates = ccb_path_join(p->cfg->build_dir, "intermediates");

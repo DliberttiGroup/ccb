@@ -618,6 +618,488 @@ static void test_config_validation(void) {
   }
 }
 
+// ---------- exclusions + lockfile (v2 follow-ups) ----------
+
+#define REPO_X BASE "/repo_x"
+#define CACHE_X BASE "/cache_x"
+#define PROJ_X BASE "/proj_x"
+
+static char *repo_x_leaf_path(const char *group, const char *artifact,
+    const char *version, const char *leaf) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, REPO_X);
+  ccb_str_append_c(&s, '/');
+  for (const char *p = group; *p != '\0'; p++) {
+    ccb_str_append_c(&s, *p == '.' ? '/' : *p);
+  }
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, artifact);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, version);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, leaf);
+  return ccb_str_steal(&s);
+}
+
+// Write one jar artifact + POM into the exclusion/lockfile fixture
+// repo. deps_xml is the raw <dependency> XML, or NULL for no deps.
+static void put_x(const char *group, const char *artifact,
+    const char *version, const char *deps_xml) {
+  ccb_str pom;
+  ccb_str_init(&pom);
+  ccb_str_append(&pom, "<project><modelVersion>4.0.0</modelVersion>");
+  ccb_str_append(&pom, "<groupId>");
+  ccb_str_append(&pom, group);
+  ccb_str_append(&pom, "</groupId><artifactId>");
+  ccb_str_append(&pom, artifact);
+  ccb_str_append(&pom, "</artifactId><version>");
+  ccb_str_append(&pom, version);
+  ccb_str_append(&pom, "</version><packaging>jar</packaging>");
+  if (deps_xml != NULL) {
+    ccb_str_append(&pom, "<dependencies>");
+    ccb_str_append(&pom, deps_xml);
+    ccb_str_append(&pom, "</dependencies>");
+  }
+  ccb_str_append(&pom, "</project>");
+  ccb_str leaf;
+  ccb_str_init(&leaf);
+  ccb_str_append(&leaf, artifact);
+  ccb_str_append_c(&leaf, '-');
+  ccb_str_append(&leaf, version);
+  ccb_str_append(&leaf, ".pom");
+  char *pom_path = repo_x_leaf_path(group, artifact, version, leaf.buf);
+  ccb_str_free(&leaf);
+  char *dir = ccb_dirname(pom_path);
+  CHECK(ccb_mkdir_p(dir) == CCB_OK);
+  free(dir);
+  write_text(pom_path, pom.buf);
+  free(pom_path);
+  ccb_str_free(&pom);
+  ccb_str al;
+  ccb_str_init(&al);
+  ccb_str_append(&al, artifact);
+  ccb_str_append_c(&al, '-');
+  ccb_str_append(&al, version);
+  ccb_str_append(&al, ".jar");
+  char *art_path = repo_x_leaf_path(group, artifact, version, al.buf);
+  ccb_str_free(&al);
+  write_text(art_path, "fake-artifact-bytes");
+  free(art_path);
+}
+
+static void build_repo_x(void) {
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "mid", "1.0");
+    put_x("com.example", "top", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "deep", "2.0");
+    put_x("com.example", "mid", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  put_x("com.example", "deep", "1.0", NULL);
+  put_x("com.example", "deep", "2.0", NULL);
+  put_x("com.example", "deep", "3.0", NULL);
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "deep", "2.0");
+    put_x("com.example", "a", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "deep", "3.0");
+    put_x("com.example", "b", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+}
+
+// Manual config with exclusions and a project root (for lockfiles).
+static ccb_config *manual_cfg_x(const char **coords, size_t count,
+    const char **excls, size_t excl_count, const char *root) {
+  ccb_config *c = ccb_xcalloc(1, sizeof(*c));
+  c->maven = ccb_xmalloc((count == 0 ? 1 : count) * sizeof(*c->maven));
+  for (size_t i = 0; i < count; i++) {
+    c->maven[i] = ccb_xstrdup(coords[i]);
+  }
+  c->maven_count = count;
+  c->maven_exclude =
+    ccb_xmalloc((excl_count == 0 ? 1 : excl_count) * sizeof(*c->maven_exclude));
+  for (size_t i = 0; i < excl_count; i++) {
+    c->maven_exclude[i] = ccb_xstrdup(excls[i]);
+  }
+  c->maven_exclude_count = excl_count;
+  c->project_root = root != NULL ? ccb_xstrdup(root) : NULL;
+  return c;
+}
+
+static ccb_status resolve_x(const char **coords, size_t count, int prefetch,
+    const char **excls, size_t excl_count, const char *root,
+    ccb_maven_result *out, ccb_diag_list *diags) {
+  ccb_config *c = manual_cfg_x(coords, count, excls, excl_count, root);
+  ccb_status rc = ccb_maven_resolve(c, prefetch, 0, 0, out, diags);
+  ccb_config_free(c);
+  return rc;
+}
+
+// Point the test process at the exclusion/lockfile fixture repo and
+// cache, saving the previous env for the caller to restore.
+static void use_repo_x(char **saved_repos, char **saved_cache) {
+  const char *old_repos = getenv("CCB_MAVEN_REPOS");
+  const char *old_cache = getenv("CCB_MAVEN_CACHE");
+  *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
+  *saved_cache = old_cache != NULL ? ccb_xstrdup(old_cache) : NULL;
+  ccb_str r;
+  ccb_str_init(&r);
+  ccb_str_append(&r, "file://");
+  ccb_str_append(&r, REPO_X);
+  char *repos_env = ccb_str_steal(&r);
+  setenv("CCB_MAVEN_REPOS", repos_env, 1);
+  free(repos_env);
+  setenv("CCB_MAVEN_CACHE", CACHE_X, 1);
+}
+
+static void restore_env(char *saved_repos, char *saved_cache) {
+  if (saved_repos != NULL) {
+    setenv("CCB_MAVEN_REPOS", saved_repos, 1);
+    free(saved_repos);
+  } else {
+    unsetenv("CCB_MAVEN_REPOS");
+  }
+  if (saved_cache != NULL) {
+    setenv("CCB_MAVEN_CACHE", saved_cache, 1);
+    free(saved_cache);
+  } else {
+    unsetenv("CCB_MAVEN_CACHE");
+  }
+}
+
+static void test_exclusions(void) {
+  char *saved_repos = NULL;
+  char *saved_cache = NULL;
+  use_repo_x(&saved_repos, &saved_cache);
+  build_repo_x();
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  // Transitive exclusion: top -> mid -> deep, with deep excluded.
+  // The build succeeds without deep; mid still resolves.
+  {
+    const char *coords[] = { "com.example:top:1.0" };
+    const char *excls[] = { "com.example:deep" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 1, 1, excls, 1, NULL, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "top-1.0.jar"));
+    CHECK(result_has(&out, "mid-1.0.jar"));
+    CHECK(!result_has(&out, "deep-2.0.jar"));
+    CHECK(out.jars_count == 2);
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Versioned exclusion changes the nearest-wins outcome: without it
+  // a -> deep:2.0 wins (first-declared); with deep:2.0 excluded,
+  // b -> deep:3.0 wins instead.
+  {
+    const char *coords[] = { "com.example:a:1.0", "com.example:b:1.0" };
+    const char *excls[] = { "com.example:deep:2.0" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 2, 1, excls, 1, NULL, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "deep-3.0.jar"));
+    CHECK(!result_has(&out, "deep-2.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Unversioned exclusion removes every version of the artifact.
+  {
+    const char *coords[] = { "com.example:a:1.0", "com.example:b:1.0" };
+    const char *excls[] = { "com.example:deep" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 2, 1, excls, 1, NULL, &out, &diags) == CCB_OK);
+    CHECK(!result_has(&out, "deep-2.0.jar"));
+    CHECK(!result_has(&out, "deep-3.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  restore_env(saved_repos, saved_cache);
+}
+
+static void write_cfg_toml_x(const char *coord, const char *exclude) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s,
+    "ccb_version = 1\n"
+    "\n"
+    "[project]\n"
+    "name = \"hello\"\n"
+    "package = \"com.example.hello\"\n"
+    "version = \"1.0\"\n"
+    "version_code = 1\n"
+    "min_sdk = 26\n"
+    "target_sdk = 35\n"
+    "compile_sdk = 35\n"
+    "\n"
+    "[paths]\n"
+    "manifest = \"src/main/AndroidManifest.xml\"\n"
+    "res = \"src/main/res\"\n"
+    "kotlin = \"src/main/kotlin\"\n"
+    "\n"
+    "[deps]\n"
+    "maven = [\"");
+  ccb_str_append(&s, coord);
+  ccb_str_append(&s, "\"]\n");
+  if (exclude != NULL) {
+    ccb_str_append(&s, "maven_exclude = [\"");
+    ccb_str_append(&s, exclude);
+    ccb_str_append(&s, "\"]\n");
+  }
+  char *toml = ccb_str_steal(&s);
+  write_text(PROJ_CFG "/ccb.toml", toml);
+  free(toml);
+}
+
+static void test_exclusion_config(void) {
+  mkdir_or_fail(PROJ_CFG "/src/main/res/values");
+  mkdir_or_fail(PROJ_CFG "/src/main/kotlin");
+  write_text(PROJ_CFG "/src/main/AndroidManifest.xml",
+    "<manifest package=\"com.example.hello\" />\n");
+  // Excluding a direct dependency (unversioned or exact version) is
+  // a config error naming it.
+  static const char *bad[][2] = {
+    { "com.example:top:1.0", "com.example:top" },
+    { "com.example:top:1.0", "com.example:top:1.0" },
+  };
+  for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    write_cfg_toml_x(bad[i][0], bad[i][1]);
+    ccb_config *cfg = NULL;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) != CCB_OK);
+    CHECK(cfg == NULL);
+    CHECK(has_code(&diags, "CCB-E1005"));
+    ccb_diag_list_free(&diags);
+  }
+  // Excluding a different version of a direct dependency is allowed,
+  // and so is a malformed-exclusion-free config with no exclusion.
+  static const char *good[][2] = {
+    { "com.example:top:1.0", "com.example:top:2.0" },
+    { "com.example:top:1.0", "com.example:other" },
+    { "com.example:top:1.0", NULL },
+  };
+  for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+    write_cfg_toml_x(good[i][0], good[i][1]);
+    ccb_config *cfg = NULL;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) == CCB_OK);
+    CHECK(cfg != NULL && cfg->maven_count == 1);
+    ccb_config_free(cfg);
+    ccb_diag_list_free(&diags);
+  }
+  // Malformed exclusions are config errors too.
+  static const char *malformed[] = {
+    "com.example",
+    "com.example:top:1.0:extra",
+    "com.example:",
+    ":top",
+  };
+  for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++) {
+    write_cfg_toml_x("com.example:top:1.0", malformed[i]);
+    ccb_config *cfg = NULL;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) != CCB_OK);
+    CHECK(cfg == NULL);
+    CHECK(has_code(&diags, "CCB-E1005"));
+    ccb_diag_list_free(&diags);
+  }
+}
+
+static char *cache_x_file(const char *artifact, const char *version) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, CACHE_X);
+  ccb_str_append(&s, "/com/example/");
+  ccb_str_append(&s, artifact);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, version);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, artifact);
+  ccb_str_append_c(&s, '-');
+  ccb_str_append(&s, version);
+  ccb_str_append(&s, ".jar");
+  return ccb_str_steal(&s);
+}
+
+// Lockfile text from the real cached hashes, optionally omitting the
+// deep line or appending one extra line.
+static char *lock_text_real(int omit_deep, const char *extra) {
+  char *deep_path = cache_x_file("deep", "2.0");
+  char *mid_path = cache_x_file("mid", "1.0");
+  char *top_path = cache_x_file("top", "1.0");
+  char deep_hex[65];
+  char mid_hex[65];
+  char top_hex[65];
+  CHECK(ccb_sha256_file(deep_path, deep_hex) == CCB_OK);
+  CHECK(ccb_sha256_file(mid_path, mid_hex) == CCB_OK);
+  CHECK(ccb_sha256_file(top_path, top_hex) == CCB_OK);
+  ccb_str s;
+  ccb_str_init(&s);
+  if (!omit_deep) {
+    ccb_str_append(&s, "com.example:deep:2.0 jar ");
+    ccb_str_append(&s, deep_hex);
+    ccb_str_append_c(&s, '\n');
+  }
+  ccb_str_append(&s, "com.example:mid:1.0 jar ");
+  ccb_str_append(&s, mid_hex);
+  ccb_str_append_c(&s, '\n');
+  ccb_str_append(&s, "com.example:top:1.0 jar ");
+  ccb_str_append(&s, top_hex);
+  ccb_str_append_c(&s, '\n');
+  if (extra != NULL) {
+    ccb_str_append(&s, extra);
+  }
+  free(deep_path);
+  free(mid_path);
+  free(top_path);
+  return ccb_str_steal(&s);
+}
+
+static void test_lockfile(void) {
+  char *saved_repos = NULL;
+  char *saved_cache = NULL;
+  use_repo_x(&saved_repos, &saved_cache);
+  build_repo_x();
+  CHECK(ccb_mkdir_p(PROJ_X) == CCB_OK);
+  const char *coords[] = { "com.example:top:1.0" };
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  // Prefetch ignores a stale lockfile (setup is the update path):
+  // write a bogus one first, prefetch still succeeds.
+  write_text(PROJ_X "/ccb.lock", "bogus line\n");
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 1, NULL, 0, PROJ_X, &out, &diags) == CCB_OK);
+  // Generation: exact contents, sorted, transitive versions + hashes.
+  {
+    ccb_config *lc = manual_cfg_x(coords, 1, NULL, 0, PROJ_X);
+    CHECK(ccb_maven_write_lockfile(lc, &out, &diags) == CCB_OK);
+    ccb_config_free(lc);
+  }
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  {
+    char *top_path = cache_x_file("top", "1.0");
+    char *mid_path = cache_x_file("mid", "1.0");
+    char *deep_path = cache_x_file("deep", "2.0");
+    char top_hex[65];
+    char mid_hex[65];
+    char deep_hex[65];
+    CHECK(ccb_sha256_file(top_path, top_hex) == CCB_OK);
+    CHECK(ccb_sha256_file(mid_path, mid_hex) == CCB_OK);
+    CHECK(ccb_sha256_file(deep_path, deep_hex) == CCB_OK);
+    ccb_str want;
+    ccb_str_init(&want);
+    ccb_str_append(&want,
+      "# ccb.lock: resolved Maven tree, generated by `ccb setup`.\n"
+      "# Commit this file. `ccb check` and `ccb build` enforce it: any\n"
+      "# deviation from these versions or hashes fails with CCB-E3023.\n"
+      "# ccb-lock-version: 1\n"
+      "com.example:deep:2.0 jar ");
+    ccb_str_append(&want, deep_hex);
+    ccb_str_append(&want, "\ncom.example:mid:1.0 jar ");
+    ccb_str_append(&want, mid_hex);
+    ccb_str_append(&want, "\ncom.example:top:1.0 jar ");
+    ccb_str_append(&want, top_hex);
+    ccb_str_append_c(&want, '\n');
+    char *got = NULL;
+    size_t got_len = 0;
+    CHECK(ccb_read_file(PROJ_X "/ccb.lock", &got, &got_len) == CCB_OK);
+    CHECK(got_len == strlen(want.buf));
+    CHECK(memcmp(got, want.buf, got_len) == 0);
+    free(got);
+    ccb_str_free(&want);
+    free(top_path);
+    free(mid_path);
+    free(deep_path);
+  }
+  // Locked build: cache-only resolve with the lockfile succeeds and
+  // uses exactly the locked versions.
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "deep-2.0.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  // Mismatch cases, each failing with CCB-E3023 naming the coordinate.
+  // Version drift: the lockfile pins deep:9.9, resolution finds 2.0.
+  write_text(PROJ_X "/ccb.lock",
+    "com.example:deep:9.9 jar 0000000000000000000000000000000000000000000000000000000000000000\n"
+    "com.example:mid:1.0 jar 0000000000000000000000000000000000000000000000000000000000000000\n"
+    "com.example:top:1.0 jar 0000000000000000000000000000000000000000000000000000000000000000\n");
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3023"));
+  ccb_diag_list_free(&diags);
+  // Hash drift: right versions, wrong hash for deep.
+  {
+    char *lock_text = lock_text_real(0, NULL);
+    // Zero deep's hash in place: the line is fixed-width, so find the
+    // first line and overwrite its 64-char hash field.
+    char *sp = strchr(lock_text, ' ');
+    char *sp2 = sp != NULL ? strchr(sp + 1, ' ') : NULL;
+    CHECK(sp2 != NULL);
+    memset(sp2 + 1, '0', 64);
+    write_text(PROJ_X "/ccb.lock", lock_text);
+    free(lock_text);
+  }
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3023"));
+  ccb_diag_list_free(&diags);
+  // Missing entry: deep resolved but absent from the lockfile (all
+  // other lines match, so only the missing line can fail).
+  {
+    char *lock_text = lock_text_real(1, NULL);
+    write_text(PROJ_X "/ccb.lock", lock_text);
+    free(lock_text);
+  }
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3023"));
+  ccb_diag_list_free(&diags);
+  // Stale entry: locked but no longer resolved (all resolved entries
+  // match, so only the stale line can fail).
+  {
+    char *lock_text = lock_text_real(0,
+      "com.example:gone:1.0 jar 0000000000000000000000000000000000000000000000000000000000000000\n");
+    write_text(PROJ_X "/ccb.lock", lock_text);
+    free(lock_text);
+  }
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3023"));
+  ccb_diag_list_free(&diags);
+  // Malformed lockfile.
+  write_text(PROJ_X "/ccb.lock", "this is not a lockfile line\n");
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3023"));
+  ccb_diag_list_free(&diags);
+  // No lockfile: pre-lockfile behavior, cache-only resolve succeeds.
+  CHECK(remove(PROJ_X "/ccb.lock") == 0);
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "deep-2.0.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  restore_env(saved_repos, saved_cache);
+}
+
 // ---------- end-to-end build ----------
 
 #define REPO_E2E BASE "/repo_e2e"
@@ -931,6 +1413,9 @@ int main(int argc, char **argv) {
   test_failures();
   test_cache_only();
   test_config_validation();
+  test_exclusions();
+  test_exclusion_config();
+  test_lockfile();
   test_e2e(argc, argv);
   if (saved_repos != NULL) {
     setenv("CCB_MAVEN_REPOS", saved_repos, 1);
