@@ -6,11 +6,14 @@
 │    Settings                          │
 │                                      │
 │                                      │
+│                                      │
 │     [Username]                       │
 │                                      │
 │                                      │
 │    Dark mode on                      │
+│                                      │
 │    Dark mode off                     │
+│                                      │
 │                                      │
 │                                      │
 │     [ Back ]                         │

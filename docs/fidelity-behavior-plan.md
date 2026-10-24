@@ -1,10 +1,10 @@
-# Fork 2 fidelity + Level 2 behavior — plan (Part B Slices 1–3 implemented 2026-10-24; Part A fidelity design only)
+# Fork 2 fidelity + Level 2 behavior — plan (Part A fidelity and Part B Slices 1–3 implemented 2026-10-24)
 
 User clarification 2026-10-24: "Fork 2" means real layout fidelity, and
 the behavior level wanted is Level 2 (derived from code), narrowed for
 now to buttons that take you from one screen to another. Part B
-Slices 1–3 are implemented (2026-10-24); Part A fidelity is not
-implemented yet. The governing constraint for both
+Slices 1–3 are implemented (2026-10-24); Part A fidelity is
+implemented (2026-10-24, see below). The governing constraint for both
 halves: no interpreter, no layout engine. Every step below is
 computable from static information, and anything outside the
 recognized shapes is `unknown`, never guessed.
@@ -20,47 +20,71 @@ stance. No solver, no font files, no HarfBuzz/FreeType.
 
 ### F1 — Size-aware text (cells stay the unit, sizes stop lying)
 
-Today a text leaf's width comes from character cells (wcwidth) and its
-height from the row-sum convention, regardless of `font-size`. Change:
+Implemented 2026-10-24. A text leaf's height comes from its line
+height, not the old 1-row base:
 
 - Line height for a text leaf = `font-size * 1.2 + vertical padding`,
-  rounded to rows. A 24px label is taller than a 14px label, which is
-  the single most visible fidelity gap in the current frames.
-- Text width scales with a font-size bucket (small / base / large):
-  width in cells = ceil(chars * bucket factor). Bucket factors are
-  documented constants, not glyph measurements — statistical, and
-  labeled as such in the docs.
-- `text-align` (already shipped) keeps working on the scaled width.
+  rounded to rows at one row per ~10dp: rows = round(font-size *
+  1.2 / 10), minimum 1 row, 1 row when no rule sets `font-size`.
+  A 24px label is 3 rows tall, a 16px label 2, a 12px label 1.
+  Applies to `text`, `button`, and `textfield` leaves; lists,
+  images, spacers, and generic leaves keep their old heights.
+- Text width scales with a font-size bucket (small < 14px: 4/5,
+  base 14–23px: 1, large ≥ 24px: 5/4): the width used for the
+  `text-align` offset is ceil(display width * factor), rounded up.
+  Bucket factors are documented constants, not glyph measurements
+  — statistical, and labeled as such in the docs. Painting still
+  uses raw cells, so only alignment shifts; the P1009 clip check
+  keeps comparing the actually-painted width (scaling it would
+  warn about text the frame shows fitting, or miss text it shows
+  clipped).
+- `text-align` (already shipped) works on the scaled width: for
+  buttons and textfields only the label text scales, the `[ ]`
+  chrome does not.
 
 ### F2 — An explicit DP mapping, and tap targets in DP
 
-The codebase already knows the phone width: `phone_dp_width = 390`
-against a 40-column frame (38 interior columns), so 1 column is
-~10.26dp and 1 row is ~10dp. Today that mapping is implicit. Make it
-explicit:
+Implemented 2026-10-24. The codebase already knows the phone width:
+`phone_dp_width = 390` against a 40-column frame (38 interior
+columns), so 1 column is ~10.26dp and 1 row is ~10dp. That mapping
+is now explicit:
 
 - Every box's JSON gains its size in DP alongside cells
-  (`w_dp`, `h_dp`, computed from the mapping, not measured).
-- Diagnostic CCB-P1017 (tap target) migrates from cell thresholds
-  (8 cols / 2 rows) to DP thresholds (48dp wide; height from the
-  F1 computed line height, NOT from row count). The cell threshold
-  exists precisely because a naive 48dp height rule would flag every
-  unpadded button at 10dp/row; computing height from font-size +
-  padding first is what makes the DP rule honest.
+  (`w_dp`, `h_dp`, computed from the mapping, not measured):
+  w_dp = round(w * phone_dp_width / interior_cols), h_dp = h * 10.
+  Additive per-box fields, so the JSON version stays 2.
+- Diagnostic CCB-P1017 (tap target): DECIDED — the thresholds stay
+  in cells (8 columns / 2 rows) and the message reports the DP
+  size alongside (e.g. `is 5x1 cells (51dp x 10dp; minimum 8x2
+  cells)`). A 48dp migration was rejected on the numbers: F1 line
+  heights are 20–30dp for typical text, so a 48dp height rule
+  would flag nearly every button including well-formed ones, and
+  a 48dp width rule (≈ 5 columns) would be looser than the
+  current 8 columns (≈ 82dp), un-flagging buttons squeezed by a
+  row split. The cell rule's purpose — flagging genuinely
+  degenerate targets — is preserved, and the dp numbers are
+  visible for the designer. See `docs/preview.md` (CCB-P1017).
 - Renders stay cell grids. DP numbers are estimates, and the docs
   say so — no false precision.
 
 ### F3 — Content-driven sizing made explicit
 
-Mostly documenting and finishing what the sum convention already
-implies, so the rules are stated instead of emergent:
+Implemented 2026-10-24:
 
-- Text height = lines * line height (F1).
-- Image boxes size from declared width/height (aspect preserved
-  when only one side is declared).
-- Button height = text lines + vertical padding (no more 1-row
-  buttons by default unless padding is genuinely zero — which is
-  exactly what P1017 should then flag).
+- Text height = lines * line height (F1); leaves paint a single
+  line, so one line height plus vertical padding.
+- Image boxes size from declared width/height: a declared `height`
+  (px scaled like the spacer convention, % of the parent content
+  width) replaces the old fixed 3-row placeholder; a declared
+  `width` was already honored by the fixed-width logic. Aspect
+  preservation for a single declared side is NOT implemented: no
+  intrinsic size exists in the convention, so there is nothing to
+  preserve an aspect ratio against — the other side keeps its
+  default. Documented as a limitation, not silently fudged.
+- Button height = text lines + vertical padding (the F1 formula):
+  no more 1-row buttons when a font-size rule is set; with no
+  font-size rule the 1-row base stands (defaulting an unset size
+  to 16px would be guessing).
 
 ### Explicitly OUT (the engine, still parked)
 
@@ -194,9 +218,11 @@ Neither half pretends to be the device.
 1. Bindings mechanism: explicit `[preview.bindings]` table
    (recommended) vs a naming convention. Convention is less typing
    and more guessing; the recommendation is the table.
-2. P1017 migration: move tap thresholds to DP as part of F2, or
-   keep cells and report DP alongside? Recommendation: migrate —
-   a threshold that speaks the platform's unit is the point of F2.
+2. P1017 migration: RESOLVED 2026-10-24 — thresholds stay in cells,
+   DP reported in the message. A 48dp height rule would flag nearly
+   every button (F1 heights are 20–30dp for typical text) and a
+   48dp width rule would loosen the width check from 82dp to ~5
+   columns. See F2 above and `docs/preview.md` (CCB-P1017).
 3. Slice order: Slice 1 first, obviously; whether Slice 2 rides
    along or waits depends on whether conditional nav matters to
    the user's apps yet.

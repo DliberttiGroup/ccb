@@ -2,6 +2,7 @@
 │                                      │
 │                                      │
 │  My Notes                            │
+│                                      │
 │  • item                              │
 │  • item                              │
 │  • item                              │

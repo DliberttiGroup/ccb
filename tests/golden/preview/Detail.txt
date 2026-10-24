@@ -2,9 +2,13 @@
 │                                      │
 │                                      │
 │             Note detail              │
+│                                      │
 │              Loading...              │
+│                                      │
 │              Note body               │
+│                                      │
 │                Empty                 │
+│                                      │
 │                                      │
 │   [ Delete ]                         │
 │                                      │

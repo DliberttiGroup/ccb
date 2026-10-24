@@ -118,7 +118,8 @@ int main(void) {
     CHECK(child->w == 4 && child->h == 1);
     CHECK(diag_count(&p.diags, "CCB-P1017") == 1);
     CHECK(diag_message_contains(&p, "CCB-P1017",
-      "tap target too small: button \"Go\" is 4x1 cells (minimum 8x2)"));
+      "tap target too small: button \"Go\" is 4x1 cells "
+      "(41dp x 10dp; minimum 8x2 cells)"));
     ccb_diag_list_free(&p.diags);
   }
   {

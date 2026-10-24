@@ -527,6 +527,26 @@ static long align_offset(const pv_rule *rule, long cw, long sw) {
   return off < 0 ? 0 : off;
 }
 
+// F1: the label's display width scaled by the rule's font-size
+// bucket (see pv_scaled_text_width in the header), rounded up.
+long pv_scaled_text_width(long display_width, const pv_rule *rule) {
+  long num = 1;
+  long den = 1;
+  if (display_width <= 0) {
+    return 0;
+  }
+  if (rule != NULL && rule->has_font_size) {
+    if (rule->font_size < 14) {
+      num = 4;
+      den = 5;
+    } else if (rule->font_size >= 24) {
+      num = 5;
+      den = 4;
+    }
+  }
+  return (display_width * num + den - 1) / den;
+}
+
 static void paint_box(pv_grid *g, pv_box *box, int ascii, int color) {
   size_t i = 0;
   long cx = 0;
@@ -567,34 +587,43 @@ static void paint_box(pv_grid *g, pv_box *box, int ascii, int color) {
   }
   if (render_type_eq(box, "text")) {
     long off = align_offset(box->rule, cw,
-      display_width(box->label));
+      pv_scaled_text_width(display_width(box->label), box->rule));
     paint_str(g, cx + off, cy, box->label, cw - off, fg);
   } else if (render_type_eq(box, "button")) {
     ccb_str s;
     long off = 0;
+    long sw = 0;
     ccb_str_init(&s);
     if (box->label != NULL) {
       ccb_str_append(&s, "[ ");
       ccb_str_append(&s, box->label);
       ccb_str_append(&s, " ]");
+      // F1: only the label text scales; the "[ ]" chrome does not.
+      sw = pv_scaled_text_width(display_width(box->label),
+        box->rule) + 4;
     } else {
       ccb_str_append(&s, "[ ]");
+      sw = 3;
     }
-    off = align_offset(box->rule, cw,
-      display_width(s.buf != NULL ? s.buf : ""));
+    off = align_offset(box->rule, cw, sw);
     paint_str(g, cx + off, cy, s.buf != NULL ? s.buf : "", cw - off, fg);
     ccb_str_free(&s);
   } else if (render_type_eq(box, "textfield")) {
     ccb_str s;
     long off = 0;
+    long sw = 0;
     ccb_str_init(&s);
     ccb_str_append(&s, "[");
     if (box->label != NULL) {
       ccb_str_append(&s, box->label);
+      // F1: only the label text scales; the "[]" chrome does not.
+      sw = pv_scaled_text_width(display_width(box->label),
+        box->rule) + 2;
+    } else {
+      sw = 2;
     }
     ccb_str_append(&s, "]");
-    off = align_offset(box->rule, cw,
-      display_width(s.buf != NULL ? s.buf : ""));
+    off = align_offset(box->rule, cw, sw);
     paint_str(g, cx + off, cy, s.buf != NULL ? s.buf : "", cw - off, fg);
     ccb_str_free(&s);
   } else if (render_type_eq(box, "list")) {

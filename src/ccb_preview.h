@@ -40,7 +40,8 @@
 // CCB-P1016 unresolved @string/ or @color/ reference, or a skipped
 //   malformed/non-hex resource entry (warning)
 // CCB-P1017 tap target too small: button/textfield under 8 columns
-//   wide or 2 rows tall in wireframe cells (warning)
+//   wide or 2 rows tall in wireframe cells; the message also reports
+//   the size in dp (F2), but the thresholds stay in cells (warning)
 // CCB-P1018 text contrast below threshold: 4.5:1, or 3.0:1 when the
 //   leaf rule's font-size is >= 24px (warning)
 // CCB-P1019 handler found, button not bound: a click handler whose
@@ -80,7 +81,8 @@ typedef struct {
   long margin[4]; // top, right, bottom, left (px)
   char *bg, *fg; // color as written (#rrggbb or a named color), NULL unset
   int has_font_size;
-  long font_size; // px, recorded only; it does not change layout
+  long font_size; // px; sets the text-leaf line height (F1) and the
+                  // large-text buckets (P1018 threshold, F1 width)
   int has_position, absolute; // position: static (default) or absolute
   int has_top, has_left;
   long top, left; // px
@@ -208,6 +210,13 @@ ccb_status pv_css_parse(ccb_arena *arena, const char *text, const char *file,
 // ("screen" for the root). Absolute boxes do not affect parent height.
 // Emits CCB-P1003/P1004/P1009 diagnostics (overlap/off-screen/clip).
 void pv_layout_screen(pv_project *p, pv_screen *screen);
+// F2 DP mapping for a laid-out size. w_dp = round(cols *
+// phone_dp_width / interior_cols) — 1 column is ~10.26dp at the
+// default 40-column phone frame (38 interior columns, 390dp); h_dp =
+// rows * 10 (one row is ~10dp). Estimates from the cell grid, not
+// measurements; 0 for a non-positive input or scale.
+long pv_cols_to_dp(long cols, long interior_cols, long phone_dp_width);
+long pv_rows_to_dp(long rows);
 
 // ---------- Kotlin structure parser (ccb_preview_flow.c) ----------
 
@@ -261,6 +270,15 @@ void pv_render_edge_args(ccb_str *out, const pv_edge *e);
 // Shared by the renderer and the P1018 contrast check so both use
 // one RGB resolution.
 int pv_color_rgb(const char *s, long *r, long *g, long *b);
+// F1 scaled text width in cells, for text-align: the label's display
+// width times the rule's font-size bucket factor (small, font-size
+// < 14px: 4/5; base, 14-23px: 1; large, >= 24px: 5/4; no font-size
+// rule: 1), rounded up. The buckets are statistical constants, not
+// glyph measurement — at the base size the renderer already paints
+// one cell per character, so the base factor is 1 by construction.
+// Painting still uses raw cells, so only alignment shifts; the
+// P1009 clip check keeps comparing the actually-painted width.
+long pv_scaled_text_width(long display_width, const pv_rule *rule);
 
 // Wireframe for one laid-out screen, including the phone frame. When
 // color is enabled, background/foreground colors approximate the CSS
@@ -325,15 +343,16 @@ long pv_project_diagnose(pv_project *p);
 // JSON form of the same data the human render shows, one object, no
 // trailing newline, deterministic (stable order, no timestamps):
 // {"event":"preview","screens":[{"name":...,"entry":bool,
-// "reachable":bool,"boxes":{type,label,x,y,w,h,children:[...] (the
-// root box is the tree root)},"edges":[{"from":...,"target":...|null,
+// "reachable":bool,"boxes":{type,label,x,y,w,h,w_dp,h_dp,children:[...]
+// (the root box is the tree root)},"edges":[{"from":...,"target":...|null,
 // "unknown":bool}],"branches":[{"label":...,"entries":[...]}]}],
 // "diagnostics":[{"code":...,"phase":...,"message":...,"file":...|null,
 // "line":...}]}. Branches are collected depth-first from the tree.
 // The object carries "version":2; each edge carries "args" (an array
 // of string-or-null, [] when the nav call has no extra arguments)
 // and "branch" (the Slice 2 branch label string, or null when the
-// edge is unconditional).
+// edge is unconditional). w_dp/h_dp are additive per-box fields, so
+// the version stays 2.
 void pv_project_json(ccb_str *out, pv_project *p);
 // JSON for a subset of screens, in the given order: the same object
 // as pv_project_json, but the "screens" array contains only these

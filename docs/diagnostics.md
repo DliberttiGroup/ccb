@@ -77,7 +77,7 @@ error).
 | CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
 | CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
 | CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
-| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells (warning, always) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells; message also reports the size in dp (warning, always) |
 | CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always) |
 | CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
 | CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |

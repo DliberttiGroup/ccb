@@ -347,8 +347,11 @@ fun Home() {
   (row, column), `width`/`height` (px, %), `padding`, `margin` (px,
   1–4 values as in CSS), `background-color`, `color` (hex or named,
   or an `@color/name` reference resolved via `[preview] resources`),
-  `font-size` (px, recorded only — it does not change layout, but
-  it does select the CCB-P1018 contrast threshold),
+  `font-size` (px, sets the text-leaf line height — round(font-size
+  * 1.2 / 10) rows, minimum 1, 1 row when no rule sets it — scales
+  the `text-align` width by font-size bucket (small < 14px: 4/5,
+  base 14–23px: 1, large ≥ 24px: 5/4), and selects the CCB-P1018
+  contrast threshold),
   `position` (static, absolute), `top`/`left` (px, absolute only),
   `gap` (px), `text-align` (left, center, right), `border-width`
   (px), `border-color` (hex or named), `flex-wrap` (nowrap, wrap;
@@ -383,10 +386,17 @@ button { background-color: #6200ee; color: #ffffff; margin: 8px; }
 - Column containers stack children vertically, each full width minus
   margins. Row containers split the width: fixed sizes honored first,
   the remainder shared equally among auto-sized children.
-- Text renders on one row, clipped to its box (clipping warns,
-  CCB-P1009). Buttons render as `[ label ]`, text fields as
-  `[label]`, lists as one `• <label>` row per child item when the List box has children (a child with no label renders as `• item`); a bare List with no children — its count genuinely unknown — renders 4 `• item` placeholder rows and emits no diagnostic for the placeholder. A list with children is exactly one row per child tall (plus padding); a bare list is 4 rows tall (plus padding)., images as a
-  3-row `[ image ]` block. Unknown components render as
+- Text leaves (`text`, `button`, `textfield`) are as tall as their
+  line height: round(font-size * 1.2 / 10) rows, minimum 1 row, 1
+  row when no rule sets `font-size` — so a 16px label is 2 rows
+  tall and a 24px label is 3. The painted text itself still sits
+  on one row (top-aligned) inside the leaf, clipped to its box
+  (clipping warns, CCB-P1009). Buttons render as `[ label ]`,
+  text fields as `[label]`, lists as one `• <label>` row per child item when the List box has children (a child with no label renders as `• item`); a bare List with no children — its count genuinely unknown — renders 4 `• item` placeholder rows and emits no diagnostic for the placeholder. A list with children is exactly one row per child tall (plus padding); a bare list is 4 rows tall (plus padding)., images as a
+  `[ image ]` block, 3 rows tall, or the rule's declared `height`
+  when one is set (a declared `width` is honored as for any box;
+  with no intrinsic size in the convention, one declared side
+  cannot preserve an aspect ratio). Unknown components render as
   `[TypeName]`.
 - Leaf content is inset by the leaf's own scaled padding: a leaf
   paints at (box x + left padding, box y + top padding), clipped to
@@ -395,7 +405,14 @@ button { background-color: #6200ee; color: #ffffff; margin: 8px; }
 - `text-align` offsets the painted string within the leaf's content
   width (left = content edge, center = centered, right = flush
   right, clamped at the content edge when the string is wider);
-  it applies to `text`, `button`, `textfield`, and list rows.
+  it applies to `text`, `button`, `textfield`, and list rows. For
+  `text`, `button`, and `textfield` the offset uses the
+  font-size-scaled string width (F1 buckets above), not the raw
+  painted width — only the offset shifts, painting still clips at
+  the box edge.
+- Every box's size is also reported in dp in JSON (`w_dp`, `h_dp`):
+  w_dp = round(w * phone_width / interior), h_dp = h * 10 (one row
+  is ~10dp). Estimates from the cell grid, not measurements.
 - A `border-width` that scales to at least 1 cell draws a 1-cell
   outline around the box (Unicode frame chars, or ASCII under
   `--ascii`) in the `border-color`, else the rule's `color`, else
@@ -421,16 +438,19 @@ button { background-color: #6200ee; color: #ffffff; margin: 8px; }
 
 - CCB-P1017 — tap target too small (warning). Applies to `button`
   and `textfield` boxes only, after layout. Warns when `w < 8`
-  columns OR `h < 2` rows, in wireframe cells — not dp, because the
-  wireframe's vertical quantum is one row (≈10dp at the default
-  40-column frame), so a 44dp height rule would flag every
-  unpadded button including all reasonable defaults. The cell
-  threshold targets genuinely degenerate cases (a button squeezed
-  to a few columns by a row split, a 1-row button with zero
-  padding). Documented dp equivalents at the default frame: 8
-  columns ≈ 82dp wide, 2 rows ≈ 21dp tall. The message names the
-  component and its size, e.g. `tap target too small: button "Go"
-  is 5x1 cells (minimum 8x2)`.
+  columns OR `h < 2` rows, in wireframe cells. The thresholds
+  deliberately stay in cells even though F2 reports dp: a 48dp
+  height rule would flag nearly every button — F1 line heights
+  are 20–30dp for typical text (16px → 2 rows, 24px → 3), so
+  reaching 48dp needs generous vertical padding on top — and a
+  48dp width rule (≈ 5 columns) would be looser than the current
+  8 columns (≈ 82dp), un-flagging buttons squeezed by a row
+  split. The cell rule targets genuinely degenerate cases (a
+  button squeezed to a few columns by a row split, a 1-row button
+  with zero padding). The message reports the dp size alongside
+  the cells, e.g. `tap target too small: button "Go" is 5x1 cells
+  (51dp x 10dp; minimum 8x2 cells)`. Documented dp equivalents
+  at the default frame: 8 columns ≈ 82dp wide, 2 rows = 20dp tall.
 - CCB-P1018 — text contrast below threshold (warning). Applies to
   `text`, `button`, and `textfield` leaves, after layout.
   Foreground = the leaf rule's `color`; background = the leaf
@@ -506,8 +526,9 @@ depth-first from the tree; `diagnostics` are in emission order:
 {"event":"preview","version":2,
  "screens":[{"name":"Home","entry":true,"reachable":true,
    "boxes":{"type":"screen","label":null,"x":0,"y":0,"w":38,"h":18,
+     "w_dp":390,"h_dp":180,
      "children":[{"type":"text","label":"My Notes","x":2,"y":2,
-       "w":34,"h":1,"children":[]}]},
+       "w":34,"h":1,"w_dp":349,"h_dp":10,"children":[]}]},
    "edges":[{"from":"Open note","target":"Detail","unknown":false,
      "args":["note-42"]}],
    "branches":[{"label":"when state",
@@ -527,7 +548,9 @@ call has no extra arguments, and the per-edge `"branch"` field,
 string-or-null, `null` for an unconditional edge — both additive,
 so the version stays 2; resolved `@string` labels appear as
 plain `label` values, a value change, not a shape change, and only
-in projects that use `@string`). With `--storyboard`, the `screens`
+in projects that use `@string`). The per-box `"w_dp"`/`"h_dp"`
+fields are likewise additive, so the version stays 2. With
+`--storyboard`, the `screens`
 array contains only the journey screens, in journey order.
 - Exit codes: 0 ok (warnings allowed), 1 preview errors (missing nav
   target, duplicate screen), 2 configuration errors. Under `--strict`,

@@ -1484,7 +1484,8 @@ static void pv_json_str(ccb_str *out, const char *s) {
   }
 }
 
-static void pv_json_box(ccb_str *out, pv_box *box) {
+static void pv_json_box(ccb_str *out, pv_box *box, long interior_cols,
+    long phone_dp_width) {
   size_t i = 0;
   ccb_str_append(out, "{\"type\":");
   if (box->type != NULL) {
@@ -1497,13 +1498,18 @@ static void pv_json_box(ccb_str *out, pv_box *box) {
   ccb_str_appendf(out, ",\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld",
     box != NULL ? box->x : 0, box != NULL ? box->y : 0,
     box != NULL ? box->w : 0, box != NULL ? box->h : 0);
+  // F2: DP size alongside cells, from the project's scale.
+  ccb_str_appendf(out, ",\"w_dp\":%ld,\"h_dp\":%ld",
+    pv_cols_to_dp(box != NULL ? box->w : 0, interior_cols,
+      phone_dp_width),
+    pv_rows_to_dp(box != NULL ? box->h : 0));
   ccb_str_append(out, ",\"children\":[");
   if (box != NULL) {
     for (i = 0; i < box->nchildren; i++) {
       if (i > 0) {
         ccb_str_append(out, ",");
       }
-      pv_json_box(out, box->children[i]);
+      pv_json_box(out, box->children[i], interior_cols, phone_dp_width);
     }
   }
   ccb_str_append(out, "]}");
@@ -1581,7 +1587,8 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
       screen->reachable ? "true" : "false");
     ccb_str_append(out, ",\"boxes\":");
     if (screen->root != NULL) {
-      pv_json_box(out, screen->root);
+      pv_json_box(out, screen->root, p->interior_cols,
+        p->phone_dp_width);
     } else {
       ccb_str_append(out, "null");
     }

@@ -714,15 +714,16 @@ int main(void) {
     add_child(a, root, col);
     screen = make_screen(a, "Home", root);
     pv_layout_screen(&p, screen);
-    // Screen padding 16px -> 2; text 1, list 4, row 6 (sum of two
-    // buttons with 1-row margins), settings 3; root = 2+14+2 = 18.
-    CHECK(t->x == 2 && t->y == 2 && t->w == 34 && t->h == 1);
+    // Screen padding 16px -> 2; text 2 (16px line height), list 4,
+    // row 6 (sum of two buttons with 1-row margins), settings 3;
+    // root = 2+15+2 = 19.
+    CHECK(t->x == 2 && t->y == 2 && t->w == 34 && t->h == 2);
     CHECK(list->h == 4);
-    CHECK(row->y == 7 && row->h == 6);
-    CHECK(b1->x == 3 && b1->w == 15 && b1->y == 8);
-    CHECK(b2->x == 21 && b2->w == 14 && b2->y == 8);
-    CHECK(settings->x == 3 && settings->y == 14 && settings->w == 32);
-    CHECK(col->h == 14 && root->h == 18);
+    CHECK(row->y == 8 && row->h == 6);
+    CHECK(b1->x == 3 && b1->w == 15 && b1->y == 9);
+    CHECK(b2->x == 21 && b2->w == 14 && b2->y == 9);
+    CHECK(settings->x == 3 && settings->y == 15 && settings->w == 32);
+    CHECK(col->h == 15 && root->h == 19);
     CHECK(diag_count(&p.diags, "CCB-P1003") == 0);
     CHECK(diag_count(&p.diags, "CCB-P1004") == 0);
     CHECK(diag_count(&p.diags, "CCB-P1009") == 0);

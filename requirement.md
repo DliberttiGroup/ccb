@@ -622,7 +622,8 @@ screen with no components is a warning.
 - Terminal render per screen (default): phone frame, boxes, colors,
   clipped text, then the logic tree, then diagnostics.
 - `--json`: the box tree, logic tree, and diagnostics as structured
-  data for agents (JSON `"version":2`; edge `"args"` arrays).
+  data for agents (JSON `"version":2`; edge `"args"` arrays; every
+  box carries `"w_dp"`/`"h_dp"` alongside its cell size).
 - `--screen NAME`: render one screen only.
 - `--storyboard "A,B,C"`: render a journey of screens in order
   (repeats allowed), each frame preceded by a `Journey N/M: <Name>`

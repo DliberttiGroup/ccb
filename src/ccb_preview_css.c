@@ -895,6 +895,21 @@ static long layout_scale_pct(long pct, long parent) {
   return (long)(-((-num + 50) / 100));
 }
 
+// F2: columns to dp, rounded half away from zero via the same
+// no-libm pattern as layout_scale_px; rows to dp at 10dp per row.
+long pv_cols_to_dp(long cols, long interior_cols, long phone_dp_width) {
+  long long num = 0;
+  if (interior_cols <= 0 || phone_dp_width <= 0 || cols <= 0) {
+    return 0;
+  }
+  num = (long long)cols * (long long)phone_dp_width;
+  return (long)((num + interior_cols / 2) / interior_cols);
+}
+
+long pv_rows_to_dp(long rows) {
+  return rows <= 0 ? 0 : rows * 10;
+}
+
 // Scaled sides, top/right/bottom/left. Padding is clamped at zero;
 // margins keep their sign (negative margins are a real input).
 static void layout_sides(const pv_project *p, const pv_rule *rule, int padding,
@@ -966,6 +981,23 @@ static int layout_border_cells(const pv_project *p, const pv_rule *rule) {
   scaled = layout_scale_px(rule->border_width, p->interior_cols,
     p->phone_dp_width);
   return scaled >= 1 ? 1 : 0;
+}
+
+// F1 line height in rows for a text leaf's rule: one line of text at
+// font-size * 1.2, with one row per ~10dp (the F2 row quantum), so
+// rows = round(font-size * 1.2 / 10), minimum 1 row; 1 row when the
+// rule sets no font-size (the pre-F1 behavior). Integer-only
+// ((fs * 12 + 50) / 100); long long math so no font-size value the
+// parser accepts can overflow.
+static long layout_line_height_rows(const pv_rule *rule) {
+  long long v = 0;
+  long rows = 0;
+  if (rule == NULL || !rule->has_font_size) {
+    return 1;
+  }
+  v = (long long)rule->font_size * 12;
+  rows = (long)((v + 50) / 100);
+  return rows < 1 ? 1 : rows;
 }
 
 static long layout_box(pv_project *p, pv_box *box, long x, long y, long w,
@@ -1041,7 +1073,26 @@ static long layout_box(pv_project *p, pv_box *box, long x, long y, long w,
       h = (box->nchildren > 0 ? (long)box->nchildren : 4) +
         pad[0] + pad[2];
     } else if (box_type_eq(box, "image")) {
-      h = 3 + pad[0] + pad[2];
+      // F3: a declared height sizes the box (px scaled like the
+      // spacer convention, % of the parent content width); with no
+      // declared height the 3-row placeholder stands. A declared
+      // width is already honored by the caller's fixed-width logic.
+      // No intrinsic size exists in the convention, so one declared
+      // side cannot preserve an aspect ratio — the other side
+      // keeps its default.
+      long ih = 3;
+      if (rule != NULL && rule->has_height) {
+        if (rule->height.kind == PV_LEN_PX) {
+          ih = layout_scale_px(rule->height.value, p->interior_cols,
+            p->phone_dp_width);
+        } else if (rule->height.kind == PV_LEN_PCT) {
+          ih = layout_scale_pct(rule->height.value, parent_content_w);
+        }
+        if (ih < 0) {
+          ih = 0;
+        }
+      }
+      h = ih + pad[0] + pad[2];
     } else if (box_type_eq(box, "spacer") && rule != NULL && rule->has_height) {
       long hv = 0;
       if (rule->height.kind == PV_LEN_PX) {
@@ -1054,6 +1105,12 @@ static long layout_box(pv_project *p, pv_box *box, long x, long y, long w,
         hv = 0;
       }
       h = hv + pad[0] + pad[2];
+    } else if (box_type_eq(box, "text") || box_type_eq(box, "button") ||
+        box_type_eq(box, "textfield")) {
+      // F1: one line of text at the rule's line height, plus
+      // vertical padding. A text leaf with no font-size rule keeps
+      // the old 1-row base.
+      h = layout_line_height_rows(rule) + pad[0] + pad[2];
     } else {
       h = 1 + pad[0] + pad[2];
     }
@@ -1545,7 +1602,8 @@ static void lint_diag(pv_project *p, const char *code, const char *message) {
 
 // Lint pass, after layout for one screen (see docs/preview.md):
 // CCB-P1017 tap target too small (button/textfield under 8 columns
-// or 2 rows, in wireframe cells), CCB-P1018 text contrast below
+// or 2 rows, in wireframe cells; the message also reports the size
+// in dp, but the thresholds stay in cells), CCB-P1018 text contrast below
 // threshold (text/button/textfield; foreground = the leaf rule's
 // color, background = the leaf rule's background-color else the
 // screen rule's; either side missing or unresolvable to RGB skips
@@ -1574,8 +1632,13 @@ static void layout_lint(pv_project *p, pv_box *root, box_list *all) {
           ccb_str_append(&msg, b->label);
           ccb_str_append(&msg, "\"");
         }
-        ccb_str_appendf(&msg, " is %ldx%ld cells (minimum 8x2)",
-          b->w, b->h);
+        // F2: thresholds stay in cells (see docs/preview.md for why
+        // a 48dp rule would misfire); the message reports the DP
+        // size alongside so the platform unit is visible.
+        ccb_str_appendf(&msg, " is %ldx%ld cells (%lddp x %lddp; "
+          "minimum 8x2 cells)", b->w, b->h,
+          pv_cols_to_dp(b->w, p->interior_cols, p->phone_dp_width),
+          pv_rows_to_dp(b->h));
         lint_diag(p, "CCB-P1017", msg.buf != NULL ? msg.buf : "");
         ccb_str_free(&msg);
       }
