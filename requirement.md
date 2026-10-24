@@ -218,10 +218,26 @@ version.
 - Compile `res/` into flat files.
 - Link with the manifest into a base APK, generating `R.java` (and `R.txt`)
   for the Kotlin/Java compile.
-- v1 manifest rule: **one manifest only**. Library manifests inside AARs
-  are ignored in v1, and CCB warns when an AAR contains one. A subset
-  manifest merger (permissions, activities, application attributes) is a
-  v2 feature.
+- Manifest merging: when the project declares AARs, each AAR's
+  `AndroidManifest.xml` is merged into the app manifest, deterministically
+  in the order the AARs are listed in config, and the merged manifest is
+  what `aapt2 link` sees (written to
+  `build/intermediates/merged-manifest/AndroidManifest.xml` for
+  inspection; the pre-merge app manifest stays in the project for
+  `--explain`/`--dry-run` inspection). Merged entries: application
+  components (`activity`, `service`, `receiver`, `provider`,
+  `activity-alias`) and `uses-permission` / `uses-feature`. Rules:
+  app-manifest entries always win on name conflict (warning naming the
+  AAR and the entry, app's version kept); identical entries from two
+  AARs dedup silently; same name with different attributes keeps the
+  first AAR's version with a warning naming both; a malformed AAR
+  manifest is a hard error (`CCB-E3018`) naming the AAR, failing the
+  build before packaging; an AAR with no manifest merges as nothing.
+  Relative component names resolve against the owning manifest's
+  package and are rewritten to fully-qualified form in the merged
+  output. Everything else in a library manifest (application
+  attributes, `<uses-sdk>`, `<permission>` declarations, `<meta-data>`,
+  `<queries>`) is ignored: the app manifest owns it.
 
 ### 5.3 Stage 2 — Compile code (`kotlinc` + `javac`)
 
@@ -237,7 +253,8 @@ version.
 - JARs go straight onto the compile classpath and into the dex input.
 - AARs are unzipped into the build dir: `classes.jar` to the classpath,
   `res/` merged into Stage 1 input, `assets/` merged into Stage 4,
-  `jni/<abi>/` copied to the APK's `lib/` dir.
+  `jni/<abi>/` copied to the APK's `lib/` dir, and `AndroidManifest.xml`
+  merged into the app manifest (see §5.2).
 - Duplicate classes across dependencies are a hard error naming both
   sources. No silent shadowing.
 
@@ -449,6 +466,7 @@ every pointer it returns: who owns it, who frees it, and when.
 | `ccb_json` | JSONL event writer for `--json` output. |
 | `ccb_cache` | Cache manifest and invalidation rules. |
 | `ccb_pipeline` | Stage orchestration. Each stage is a function with explicit inputs and outputs. |
+| `ccb_manifest` | Android manifest subset parser + AAR manifest merger (§5.2). |
 | `ccb_preview` | CSS parser, box layout, Kotlin structure parser, terminal renderer, logic tree (see §10). |
 | `ccb_cli` | Argument parsing and command dispatch. |
 
@@ -787,8 +805,8 @@ crashes on input it does not understand, and never silently guesses.
    Maven resolver (with a lockfile) in v2?
 3. **Compose?** Add the Compose compiler plugin path in v2, or declare
    Compose out of scope?
-4. **Manifest merging?** Implement the AAR manifest merge subset in v2,
-   or keep the one-manifest rule?
+4. **Manifest merging?** Implemented: the AAR manifest merge subset
+   (components, permissions, features; app-wins conflicts) — see §5.2.
 5. **Windows?** v2 platform, or Linux/macOS only by design?
 6. **Multi-module?** Stay single-module, or support library modules
    (each with its own `ccb.toml`) in v2?

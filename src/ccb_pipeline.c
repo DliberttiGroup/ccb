@@ -9,6 +9,7 @@
 #include "ccb_config.h"
 #include "ccb_sdk.h"
 #include "ccb_cache.h"
+#include "ccb_manifest.h"
 #include "ccb_zip.h"
 #include "ccb_pipeline.h"
 #include <unistd.h>
@@ -50,6 +51,10 @@ typedef struct {
   char **aar_jni_dirs;
   size_t aar_jni_count;
   size_t aar_jni_cap;
+  // Merged manifest (NULL when no AARs): what aapt2 link sees.
+  char *merged_manifest;
+  // Fingerprint of the merge inputs (app manifest + AAR manifests).
+  char *merge_fp;
   // Step outcomes.
   int compile_will_run;
   int link_will_run;
@@ -576,7 +581,6 @@ static ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
       }
     }
     ccb_zip_close(a);
-    ccb_log_warning(&p->log, "AAR manifest ignored (no manifest merging in v1): %s", aar_path);
     free(base);
     free(dest);
   }
@@ -584,6 +588,161 @@ static ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
   free(fp);
   p->cache_dirty = 1;
   *ran = 1;
+  p->steps_run++;
+  return CCB_OK;
+}
+
+// ---------- AAR manifest merge ----------
+
+// Read AndroidManifest.xml from an AAR zip. Returns malloc'd
+// NUL-terminated text, or NULL when the AAR has no manifest. Sets
+// *failed when the zip cannot be opened or the entry cannot be read.
+// Manifests are read from the zips directly, not from the extracted
+// copies, so the merge does not depend on the deps extraction cache.
+static char *ccb_aar_manifest_text(const char *aar_path, int *failed) {
+  *failed = 0;
+  ccb_zip_archive *a = NULL;
+  if (ccb_zip_open(aar_path, &a) != CCB_OK) {
+    *failed = 1;
+    return NULL;
+  }
+  char *text = NULL;
+  for (size_t e = 0; e < a->count; e++) {
+    const ccb_zip_entry *entry = &a->entries[e];
+    if (strcmp(entry->name, "AndroidManifest.xml") == 0) {
+      void *data = NULL;
+      size_t len = 0;
+      if (ccb_zip_read_entry(a, entry, &data, &len) != CCB_OK) {
+        *failed = 1;
+        break;
+      }
+      text = ccb_xmalloc(len + 1);
+      memcpy(text, data, len);
+      text[len] = '\0';
+      free(data);
+      break;
+    }
+  }
+  ccb_zip_close(a);
+  return text;
+}
+
+// Merge AAR manifests into the app manifest (requirement.md §5.2).
+// The merged manifest is what aapt2 link sees; the pre-merge app
+// manifest stays in the project for --explain/--dry-run inspection,
+// and the merged file is left under intermediates/ for inspection.
+static ccb_status ccb_step_merge_manifest(ccb_pipe *p) {
+  if (p->cfg->aars_count == 0) {
+    if (p->opts->explain) {
+      printf("merge-manifest: skip (no AAR dependencies)\n");
+    }
+    return CCB_OK;
+  }
+  char *merged_dir = ccb_path_join(p->intermediates, "merged-manifest");
+  char *merged_path = ccb_path_join(merged_dir, "AndroidManifest.xml");
+  p->merged_manifest = merged_path;
+  char *app_text = NULL;
+  size_t app_len = 0;
+  if (ccb_read_file(p->cfg->manifest, &app_text, &app_len) != CCB_OK) {
+    ccb_pipe_diag(p, "CCB-E3016", "merge-manifest", "cannot read app manifest");
+    free(merged_dir);
+    return CCB_ERR_BUILD;
+  }
+  const char **aar_texts = ccb_xcalloc(p->cfg->aars_count, sizeof(*aar_texts));
+  const char **aar_names = ccb_xcalloc(p->cfg->aars_count, sizeof(*aar_names));
+  for (size_t i = 0; i < p->cfg->aars_count; i++) {
+    aar_names[i] = p->cfg->aars[i];
+  }
+  int read_failed = 0;
+  for (size_t i = 0; i < p->cfg->aars_count; i++) {
+    int failed = 0;
+    aar_texts[i] = ccb_aar_manifest_text(p->cfg->aars[i], &failed);
+    if (failed) {
+      read_failed = 1;
+      break;
+    }
+  }
+  if (read_failed) {
+    ccb_pipe_diag(p, "CCB-E3015", "merge-manifest", "cannot read AAR manifest");
+    for (size_t i = 0; i < p->cfg->aars_count; i++) {
+      free((void *)aar_texts[i]);
+    }
+    free(aar_texts);
+    free(aar_names);
+    free(app_text);
+    free(merged_dir);
+    return CCB_ERR_BUILD;
+  }
+  // Fingerprint over the merge inputs, so link can key on it without
+  // reading the merged file (which does not exist yet in explain mode
+  // on a fresh tree).
+  ccb_fp_builder b;
+  memset(&b, 0, sizeof(b));
+  ccb_fp_add(&b, "app-manifest", app_text);
+  for (size_t i = 0; i < p->cfg->aars_count; i++) {
+    ccb_fp_add(&b, p->cfg->aars[i], aar_texts[i] != NULL ? aar_texts[i] : "<absent>");
+  }
+  p->merge_fp = ccb_cache_fingerprint((const char **)b.keys, (const char **)b.vals, b.count);
+  ccb_fp_free(&b);
+  const char *old = ccb_cache_step_fp(p->cache, "merge-manifest");
+  if (!p->opts->dry_run && old != NULL && strcmp(old, p->merge_fp) == 0 &&
+      ccb_path_exists(merged_path)) {
+    p->steps_skipped++;
+    if (p->opts->explain) {
+      printf("merge-manifest: skip (merge inputs unchanged)\n");
+    }
+    ccb_log_cache(&p->log, "merge-manifest", 1, "merge inputs unchanged");
+    for (size_t i = 0; i < p->cfg->aars_count; i++) {
+      free((void *)aar_texts[i]);
+    }
+    free(aar_texts);
+    free(aar_names);
+    free(app_text);
+    free(merged_dir);
+    return CCB_OK;
+  }
+  // Merge in every mode: this validates the manifests even for
+  // --explain and --dry-run, and surfaces conflict warnings.
+  ccb_manifest_warnings warns;
+  memset(&warns, 0, sizeof(warns));
+  char *err = NULL;
+  char *merged = ccb_manifest_merge(app_text, aar_texts, aar_names,
+      p->cfg->aars_count, &warns, &err);
+  for (size_t i = 0; i < warns.count; i++) {
+    ccb_log_warning(&p->log, "%s", warns.msgs[i]);
+  }
+  ccb_manifest_warnings_free(&warns);
+  for (size_t i = 0; i < p->cfg->aars_count; i++) {
+    free((void *)aar_texts[i]);
+  }
+  free(aar_texts);
+  free(aar_names);
+  free(app_text);
+  if (merged == NULL) {
+    ccb_pipe_diag(p, "CCB-E3018", "merge-manifest", err != NULL ? err : "manifest merge failed");
+    free(err);
+    free(merged_dir);
+    return CCB_ERR_BUILD;
+  }
+  if (p->opts->explain) {
+    printf("merge-manifest: run (merge inputs changed)\n");
+    free(merged);
+    free(merged_dir);
+    return CCB_OK;
+  }
+  if (!p->opts->dry_run) {
+    if (ccb_mkdir_p(merged_dir) != CCB_OK ||
+        ccb_write_file(merged_path, merged, strlen(merged)) != CCB_OK) {
+      ccb_pipe_diag(p, "CCB-E3016", "merge-manifest", "cannot write merged manifest");
+      free(merged);
+      free(merged_dir);
+      return CCB_ERR_BUILD;
+    }
+  }
+  free(merged);
+  free(merged_dir);
+  ccb_cache_set_step(p->cache, "merge-manifest", p->merge_fp);
+  p->cache_dirty = 1;
   p->steps_run++;
   return CCB_OK;
 }
@@ -753,6 +912,7 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
   ccb_fp_addl(&b, "min_sdk", p->cfg->min_sdk);
   ccb_fp_addl(&b, "target_sdk", p->cfg->target_sdk);
   ccb_fp_addl(&b, "compile_sdk", p->cfg->compile_sdk);
+  ccb_fp_add(&b, "merge-manifest", p->merge_fp == NULL ? "" : p->merge_fp);
   const char *compile_fp = ccb_cache_step_fp(p->cache, "compile-res");
   ccb_fp_add(&b, "compile-res", compile_fp == NULL ? "" : compile_fp);
   for (size_t i = 0; i < p->aar_res_zips_count; i++) {
@@ -818,7 +978,7 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
   ccb_argv_push(&av, "-o");
   ccb_argv_push(&av, p->linked_apk);
   ccb_argv_push(&av, "--manifest");
-  ccb_argv_push(&av, p->cfg->manifest);
+  ccb_argv_push(&av, p->merged_manifest != NULL ? p->merged_manifest : p->cfg->manifest);
   ccb_argv_push(&av, "-I");
   ccb_argv_push(&av, p->sdk->android_jar);
   ccb_argv_push(&av, "--java");
@@ -2253,6 +2413,8 @@ static void ccb_pipe_free(ccb_pipe *p) {
   free(p->linked_apk);
   free(p->classes_fp);
   free(p->tool_fingerprint);
+  free(p->merged_manifest);
+  free(p->merge_fp);
   ccb_free_str_array(p->aar_res_dirs, p->aar_res_dirs_count);
   ccb_free_str_array(p->aar_res_zips, p->aar_res_zips_count);
   ccb_free_str_array(p->aar_class_jars, p->aar_class_jars_count);
@@ -2281,6 +2443,9 @@ ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *resu
   }
   int deps_ran = 0;
   rc = ccb_step_deps(&p, &deps_ran);
+  if (rc == CCB_OK) {
+    rc = ccb_step_merge_manifest(&p);
+  }
   if (rc == CCB_OK) {
     rc = ccb_step_compile_res(&p);
   }

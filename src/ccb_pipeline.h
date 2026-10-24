@@ -1,7 +1,8 @@
 // ccb_pipeline: the build pipeline (spec §5, stages in order).
-// Stage 0 load/validate -> deps/AAR extraction -> aapt2 compile -> aapt2
-// link -> kotlinc (+ javac) -> d8 (or r8 for release+minify) -> NDK libs
-// -> package (CCB's own ZIP writer) -> zipalign -> apksigner -> verify.
+// Stage 0 load/validate -> deps/AAR extraction -> AAR manifest merge ->
+// aapt2 compile -> aapt2 link -> kotlinc (+ javac) -> d8 (or r8 for
+// release+minify) -> NDK libs -> package (CCB's own ZIP writer) ->
+// zipalign -> apksigner -> verify.
 // Steps are cached by input fingerprint: an unchanged step is skipped and
 // its previous outputs reused. A changed tool fingerprint invalidates all.
 #ifndef CCB_PIPELINE_H

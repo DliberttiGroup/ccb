@@ -56,6 +56,7 @@ error).
 | CCB-E3015 | AAR extraction failed |
 | CCB-E3016 | Cannot create or write a build directory or file |
 | CCB-E3017 | r8 failed |
+| CCB-E3018 | Malformed manifest during merge (names the AAR or the app manifest) |
 
 ## Preview (exit 1 unless noted)
 
