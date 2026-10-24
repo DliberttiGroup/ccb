@@ -24,11 +24,19 @@
 ## `ccb setup`
 
 Installs the missing components for the current project (or the
-defaults: platform android-35, build-tools 35.0.0) via `sdkmanager`,
-and accepts the SDK licenses. If no `cmdline-tools` are present, it
-bootstraps them from Google's official archive
+defaults: platform android-35, build-tools 35.0.0) via `sdkmanager`.
+Order: (1) fail fast when no JDK 17+ is available, with a message
+naming Java instead of a generic sdkmanager failure; (2) bootstrap
+`cmdline-tools` from Google's official archive
 (`commandlinetools-linux-11076708_latest.zip`), verified against a
-pinned SHA-256 before unzipping.
+pinned SHA-256 before unzipping, when none are present; (3) accept
+the SDK licenses; (4) install the components; (5) verify the
+components actually landed before printing "SDK ready" — an install
+that silently installed nothing (e.g. licenses not yet accepted on
+a fresh SDK) is reported as missing components, never as success.
+A config that was found but fails to load is an error, not a
+silent fallback to the default SDK home; defaults apply only when
+no `ccb.toml` exists at all.
 
 ## Known limitation: authenticated egress proxies
 
@@ -40,6 +48,8 @@ repository error; the SDK must then be provisioned by direct download
 (curl handles proxy auth fine), which is how the SDK on this VM was
 provisioned. This is an environment limitation, not a CCB bug: on a
 machine with direct repository access, `ccb setup` works normally.
+A missing JDK is reported separately before sdkmanager ever runs,
+so the proxy note does not mask it.
 
 ## Custom tool paths
 

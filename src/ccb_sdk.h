@@ -38,5 +38,10 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
 void ccb_sdk_free(ccb_sdk *sdk);
 // Find an executable on PATH. Returns a malloc'd absolute path or NULL.
 char *ccb_sdk_find_on_path(const char *name);
+// Resolve a usable java exactly the way ccb_sdk_resolve does:
+// $JAVA_HOME/bin/java, else java on PATH, with major version >= 17.
+// On success *out holds a malloc'd path and *major_out the major
+// version; on failure returns CCB_ERR_TOOLCHAIN with *out NULL.
+ccb_status ccb_sdk_find_java(char **out, int *major_out);
 
 #endif

@@ -142,6 +142,47 @@ static int ccb_parse_java_major(const char *text) {
   return (int)major;
 }
 
+ccb_status ccb_sdk_find_java(char **out, int *major_out) {
+  *out = NULL;
+  if (major_out != NULL) {
+    *major_out = 0;
+  }
+  const char *java_home = getenv("JAVA_HOME");
+  char *java = NULL;
+  if (java_home != NULL) {
+    char *p = ccb_path_join(java_home, "bin/java");
+    if (access(p, X_OK) == 0) {
+      java = p;
+    } else {
+      free(p);
+    }
+  }
+  if (java == NULL) {
+    java = ccb_sdk_find_on_path("java");
+  }
+  if (java == NULL) {
+    return CCB_ERR_TOOLCHAIN;
+  }
+  char *argv[] = { java, "-version", NULL };
+  ccb_proc_result r;
+  if (ccb_proc_run(argv, NULL, NULL, &r) != CCB_OK) {
+    ccb_proc_result_free(&r);
+    free(java);
+    return CCB_ERR_TOOLCHAIN;
+  }
+  int major = ccb_parse_java_major(r.err);
+  ccb_proc_result_free(&r);
+  if (major < 17) {
+    free(java);
+    return CCB_ERR_TOOLCHAIN;
+  }
+  *out = java;
+  if (major_out != NULL) {
+    *major_out = major;
+  }
+  return CCB_OK;
+}
+
 // Parse kotlinc -version stderr: "info: kotlinc-jvm 2.4.21 (JRE ...)".
 static char *ccb_parse_kotlin_version(const char *text) {
   const char *v = strstr(text, "kotlinc-jvm ");

@@ -370,10 +370,48 @@ static int ccb_download(const char *url, const char *dest) {
 }
 
 static int ccb_cmd_setup(ccb_args *a) {
+  // sdkmanager is a Java program: fail fast with a clear message when
+  // no usable JDK is present, instead of downloading cmdline-tools
+  // first and then failing at the sdkmanager step with a generic
+  // error (and a proxy note that does not apply).
+  {
+    char *java = NULL;
+    int java_major = 0;
+    if (ccb_sdk_find_java(&java, &java_major) != CCB_OK) {
+      fprintf(stderr,
+        "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
+        "Install a JDK and set JAVA_HOME, or put java 17+ on PATH.\n");
+      return 3;
+    }
+    free(java);
+  }
   ccb_diag_list diags;
   ccb_diag_list_init(&diags);
   ccb_config *cfg = ccb_load_config_or_die(a, &diags);
-  // Config is optional for setup: defaults apply without one.
+  // Config is optional for setup: defaults apply when no ccb.toml
+  // exists. But a config that was found (or explicitly requested)
+  // and failed to load is an error: silently falling back to the
+  // default SDK home would provision the wrong SDK.
+  if (cfg == NULL) {
+    int found = 0;
+    if (a->config_path != NULL) {
+      found = 1;
+    } else {
+      char cwd[4096];
+      char *discovered = NULL;
+      if (getcwd(cwd, sizeof(cwd)) != NULL &&
+          ccb_config_discover(cwd, NULL, &discovered) == CCB_OK) {
+        found = 1;
+        free(discovered);
+      }
+    }
+    if (found) {
+      ccb_print_diags(a, &diags);
+      ccb_diag_list_free(&diags);
+      return 2;
+    }
+    // No config anywhere: defaults apply.
+  }
   ccb_diag_list_free(&diags);
   long compile_sdk = 35;
   const char *build_tools = "35.0.0";
@@ -487,6 +525,37 @@ static int ccb_cmd_setup(ccb_args *a) {
       return 3;
     }
   }
+  // Accept licenses BEFORE installing: on a fresh SDK an install
+  // attempted before license acceptance installs nothing, and the
+  // old order then reported success anyway (see the verification
+  // below). A licenses failure is only a warning here: the
+  // post-install verification is the arbiter of success.
+  {
+    char *lic_cmd = NULL;
+    {
+      ccb_str s;
+      ccb_str_init(&s);
+      ccb_str_append(&s, "yes | \"");
+      ccb_str_append(&s, sdkmanager);
+      ccb_str_append(&s, "\" --licenses >/dev/null");
+      lic_cmd = ccb_str_steal(&s);
+    }
+    // execve does no PATH lookup, so resolve sh explicitly.
+    char *sh = ccb_sdk_find_on_path("sh");
+    if (sh == NULL) {
+      fprintf(stderr, "warning: could not accept SDK licenses (sh not found); continuing\n");
+    } else {
+      char *sh_argv[] = { sh, "-c", lic_cmd, NULL };
+      ccb_proc_result lr;
+      ccb_status lrc = ccb_proc_run(sh_argv, NULL, NULL, &lr);
+      if (lrc != CCB_OK || lr.exit_code != 0) {
+        fprintf(stderr, "warning: sdkmanager --licenses failed; continuing\n");
+      }
+      ccb_proc_result_free(&lr);
+      free(sh);
+    }
+    free(lic_cmd);
+  }
   // Install the components this project needs.
   ccb_str platform;
   ccb_str_init(&platform);
@@ -515,28 +584,45 @@ static int ccb_cmd_setup(ccb_args *a) {
     return 3;
   }
   ccb_proc_result_free(&r);
-  // Accept licenses non-interactively.
+  // Verify the components actually landed before claiming success:
+  // an install that silently installed nothing must not print
+  // "SDK ready".
   {
-    // Run via the sdkmanager's own directory: replace argv[0] command.
-    char *lic_cmd = NULL;
-    {
-      ccb_str s;
-      ccb_str_init(&s);
-      ccb_str_append(&s, "yes | \"");
-      ccb_str_append(&s, sdkmanager);
-      ccb_str_append(&s, "\" --licenses >/dev/null");
-      lic_cmd = ccb_str_steal(&s);
+    const char *missing[3];
+    int nmissing = 0;
+    char *pt = ccb_path_join(sdk_home, "platform-tools");
+    if (!ccb_path_exists(pt)) {
+      missing[nmissing++] = "platform-tools";
     }
-    // execve does no PATH lookup, so resolve sh explicitly.
-    char *sh = ccb_sdk_find_on_path("sh");
-    if (sh != NULL) {
-      char *sh_argv[] = { sh, "-c", lic_cmd, NULL };
-      ccb_proc_result lr;
-      ccb_proc_run(sh_argv, NULL, NULL, &lr);
-      ccb_proc_result_free(&lr);
-      free(sh);
+    free(pt);
+    ccb_str ps;
+    ccb_str_init(&ps);
+    ccb_str_append(&ps, "platforms/android-");
+    ccb_str_appendf(&ps, "%ld", compile_sdk);
+    char *plat = ccb_path_join(sdk_home, ps.buf);
+    ccb_str_free(&ps);
+    if (!ccb_path_exists(plat)) {
+      missing[nmissing++] = "platform";
     }
-    free(lic_cmd);
+    free(plat);
+    char *btd = ccb_path_join3(sdk_home, "build-tools", build_tools);
+    if (!ccb_path_exists(btd)) {
+      missing[nmissing++] = "build-tools";
+    }
+    free(btd);
+    if (nmissing > 0) {
+      fprintf(stderr, "error: ccb setup finished but the following components are still missing:");
+      for (int i = 0; i < nmissing; i++) {
+        fprintf(stderr, " %s", missing[i]);
+      }
+      fprintf(stderr, "\nCheck the sdkmanager output above, then run `ccb setup` again.\n");
+      ccb_str_free(&platform);
+      ccb_str_free(&bt);
+      free(sdkmanager);
+      free(default_home);
+      ccb_config_free(cfg);
+      return 3;
+    }
   }
   printf("SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
   ccb_str_free(&platform);
