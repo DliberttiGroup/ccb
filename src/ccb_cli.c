@@ -11,6 +11,11 @@
 #include "ccb_config.h"
 #include "ccb_sdk.h"
 #include "ccb_pipeline.h"
+#include "ccb_preview.h"
+#include "ccb_preview_walk.h"
+#include "ccb_preview_watch.h"
+#include "ccb_preview_gate.h"
+#include "ccb_preview_diff.h"
 #include "ccb_cli.h"
 #include <unistd.h>
 
@@ -28,14 +33,18 @@ static const char *CCB_USAGE =
   "commands:\n"
   "  init [dir] [--package PKG] [--name NAME]  scaffold a new project\n"
   "  setup                                     install missing SDK components\n"
-  "  check                                     validate config + toolchain\n"
-  "  build                                     build the APK\n"
+  "  check [--preview-gate] [--no-preview-gate]\n"
+  "                                            validate config + toolchain\n"
+  "  build [--preview-gate] [--no-preview-gate]  build the APK\n"
   "  clean                                     remove the build directory\n"
   "  doctor                                    report toolchain status\n"
   "  install                                   adb install the built APK\n"
   "  run                                       install + launch the app\n"
   "  logcat                                    stream device logs\n"
-  "  preview                                   (M5) render a UI preview\n"
+  "  preview [--ascii] [--width N] [--device phone|tablet] [--strict]\n"
+  "          [--screen NAME] [--output FILE] [--update-goldens] [--walk]\n"
+  "          [--watch] [--diff DIR] [--storyboard A,B] [screen]\n"
+  "                                            render a UI preview\n"
   "  version                                   print the version\n";
 
 typedef struct {
@@ -49,6 +58,20 @@ typedef struct {
   const char *positional;
   const char *init_package;
   const char *init_name;
+  int preview_ascii;
+  int preview_strict;
+  int preview_walk;
+  int preview_watch;
+  long preview_width;
+  int preview_width_set;
+  const char *preview_device;
+  const char *preview_screen;
+  const char *preview_output;
+  int preview_update_goldens;
+  const char *preview_diff;
+  const char *preview_storyboard;
+  int preview_gate_on;
+  int preview_gate_off;
 } ccb_args;
 
 static void ccb_print_diags_human(ccb_diag_list *diags) {
@@ -526,10 +549,45 @@ static int ccb_cmd_setup(ccb_args *a) {
 
 // ---------- check / build / clean / doctor ----------
 
+// Preview build gate, shared by `check` and `build`. Runs only when
+// enabled (explicit flag beats config); on failure the concise lines
+// go to stderr and the command exits 1. A gate-run failure (2) is a
+// config error and exits 2. Returns -1 when the gate is off (the
+// caller proceeds normally); 0 means the gate passed. In --json mode
+// the failure still surfaces as the stderr lines plus the nonzero
+// exit code, not as a JSON event.
+static int ccb_run_preview_gate(ccb_args *a, ccb_config *cfg) {
+  ccb_str failed;
+  int grc = 0;
+  if (!pv_gate_enabled(cfg, a->preview_gate_on, a->preview_gate_off)) {
+    return -1;
+  }
+  ccb_str_init(&failed);
+  grc = pv_gate_run(cfg, 0, 0, a->preview_strict, &failed);
+  if (grc == 1) {
+    fputs(failed.buf != NULL ? failed.buf : "", stderr);
+    ccb_str_free(&failed);
+    return 1;
+  }
+  if (grc == 2) {
+    fprintf(stderr, "error: preview gate could not run\n");
+    ccb_str_free(&failed);
+    return 2;
+  }
+  ccb_str_free(&failed);
+  return 0;
+}
+
 static int ccb_cmd_check(ccb_args *a) {
   ccb_diag_list diags;
+  ccb_config *cfg = NULL;
+  if (a->preview_gate_on && a->preview_gate_off) {
+    fprintf(stderr, "error: --preview-gate cannot be combined with "
+      "--no-preview-gate\n");
+    return 2;
+  }
   ccb_diag_list_init(&diags);
-  ccb_config *cfg = ccb_load_config_or_die(a, &diags);
+  cfg = ccb_load_config_or_die(a, &diags);
   if (cfg == NULL) {
     ccb_print_diags(a, &diags);
     ccb_diag_list_free(&diags);
@@ -541,6 +599,19 @@ static int ccb_cmd_check(ccb_args *a) {
     ccb_diag_list_free(&diags);
     ccb_config_free(cfg);
     return 3;
+  }
+  // Preview build gate (opt-in): runs after toolchain validation so a
+  // failing gate does not mask a broken toolchain, and a broken
+  // toolchain does not mask gate failures either way — the gate only
+  // runs when the toolchain resolved.
+  {
+    int gate = ccb_run_preview_gate(a, cfg);
+    if (gate == 1 || gate == 2) {
+      ccb_sdk_free(sdk);
+      ccb_config_free(cfg);
+      ccb_diag_list_free(&diags);
+      return gate;
+    }
   }
   if (a->json) {
     ccb_str s;
@@ -576,6 +647,11 @@ static int ccb_cmd_check(ccb_args *a) {
 
 static int ccb_cmd_build(ccb_args *a) {
   ccb_build_opts opts;
+  if (a->preview_gate_on && a->preview_gate_off) {
+    fprintf(stderr, "error: --preview-gate cannot be combined with "
+      "--no-preview-gate\n");
+    return 2;
+  }
   memset(&opts, 0, sizeof(opts));
   opts.json = a->json;
   opts.verbose = a->verbose;
@@ -585,6 +661,27 @@ static int ccb_cmd_build(ccb_args *a) {
   opts.config_path = a->config_path;
   ccb_diag_list diags;
   ccb_diag_list_init(&diags);
+  // Preview build gate (opt-in), fail-fast before any pipeline stage:
+  // a failing gate never starts a build. Config load here is only for
+  // the gate; when it fails, the gate is skipped and the pipeline
+  // below reports the config error normally.
+  {
+    ccb_diag_list gdiags;
+    ccb_config *gcfg = NULL;
+    ccb_diag_list_init(&gdiags);
+    gcfg = ccb_load_config_or_die(a, &gdiags);
+    if (gcfg != NULL) {
+      int gate = ccb_run_preview_gate(a, gcfg);
+      ccb_config_free(gcfg);
+      ccb_diag_list_free(&gdiags);
+      if (gate == 1 || gate == 2) {
+        ccb_diag_list_free(&diags);
+        return gate;
+      }
+    } else {
+      ccb_diag_list_free(&gdiags);
+    }
+  }
   ccb_build_result result;
   ccb_status rc = ccb_pipeline_build(&opts, &result, &diags);
   if (rc != CCB_OK) {
@@ -1155,6 +1252,899 @@ static int ccb_cmd_logcat(ccb_args *a) {
   return 0;
 }
 
+// ---------- preview ----------
+
+// Device width presets for `ccb preview --device`: phone is the
+// existing default frame width; tablet is a wider frame. An explicit
+// --width always wins over --device (resolved by the caller).
+#define CCB_PREVIEW_PHONE_WIDTH 40
+#define CCB_PREVIEW_TABLET_WIDTH 80
+
+// Write data to a file for --output. Returns 0 on success, -1 on
+// failure (message already printed to stderr).
+static int ccb_preview_write_file(const char *path, const char *data,
+    size_t len) {
+  if (ccb_write_file(path, data, len) != CCB_OK) {
+    fprintf(stderr, "error: cannot write %s\n", path);
+    return -1;
+  }
+  return 0;
+}
+
+// Resolve the golden directory for --update-goldens. The test-only
+// CCB_GOLDEN_DIR override wins when set; otherwise walk up from cwd
+// looking for tests/golden/preview. Returns a malloc'd path or NULL
+// (message already printed to stderr).
+static char *ccb_preview_golden_dir(const char *cwd) {
+  const char *env = getenv("CCB_GOLDEN_DIR");
+  if (env != NULL && env[0] != '\0') {
+    return ccb_xstrdup(env);
+  }
+  {
+    char *dir = ccb_xstrdup(cwd);
+    for (;;) {
+      char *cand = ccb_path_join3(dir, "tests", "golden/preview");
+      // ccb_path_join3 joins with single separators, so the third
+      // argument's embedded slash survives as a path component.
+      if (ccb_path_exists(cand)) {
+        free(dir);
+        return cand;
+      }
+      free(cand);
+      {
+        char *parent = ccb_dirname(dir);
+        if (strcmp(parent, dir) == 0) {
+          free(parent);
+          break;
+        }
+        free(dir);
+        dir = parent;
+      }
+    }
+    free(dir);
+  }
+  fprintf(stderr, "error: cannot locate golden directory "
+    "(run from inside the CCB tree, or set CCB_GOLDEN_DIR)\n");
+  return NULL;
+}
+
+// Regenerate the golden files from the current render: one frame file
+// per screen (<Screen>.txt), logic-tree.txt, and preview.json (the
+// JSON form with no trailing newline, matching the checked-in file).
+// Frames use the --ascii flag and no color, matching the goldens.
+// Returns 0 on success, 2 on any write failure.
+static int ccb_preview_update_goldens(pv_project *proj, int ascii,
+    const char *golden_dir) {
+  size_t i = 0;
+  ccb_str out;
+  ccb_str_init(&out);
+  for (i = 0; i < proj->nscreens; i++) {
+    ccb_str name;
+    char *path = NULL;
+    ccb_str_init(&out);
+    pv_render_screen(&out, proj->screens[i], proj->frame_width, ascii, 0);
+    ccb_str_init(&name);
+    ccb_str_append(&name, proj->screens[i]->name != NULL ?
+      proj->screens[i]->name : "?");
+    ccb_str_append(&name, ".txt");
+    path = ccb_path_join(golden_dir, name.buf);
+    ccb_str_free(&name);
+    if (ccb_preview_write_file(path, out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : "")) != 0) {
+      free(path);
+      ccb_str_free(&out);
+      return 2;
+    }
+    free(path);
+    ccb_str_free(&out);
+  }
+  ccb_str_init(&out);
+  pv_render_logic_tree(&out, proj);
+  {
+    char *path = ccb_path_join(golden_dir, "logic-tree.txt");
+    int rc = ccb_preview_write_file(path,
+      out.buf != NULL ? out.buf : "",
+      strlen(out.buf != NULL ? out.buf : ""));
+    free(path);
+    ccb_str_free(&out);
+    if (rc != 0) {
+      return 2;
+    }
+  }
+  ccb_str_init(&out);
+  pv_project_json(&out, proj);
+  {
+    char *path = ccb_path_join(golden_dir, "preview.json");
+    int rc = ccb_preview_write_file(path,
+      out.buf != NULL ? out.buf : "",
+      strlen(out.buf != NULL ? out.buf : ""));
+    free(path);
+    ccb_str_free(&out);
+    if (rc != 0) {
+      return 2;
+    }
+  }
+  printf("updated goldens in %s\n", golden_dir);
+  return 0;
+}
+
+// ---------- preview watch ----------
+
+// Free the watch path copies (all NULL-safe). The watch loop takes
+// its own copies of the dirs, so the caller's copies are freed at the
+// watch branch; the early exits above free them instead.
+static void ccb_preview_watch_paths_free(char *toml, char *dir,
+    char *styles, char *flow) {
+  free(toml);
+  free(dir);
+  free(styles);
+  free(flow);
+}
+
+// Render one preview, exactly as a single `ccb preview` does: human
+// frames + logic tree, or the JSON object (with its trailing newline).
+// --output writes the file and leaves stdout empty. Diagnostics go to
+// stderr in human mode and ride inside the JSON object in JSON mode.
+// Returns 0 (ok), 1 (preview errors), or 2 (output write failure).
+// The caller keeps owning proj.
+static int ccb_preview_render_once(ccb_args *a, pv_project *proj,
+    pv_screen *screen, long errors) {
+  size_t i = 0;
+  if (a->json) {
+    ccb_str out;
+    ccb_str_init(&out);
+    pv_project_json(&out, proj);
+    // The file carries exactly what stdout would have carried.
+    ccb_str_append(&out, "\n");
+    if (a->preview_output != NULL) {
+      int rc = ccb_preview_write_file(a->preview_output,
+        out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : ""));
+      ccb_str_free(&out);
+      return rc == 0 ? (errors > 0 ? 1 : 0) : 2;
+    }
+    fputs(out.buf != NULL ? out.buf : "", stdout);
+    ccb_str_free(&out);
+  } else {
+    int color = 0;
+    const char *term = NULL;
+    ccb_str out;
+    // A file is not a terminal: never write ANSI colors into it.
+    if (!a->preview_ascii && a->preview_output == NULL &&
+        getenv("NO_COLOR") == NULL) {
+      term = getenv("TERM");
+      color = term == NULL || strcmp(term, "dumb") != 0;
+    }
+    ccb_str_init(&out);
+    if (screen != NULL) {
+      pv_render_screen(&out, screen, proj->frame_width,
+        a->preview_ascii, color);
+    } else {
+      for (i = 0; i < proj->nscreens; i++) {
+        pv_render_screen(&out, proj->screens[i], proj->frame_width,
+          a->preview_ascii, color);
+      }
+    }
+    pv_render_logic_tree(&out, proj);
+    if (a->preview_output != NULL) {
+      int rc = ccb_preview_write_file(a->preview_output,
+        out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : ""));
+      ccb_str_free(&out);
+      // Diagnostics in human form, to stderr like other commands.
+      ccb_print_diags_human(&proj->diags);
+      return rc == 0 ? (errors > 0 ? 1 : 0) : 2;
+    }
+    fputs(out.buf != NULL ? out.buf : "", stdout);
+    ccb_str_free(&out);
+    // Diagnostics in human form, to stderr like other commands.
+    ccb_print_diags_human(&proj->diags);
+  }
+  return errors > 0 ? 1 : 0;
+}
+
+// One watch render, with the refresh framing for re-renders (first is
+// 0): TTY stdout clears first, piped human mode gets a delimiter line
+// on stdout, JSONL mode gets neither (each render stays one JSON
+// object + newline), and --output mode reports on stderr instead
+// (stdout stays empty). A selected screen that vanished since the
+// last render prints a diagnostic naming it and renders nothing; the
+// loop keeps watching. Returns the single-render exit code; the loop
+// ignores it (preview errors surface via diagnostics, and a signal
+// stop still exits 0).
+static int ccb_preview_watch_render(ccb_args *a, pv_project *proj,
+    const char *selected_name, long errors, int first) {
+  pv_screen *screen = NULL;
+  size_t i = 0;
+  if (selected_name != NULL) {
+    for (i = 0; i < proj->nscreens; i++) {
+      if (proj->screens[i]->name != NULL &&
+          strcmp(proj->screens[i]->name, selected_name) == 0) {
+        screen = proj->screens[i];
+        break;
+      }
+    }
+    if (screen == NULL) {
+      fprintf(stderr, "error: screen '%s' no longer exists; still watching\n",
+        selected_name);
+      return 0;
+    }
+  }
+  if (!first) {
+    if (a->preview_output != NULL) {
+      fprintf(stderr, "preview refreshed: %s\n", a->preview_output);
+    } else if (isatty(STDOUT_FILENO)) {
+      fputs("\033[2J\033[H", stdout);
+    } else if (!a->json) {
+      fputs("--- ccb preview refresh ---\n", stdout);
+    }
+  }
+  return ccb_preview_render_once(a, proj, screen, errors);
+}
+
+// NULL-aware dir comparison for the watched-dirs-moved check.
+static int ccb_preview_watch_dirs_changed(const char *old_dir,
+    const char *new_dir) {
+  if (old_dir == NULL || new_dir == NULL) {
+    return old_dir != new_dir;
+  }
+  return strcmp(old_dir, new_dir) != 0;
+}
+
+// The watch loop. Borrows toml_path, config_dir, styles_dir, flow_dir
+// and selected_name (NULL renders every screen); takes ownership of
+// proj and frees it on every exit path. Signals are installed once
+// the initial render is out: the handlers only set pv_watch_stop, the
+// loop checks it every tick and exits 0 on stop (nothing terminal
+// related to restore, since watch mode never enters raw mode, but
+// stdout is flushed first). A reload or load failure after a change
+// (a half-saved TOML, broken CSS/Kotlin, a [preview] section removed)
+// prints diagnostics and keeps watching on the last good render; a
+// broken save never kills the loop. Returns 0 on a signal stop, 2 on
+// a watch setup or wait failure.
+static int ccb_preview_watch_loop(ccb_args *a, const char *toml_path,
+    const char *config_dir, const char *styles_dir, const char *flow_dir,
+    long eff_width, pv_project *proj, long errors,
+    const char *selected_name) {
+  pv_watch_ctx *ctx = NULL;
+  pv_watch_snapshot *snap = NULL;
+  pv_watch_debounce deb;
+  char *cur_styles = styles_dir == NULL ? NULL : ccb_xstrdup(styles_dir);
+  char *cur_flow = flow_dir == NULL ? NULL : ccb_xstrdup(flow_dir);
+  int used_inotify = 0;
+  int rc = 0;
+  memset(&deb, 0, sizeof(deb));
+  // Initial render, exactly like a single preview.
+  ccb_preview_watch_render(a, proj, selected_name, errors, 1);
+  fflush(stdout);
+  pv_watch_install_signals();
+  if (pv_watch_stop) {
+    goto watch_done;
+  }
+  if (pv_watch_begin(config_dir, cur_styles, cur_flow, toml_path, &ctx,
+      &used_inotify) != CCB_OK) {
+    fprintf(stderr, "error: cannot watch preview inputs\n");
+    rc = 2;
+    goto watch_done;
+  }
+  CCB_UNUSED(used_inotify);
+  if (pv_watch_snapshot_take(config_dir, cur_styles, cur_flow, toml_path,
+      &snap) != CCB_OK) {
+    fprintf(stderr, "error: cannot scan preview inputs\n");
+    rc = 2;
+    goto watch_done;
+  }
+  for (;;) {
+    int w = 0;
+    if (pv_watch_stop) {
+      break;
+    }
+    w = pv_watch_wait(ctx, 50);
+    if (pv_watch_stop) {
+      break;
+    }
+    if (w < 0) {
+      fprintf(stderr, "error: preview watch failed\n");
+      rc = 2;
+      break;
+    }
+    if (w == 1) {
+      pv_watch_debounce_event(&deb, pv_watch_now_ms());
+    }
+    if (!pv_watch_debounce_due(&deb, pv_watch_now_ms())) {
+      continue;
+    }
+    pv_watch_debounce_reset(&deb);
+    {
+      pv_watch_snapshot *next = NULL;
+      ccb_diag_list rdiags;
+      ccb_config *ncfg = NULL;
+      pv_project *nproj = NULL;
+      long nerrors = 0;
+      if (pv_watch_snapshot_take(config_dir, cur_styles, cur_flow,
+          toml_path, &next) != CCB_OK) {
+        // A scan failure (a directory briefly missing) is not a
+        // reason to quit; the next tick rescans.
+        continue;
+      }
+      if (!pv_watch_snapshot_changed(snap, next)) {
+        pv_watch_snapshot_free(next);
+        continue;
+      }
+      // Adopt the new baseline before reloading, so a broken save
+      // does not re-report on every tick.
+      pv_watch_snapshot_free(snap);
+      snap = next;
+      // Reload config from the watched toml path: [preview] paths
+      // may themselves have changed.
+      ccb_diag_list_init(&rdiags);
+      if (ccb_config_load(toml_path, a->variant, &ncfg, &rdiags) != CCB_OK) {
+        ccb_print_diags_human(&rdiags);
+        ccb_diag_list_free(&rdiags);
+        continue;
+      }
+      // A successful load leaves no diagnostics to print; the call
+      // is harmless when the list is empty and surfaces any warning
+      // the loader did emit.
+      ccb_print_diags_human(&rdiags);
+      ccb_diag_list_free(&rdiags);
+      if (!ncfg->has_preview || (ncfg->preview_styles == NULL &&
+          ncfg->preview_flow == NULL)) {
+        fprintf(stderr, "error: preview no longer applicable to this "
+          "project; still watching\n");
+        ccb_config_free(ncfg);
+        continue;
+      }
+      {
+        ccb_diag_list ldiags;
+        ccb_status lrc = CCB_OK;
+        ccb_diag_list_init(&ldiags);
+        lrc = pv_project_load(ncfg, eff_width, a->preview_ascii,
+          a->preview_strict, &ldiags, &nproj);
+        if (lrc != CCB_OK || nproj == NULL) {
+          ccb_print_diags_human(&ldiags);
+          ccb_diag_list_free(&ldiags);
+          ccb_config_free(ncfg);
+          continue;
+        }
+        // Success: ownership of ldiags transferred to nproj; the
+        // caller's list is empty and must not be freed again.
+      }
+      nerrors = pv_project_diagnose(nproj);
+      // The watched dirs may have moved: re-point the watch at the
+      // new dirs so later changes there are seen. The new context is
+      // begun before the old one ends, so a begin failure keeps the
+      // old watch (and the fresh render) intact.
+      if (ccb_preview_watch_dirs_changed(cur_styles,
+          ncfg->preview_styles) ||
+          ccb_preview_watch_dirs_changed(cur_flow,
+          ncfg->preview_flow)) {
+        pv_watch_ctx *nctx = NULL;
+        if (pv_watch_begin(config_dir, ncfg->preview_styles,
+            ncfg->preview_flow, toml_path, &nctx,
+            &used_inotify) == CCB_OK) {
+          pv_watch_end(ctx);
+          ctx = nctx;
+          free(cur_styles);
+          free(cur_flow);
+          cur_styles = ncfg->preview_styles == NULL ? NULL :
+            ccb_xstrdup(ncfg->preview_styles);
+          cur_flow = ncfg->preview_flow == NULL ? NULL :
+            ccb_xstrdup(ncfg->preview_flow);
+          // Re-baseline against the new dirs so the move itself does
+          // not trigger one spurious refresh.
+          {
+            pv_watch_snapshot *fresh = NULL;
+            if (pv_watch_snapshot_take(config_dir, cur_styles, cur_flow,
+                toml_path, &fresh) == CCB_OK) {
+              pv_watch_snapshot_free(snap);
+              snap = fresh;
+            }
+          }
+        } else {
+          fprintf(stderr, "error: cannot watch new preview directories; "
+            "still watching the old ones\n");
+        }
+      }
+      ccb_config_free(ncfg);
+      pv_project_free(proj);
+      proj = nproj;
+      errors = nerrors;
+      ccb_preview_watch_render(a, proj, selected_name, errors, 0);
+      fflush(stdout);
+    }
+  }
+watch_done:
+  if (snap != NULL) {
+    pv_watch_snapshot_free(snap);
+  }
+  if (ctx != NULL) {
+    pv_watch_end(ctx);
+  }
+  pv_project_free(proj);
+  free(cur_styles);
+  free(cur_flow);
+  fflush(stdout);
+  return rc;
+}
+
+// ---------- preview storyboard ----------
+
+// Parse a --storyboard list ("A,B,C", names trimmed of surrounding
+// whitespace, repeats allowed) into the journey's screens, in order.
+// Returns NULL on any error (message already printed to stderr):
+// an empty list, an empty or whitespace-only element, or a name
+// that is not a screen in the project. All are usage errors (exit 2).
+static pv_screen **ccb_preview_storyboard_parse(pv_project *proj,
+    const char *list, size_t *out_n) {
+  pv_screen **screens = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  const char *p = NULL;
+  *out_n = 0;
+  if (list == NULL || list[0] == '\0') {
+    fprintf(stderr, "error: --storyboard requires a non-empty list of "
+      "screen names\n");
+    return NULL;
+  }
+  p = list;
+  for (;;) {
+    const char *seg_start = p;
+    const char *seg_end = NULL;
+    const char *s = NULL;
+    const char *e = NULL;
+    size_t i = 0;
+    pv_screen *found = NULL;
+    while (*p != '\0' && *p != ',') {
+      p++;
+    }
+    seg_end = p;
+    s = seg_start;
+    e = seg_end;
+    while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' ||
+        *s == '\r')) {
+      s++;
+    }
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' ||
+        e[-1] == '\r')) {
+      e--;
+    }
+    if (s == e) {
+      fprintf(stderr, "error: --storyboard has an empty element\n");
+      free(screens);
+      return NULL;
+    }
+    for (i = 0; i < proj->nscreens; i++) {
+      const char *name = proj->screens[i]->name;
+      if (name != NULL && strlen(name) == (size_t)(e - s) &&
+          memcmp(name, s, (size_t)(e - s)) == 0) {
+        found = proj->screens[i];
+        break;
+      }
+    }
+    if (found == NULL) {
+      fprintf(stderr, "error: --storyboard: no screen named '%.*s'\n",
+        (int)(e - s), s);
+      free(screens);
+      return NULL;
+    }
+    if (n == cap) {
+      size_t ncap = cap == 0 ? 4 : cap * 2;
+      screens = ccb_xrealloc(screens, ncap * sizeof(*screens));
+      cap = ncap;
+    }
+    screens[n++] = found;
+    if (*p == '\0') {
+      break;
+    }
+    p++; // consume ','
+  }
+  *out_n = n;
+  return screens;
+}
+
+// Render one storyboard: human mode prints each journey screen's
+// frame preceded by "Journey N/M: <Name>", then the normal logic
+// tree, then diagnostics to stderr; --json prints the same JSON
+// object as a plain preview but with "screens" filtered to the
+// journey screens, in journey order (repeats as separate entries).
+// --output writes the render to the file and leaves stdout empty.
+// Returns 0 (ok), 1 (preview errors), or 2 (output write failure).
+static int ccb_preview_render_storyboard(ccb_args *a, pv_project *proj,
+    pv_screen **journey, size_t njourney, long errors) {
+  size_t i = 0;
+  if (a->json) {
+    ccb_str out;
+    ccb_str_init(&out);
+    pv_project_json_screens(&out, proj, journey, njourney);
+    ccb_str_append(&out, "\n");
+    if (a->preview_output != NULL) {
+      int rc = ccb_preview_write_file(a->preview_output,
+        out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : ""));
+      ccb_str_free(&out);
+      return rc == 0 ? (errors > 0 ? 1 : 0) : 2;
+    }
+    fputs(out.buf != NULL ? out.buf : "", stdout);
+    ccb_str_free(&out);
+  } else {
+    int color = 0;
+    const char *term = NULL;
+    ccb_str out;
+    if (!a->preview_ascii && a->preview_output == NULL &&
+        getenv("NO_COLOR") == NULL) {
+      term = getenv("TERM");
+      color = term == NULL || strcmp(term, "dumb") != 0;
+    }
+    ccb_str_init(&out);
+    for (i = 0; i < njourney; i++) {
+      ccb_str_appendf(&out, "Journey %zu/%zu: %s\n", i + 1, njourney,
+        journey[i]->name != NULL ? journey[i]->name : "?");
+      pv_render_screen(&out, journey[i], proj->frame_width,
+        a->preview_ascii, color);
+    }
+    pv_render_logic_tree(&out, proj);
+    if (a->preview_output != NULL) {
+      int rc = ccb_preview_write_file(a->preview_output,
+        out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : ""));
+      ccb_str_free(&out);
+      ccb_print_diags_human(&proj->diags);
+      return rc == 0 ? (errors > 0 ? 1 : 0) : 2;
+    }
+    fputs(out.buf != NULL ? out.buf : "", stdout);
+    ccb_str_free(&out);
+    ccb_print_diags_human(&proj->diags);
+  }
+  return errors > 0 ? 1 : 0;
+}
+
+static int ccb_cmd_preview(ccb_args *a) {
+  char cwd[4096];
+  char *path = NULL;
+  ccb_diag_list diags;
+  ccb_config *cfg = NULL;
+  pv_project *proj = NULL;
+  ccb_status lrc = CCB_OK;
+  long errors = 0;
+  const char *selected = NULL;
+  pv_screen *selected_screen = NULL;
+  size_t i = 0;
+  // --dry-run and --explain are ignored for preview: it never builds.
+  CCB_UNUSED(a->dry_run);
+  CCB_UNUSED(a->explain);
+  // Conflicting destinations fail loudly instead of guessing.
+  if (a->preview_output != NULL && a->preview_update_goldens) {
+    fprintf(stderr, "error: --output cannot be combined with "
+      "--update-goldens\n");
+    return 2;
+  }
+  if (a->preview_update_goldens && a->preview_screen != NULL) {
+    fprintf(stderr, "error: --screen cannot be combined with "
+      "--update-goldens (goldens cover every screen)\n");
+    return 2;
+  }
+  if (a->preview_walk && a->preview_output != NULL) {
+    fprintf(stderr, "error: --walk cannot be combined with "
+      "--output (walk mode is interactive)\n");
+    return 2;
+  }
+  if (a->preview_walk && a->preview_update_goldens) {
+    fprintf(stderr, "error: --walk cannot be combined with "
+      "--update-goldens\n");
+    return 2;
+  }
+  if (a->preview_watch && a->preview_update_goldens) {
+    fprintf(stderr, "error: --watch cannot be combined with "
+      "--update-goldens\n");
+    return 2;
+  }
+  if (a->preview_watch && a->preview_walk) {
+    fprintf(stderr, "error: --watch cannot be combined with "
+      "--walk\n");
+    return 2;
+  }
+  if (a->preview_diff != NULL && a->preview_watch) {
+    fprintf(stderr, "error: --diff cannot be combined with --watch\n");
+    return 2;
+  }
+  if (a->preview_diff != NULL && a->preview_walk) {
+    fprintf(stderr, "error: --diff cannot be combined with --walk\n");
+    return 2;
+  }
+  if (a->preview_diff != NULL && a->preview_update_goldens) {
+    fprintf(stderr, "error: --diff cannot be combined with "
+      "--update-goldens\n");
+    return 2;
+  }
+  if (a->preview_storyboard != NULL && a->preview_screen != NULL) {
+    fprintf(stderr, "error: --storyboard cannot be combined with "
+      "--screen\n");
+    return 2;
+  }
+  if (a->preview_storyboard != NULL && a->positional != NULL) {
+    fprintf(stderr, "error: --storyboard cannot be combined with "
+      "--screen (a positional screen counts as --screen)\n");
+    return 2;
+  }
+  if (a->preview_storyboard != NULL && a->preview_walk) {
+    fprintf(stderr, "error: --storyboard cannot be combined with "
+      "--walk\n");
+    return 2;
+  }
+  if (a->preview_storyboard != NULL && a->preview_watch) {
+    fprintf(stderr, "error: --storyboard cannot be combined with "
+      "--watch\n");
+    return 2;
+  }
+  if (a->preview_storyboard != NULL && a->preview_diff != NULL) {
+    fprintf(stderr, "error: --storyboard cannot be combined with "
+      "--diff\n");
+    return 2;
+  }
+  if (a->preview_storyboard != NULL && a->preview_update_goldens) {
+    fprintf(stderr, "error: --storyboard cannot be combined with "
+      "--update-goldens\n");
+    return 2;
+  }
+  if (getcwd(cwd, sizeof(cwd)) == NULL) {
+    fprintf(stderr, "error: cannot determine working directory\n");
+    return 2;
+  }
+  if (ccb_config_discover(cwd, a->config_path, &path) != CCB_OK) {
+    if (a->config_path == NULL) {
+      // No project here at all: preview simply does not apply.
+      // A diff, though, needs something to compare against, so it
+      // is a usage error here rather than "not applicable".
+      if (a->preview_diff != NULL) {
+        fprintf(stderr, "error: --diff requires a project: no ccb.toml "
+          "found in this directory or any parent\n");
+        return 2;
+      }
+      // With --output the message goes to the file, not stdout.
+      if (a->preview_output != NULL) {
+        if (ccb_preview_write_file(a->preview_output,
+            "preview not applicable to this project\n",
+            strlen("preview not applicable to this project\n")) != 0) {
+          return 2;
+        }
+        return 0;
+      }
+      printf("preview not applicable to this project\n");
+      return 0;
+    }
+    // An explicit --config pointing at a missing file is a config error.
+    ccb_diag_list_init(&diags);
+    {
+      ccb_diag d = ccb_diag_make("CCB-E1009", "config",
+        "config file not found");
+      ccb_diag_list_push(&diags, &d);
+    }
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    return 2;
+  }
+  ccb_diag_list_init(&diags);
+  if (ccb_config_load(path, a->variant, &cfg, &diags) != CCB_OK) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    free(path);
+    return 2;
+  }
+  // Watch mode keeps the discovered toml path, its directory, and the
+  // resolved preview dirs alive for the loop's lifetime: the loop
+  // re-loads config from the toml path on every change, and the
+  // [preview] paths may themselves move. All four are NULL when
+  // --watch is not set; the early exits below free them.
+  char *watch_toml = NULL;
+  char *watch_config_dir = NULL;
+  char *watch_styles = NULL;
+  char *watch_flow = NULL;
+  if (a->preview_watch) {
+    watch_toml = ccb_xstrdup(path);
+    watch_config_dir = ccb_dirname(path);
+    watch_styles = cfg->preview_styles == NULL ? NULL :
+      ccb_xstrdup(cfg->preview_styles);
+    watch_flow = cfg->preview_flow == NULL ? NULL :
+      ccb_xstrdup(cfg->preview_flow);
+  }
+  free(path);
+  if (a->preview_diff != NULL) {
+    // Diff runs its own project load: it must report a project without
+    // a usable [preview] section as exit 2, not the plain preview's
+    // exit-0 "not applicable", so it branches before the
+    // not-applicable early return below. --screen overrides the
+    // positional screen, as in the normal render path.
+    const char *diff_screen = a->preview_screen != NULL ?
+      a->preview_screen : a->positional;
+    long diff_width = a->preview_width;
+    ccb_str out, err;
+    int drc = 0;
+    if (!a->preview_width_set && a->preview_device != NULL) {
+      diff_width = strcmp(a->preview_device, "tablet") == 0 ?
+        CCB_PREVIEW_TABLET_WIDTH : CCB_PREVIEW_PHONE_WIDTH;
+    }
+    ccb_str_init(&out);
+    ccb_str_init(&err);
+    drc = pv_diff_run(cfg, a->preview_diff, diff_screen, diff_width,
+      a->preview_ascii, a->preview_strict, a->json, &out, &err);
+    if (err.buf != NULL && err.buf[0] != '\0') {
+      fputs(err.buf, stderr);
+    }
+    if (drc == 0 || drc == 1) {
+      if (a->json) {
+        ccb_str_append(&out, "\n");
+      }
+      if (a->preview_output != NULL) {
+        int wrc = ccb_preview_write_file(a->preview_output,
+          out.buf != NULL ? out.buf : "",
+          strlen(out.buf != NULL ? out.buf : ""));
+        ccb_str_free(&out);
+        ccb_str_free(&err);
+        ccb_config_free(cfg);
+        ccb_diag_list_free(&diags);
+        ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+          watch_styles, watch_flow);
+        return wrc == 0 ? drc : 2;
+      }
+      fputs(out.buf != NULL ? out.buf : "", stdout);
+    }
+    ccb_str_free(&out);
+    ccb_str_free(&err);
+    ccb_config_free(cfg);
+    ccb_diag_list_free(&diags);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return drc;
+  }
+  if (!cfg->has_preview || (cfg->preview_styles == NULL &&
+      cfg->preview_flow == NULL)) {
+    if (a->preview_output != NULL) {
+      int rc = ccb_preview_write_file(a->preview_output,
+        "preview not applicable to this project\n",
+        strlen("preview not applicable to this project\n"));
+      ccb_config_free(cfg);
+      ccb_diag_list_free(&diags);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return rc == 0 ? 0 : 2;
+    }
+    printf("preview not applicable to this project\n");
+    ccb_config_free(cfg);
+    ccb_diag_list_free(&diags);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return 0;
+  }
+  // Effective frame width: an explicit --width always wins over
+  // --device; otherwise the device preset applies (phone = the
+  // default 40, tablet = 80); with neither, 0 lets load use its
+  // default. Hoisted out of the block so the watch loop reuses the
+  // same width on every reload.
+  long eff_width = a->preview_width;
+  if (!a->preview_width_set && a->preview_device != NULL) {
+    eff_width = strcmp(a->preview_device, "tablet") == 0 ?
+      CCB_PREVIEW_TABLET_WIDTH : CCB_PREVIEW_PHONE_WIDTH;
+  }
+  lrc = pv_project_load(cfg, eff_width, a->preview_ascii,
+    a->preview_strict, &diags, &proj);
+  if (lrc == CCB_ERR_CONFIG) {
+    if (a->preview_output != NULL) {
+      int rc = ccb_preview_write_file(a->preview_output,
+        "preview not applicable to this project\n",
+        strlen("preview not applicable to this project\n"));
+      ccb_diag_list_free(&diags);
+      ccb_config_free(cfg);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return rc == 0 ? 0 : 2;
+    }
+    printf("preview not applicable to this project\n");
+    ccb_diag_list_free(&diags);
+    ccb_config_free(cfg);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return 0;
+  }
+  if (lrc != CCB_OK || proj == NULL) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(cfg);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return 2;
+  }
+  // From here the diag list belongs to the project; the caller's list
+  // was left empty by pv_project_load, so it must not be freed again.
+  ccb_config_free(cfg);
+  errors = pv_project_diagnose(proj);
+  if (a->preview_storyboard != NULL) {
+    size_t njourney = 0;
+    pv_screen **journey = ccb_preview_storyboard_parse(proj,
+      a->preview_storyboard, &njourney);
+    int rc = 0;
+    if (journey == NULL) {
+      pv_project_free(proj);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return 2;
+    }
+    rc = ccb_preview_render_storyboard(a, proj, journey, njourney,
+      errors);
+    free(journey);
+    pv_project_free(proj);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return rc;
+  }
+  // Screen selection: --screen overrides the positional argument.
+  selected = a->preview_screen != NULL ? a->preview_screen : a->positional;
+  if (selected != NULL) {
+    for (i = 0; i < proj->nscreens; i++) {
+      if (proj->screens[i]->name != NULL &&
+          strcmp(proj->screens[i]->name, selected) == 0) {
+        selected_screen = proj->screens[i];
+        break;
+      }
+    }
+    if (selected_screen == NULL) {
+      fprintf(stderr, "error: no screen named '%s'\n", selected);
+      fprintf(stderr, "available screens:");
+      for (i = 0; i < proj->nscreens; i++) {
+        fprintf(stderr, " %s",
+          proj->screens[i]->name != NULL ? proj->screens[i]->name : "?");
+      }
+      fprintf(stderr, "\nusage: ccb preview [--screen NAME] [--walk] [screen]\n");
+      pv_project_free(proj);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return 1;
+    }
+  }
+  if (a->preview_walk) {
+    int wrc = 0;
+    int color = 0;
+    const char *term = NULL;
+    if (!a->preview_ascii && getenv("NO_COLOR") == NULL) {
+      term = getenv("TERM");
+      color = term == NULL || strcmp(term, "dumb") != 0;
+    }
+    wrc = pv_walk_run(proj,
+      selected_screen != NULL ? selected_screen->name : NULL,
+      proj->frame_width, a->preview_ascii, color);
+    pv_project_free(proj);
+    return wrc;
+  }
+  if (a->preview_watch) {
+    // The loop takes proj; the caller's path copies are freed here.
+    int wrc = ccb_preview_watch_loop(a, watch_toml, watch_config_dir,
+      watch_styles, watch_flow, eff_width, proj, errors, selected);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return wrc;
+  }
+  if (a->preview_update_goldens) {
+    char *golden_dir = ccb_preview_golden_dir(cwd);
+    int rc = 0;
+    if (golden_dir == NULL) {
+      pv_project_free(proj);
+      return 2;
+    }
+    rc = ccb_preview_update_goldens(proj, a->preview_ascii, golden_dir);
+    free(golden_dir);
+    pv_project_free(proj);
+    // A write failure (2) dominates; otherwise preview errors (1)
+    // still surface, matching a plain preview run.
+    return rc != 0 ? rc : (errors > 0 ? 1 : 0);
+  }
+  // Single render, shared with the watch loop's initial render.
+  {
+    int rc = ccb_preview_render_once(a, proj, selected_screen, errors);
+    pv_project_free(proj);
+    return rc;
+  }
+}
+
 // ---------- dispatch ----------
 
 static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
@@ -1212,6 +2202,78 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
           value = argv[++i];
         }
         a->init_name = value;
+      } else if (strcmp(flag, "--ascii") == 0) {
+        a->preview_ascii = 1;
+      } else if (strcmp(flag, "--walk") == 0) {
+        a->preview_walk = 1;
+      } else if (strcmp(flag, "--watch") == 0) {
+        a->preview_watch = 1;
+      } else if (strcmp(flag, "--strict") == 0) {
+        a->preview_strict = 1;
+      } else if (strcmp(flag, "--width") == 0) {
+        char *end = NULL;
+        long v = 0;
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        v = strtol(value, &end, 10);
+        if (end == value || *end != '\0') {
+          return -1;
+        }
+        a->preview_width = v;
+        a->preview_width_set = 1;
+      } else if (strcmp(flag, "--device") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        if (strcmp(value, "phone") != 0 && strcmp(value, "tablet") != 0) {
+          return -1;
+        }
+        a->preview_device = value;
+      } else if (strcmp(flag, "--output") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_output = value;
+      } else if (strcmp(flag, "--update-goldens") == 0) {
+        a->preview_update_goldens = 1;
+      } else if (strcmp(flag, "--screen") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_screen = value;
+      } else if (strcmp(flag, "--diff") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_diff = value;
+      } else if (strcmp(flag, "--storyboard") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_storyboard = value;
+      } else if (strcmp(flag, "--preview-gate") == 0) {
+        a->preview_gate_on = 1;
+      } else if (strcmp(flag, "--no-preview-gate") == 0) {
+        a->preview_gate_off = 1;
       } else {
         return -1;
       }
@@ -1264,8 +2326,7 @@ int ccb_cli_main(int argc, char **argv) {
     return ccb_cmd_logcat(&a);
   }
   if (strcmp(a.command, "preview") == 0) {
-    fprintf(stderr, "preview is not implemented yet (M5 stretch goal)\n");
-    return 1;
+    return ccb_cmd_preview(&a);
   }
   if (strcmp(a.command, "version") == 0) {
     if (a.json) {

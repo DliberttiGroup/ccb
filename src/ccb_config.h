@@ -66,8 +66,11 @@ typedef struct {
   int has_preview;
   char *preview_styles;
   char *preview_flow;
+  char *preview_resources; // [preview] resources: dir of strings.xml/colors.xml
   long preview_phone_width;
   long preview_phone_height;
+  int preview_strict;
+  int preview_gate; // [preview] gate: opt-in preview gate for check/build
 } ccb_config;
 
 // Search upward from start_dir for ccb.toml. When explicit is non-NULL it

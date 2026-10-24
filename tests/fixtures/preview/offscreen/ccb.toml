@@ -1,0 +1,19 @@
+ccb_version = 1
+
+[project]
+name = "offscreen"
+package = "com.example.offscreen"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[preview]
+styles = "styles"
+flow = "flow"
+phone_width = 390
+phone_height = 844
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"

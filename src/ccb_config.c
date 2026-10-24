@@ -215,6 +215,7 @@ void ccb_config_free(ccb_config *c) {
   free(c->build_dir);
   free(c->preview_styles);
   free(c->preview_flow);
+  free(c->preview_resources);
   ccb_free_str_array(c->jars, c->jars_count);
   ccb_free_str_array(c->aars, c->aars_count);
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
@@ -275,7 +276,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules" };
     static const char *deps_keys[] = { "jars", "aars" };
     static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
-    static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height" };
+    static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources" };
     ccb_check_unknown_keys(&v, "", root_keys, 1);
     ccb_check_unknown_keys(&v, "project", project_keys, 7);
     ccb_check_unknown_keys(&v, "paths", paths_keys, 6);
@@ -285,7 +286,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     ccb_check_unknown_keys(&v, "build", build_keys, 5);
     ccb_check_unknown_keys(&v, "deps", deps_keys, 2);
     ccb_check_unknown_keys(&v, "ndk", ndk_keys, 3);
-    ccb_check_unknown_keys(&v, "preview", preview_keys, 4);
+    ccb_check_unknown_keys(&v, "preview", preview_keys, 7);
   }
 
   // Root: ccb_version.
@@ -588,6 +589,11 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
       c->preview_flow = ccb_resolve(c->project_root, p);
       free(p);
     }
+    p = NULL;
+    if (ccb_get_str(&v, "preview", "resources", &p)) {
+      c->preview_resources = ccb_resolve(c->project_root, p);
+      free(p);
+    }
     long w = 0;
     if (ccb_get_int(&v, "preview", "phone_width", &w)) {
       c->preview_phone_width = w;
@@ -595,6 +601,14 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     long h = 0;
     if (ccb_get_int(&v, "preview", "phone_height", &h)) {
       c->preview_phone_height = h;
+    }
+    int strict = 0;
+    if (ccb_get_bool(&v, "preview", "strict", &strict)) {
+      c->preview_strict = strict;
+    }
+    int gate = 0;
+    if (ccb_get_bool(&v, "preview", "gate", &gate)) {
+      c->preview_gate = gate;
     }
   }
 
@@ -650,6 +664,9 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   }
   if (c->preview_flow != NULL) {
     ccb_require_dir(&v, c->preview_flow, "preview flow directory");
+  }
+  if (c->preview_resources != NULL) {
+    ccb_require_dir(&v, c->preview_resources, "preview resources directory");
   }
 
   ccb_toml_free_doc(doc);

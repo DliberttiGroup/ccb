@@ -5,7 +5,10 @@ tree rendered as a phone-frame wireframe. This plan is the implementation
 brief for M5. The normative spec stays in `requirement.md` §10; this
 document adds the considerations, edge cases, and build order.
 
-Status: planning only (2026-10-24). `ccb preview` is currently a stub.
+Status: implemented (2026-10-24, M5). `ccb preview` is live: CSS subset
+parser + box layout + wireframe renderer, Kotlin structure parser +
+logic tree, diagnostics pass, JSON output. See `docs/preview.md` for
+the frozen convention and `requirement.md` §10 for the normative spec.
 CCB is a private tool for one user; no public-release constraints apply.
 
 ## 1. Scope lock (decide first, defend always)
@@ -160,6 +163,8 @@ dark or light background — use explicit colors or default foreground.
 ## 10. Open decisions for the user
 
 - Default phone-frame width (40 columns proposed).
-- Walk mode: in M5 at all, or v2 only (recommendation: v2).
+- Walk mode: implemented in the polish phase (2026-10-24) as static
+  exploration only (keys, branch picking, back stack); no longer
+  v2-only.
 - Whether preview ever extends to XML layouts / Compose (spec Q8) —
   recommendation: no, CSS-convention-only stays the contract.

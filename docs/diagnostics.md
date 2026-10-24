@@ -57,6 +57,36 @@ error).
 | CCB-E3016 | Cannot create or write a build directory or file |
 | CCB-E3017 | r8 failed |
 
+## Preview (exit 1 unless noted)
+
+| Code | Meaning |
+| ---- | ------- |
+| CCB-P1001 | Unknown CSS property (warning; error under `--strict` / `[preview] strict`) |
+| CCB-P1002 | CSS parse error, partial parse kept (warning) |
+| CCB-P1003 | Overlapping boxes (warning) |
+| CCB-P1004 | Box extends past the interior bounds (warning) |
+| CCB-P1005 | Navigation to an unknown screen (error) |
+| CCB-P1006 | Unreachable screen, nothing navigates to it (warning) |
+| CCB-P1007 | Empty screen, no components (warning) |
+| CCB-P1008 | Duplicate screen name, 2nd and later occurrences (error) |
+| CCB-P1009 | Text clipped to its box (warning) |
+| CCB-P1010 | Flow parse error, partial parse kept (warning) |
+| CCB-P1011 | No screens found (warning) |
+| CCB-P1012 | Unknown Kotlin construct, kept as a generic box (warning) |
+| CCB-P1013 | Frame width clamped to the minimum of 24 columns (warning) |
+| CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
+| CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
+| CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells (warning, always) |
+| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always) |
+
+Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under
+`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018 are
+warnings even under `--strict`, so they never fail the build gate.
+A project with no usable
+`[preview]` section is not a diagnostic at all: `ccb preview` prints
+"preview not applicable to this project" and exits 0.
+
 ## Device (exit 5)
 
 | Code | Meaning |

@@ -1,5 +1,6 @@
 # CCB build outputs (never committed)
 build/
+build-*/
 build-outputs/
 *.apk
 *.o

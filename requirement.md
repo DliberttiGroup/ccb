@@ -502,7 +502,15 @@ styles = "app/src/main/styles"   # CSS files
 flow = "app/src/main/flow"       # Kotlin flow sources
 phone_width = 390
 phone_height = 844
+strict = false
 ```
+
+The full convention — screen and component declarations, the one-CSS-
+file-per-screen rule plus `common.css`, the selector set, the layout
+model in terminal columns, and the exit codes — is frozen in
+`docs/preview.md`. The terminal frame is `--width` columns (default
+40, minimum 24; smaller values clamp with a warning). `strict = true`
+(or `--strict`) turns subset warnings into errors.
 
 Projects that do not follow the convention get a clear
 "preview not applicable to this project" message, not a crash and not
@@ -515,8 +523,15 @@ Preview parses real CSS, but only a documented subset:
 
 - Supported: `display` (block, flex), `flex-direction` (row, column),
   `width`/`height` (px, %), `padding`, `margin` (px), `background-color`,
-  `color` (hex, named), `font-size` (px), `position` (static, absolute
-  subset), `gap`.
+  `color` (hex, named, or an `@color/name` reference), `font-size` (px),
+  `position` (static, absolute subset), `gap`, `text-align` (left,
+  center, right), `border-width` (px), `border-color` (hex, named),
+  `flex-wrap` (nowrap, wrap; row containers only).
+- Deliberately NOT supported: `justify-content` / `align-items`
+  (distribution semantics the sum-based model cannot express),
+  `border-radius` (no visible rounding at 1-cell scale),
+  `line-height` (text is single-row by design), the `border`
+  shorthand.
 - Anything outside the subset produces a **warning** naming the
   property and its location, and rendering continues with a fallback.
   Unknown properties never fail a preview; silently ignoring them
@@ -530,7 +545,10 @@ execute Kotlin. It statically parses structure:
 
 - Screen and component declarations, component trees per screen.
 - Navigation calls (`nav("Home")`, `navigateTo(...)`) → edges in the
-  logic tree.
+  logic tree. Arguments after the target are recorded on the edge
+  (string literals literally, `name = value` pairs as written,
+  anything else as `unknown`) and shown in the tree, walk mode's
+  edge list, and JSON (`"args"` array; JSON `"version":2`).
 - `when`/`if` branches over state variables → branches in the logic
   tree, labeled with their conditions, **not evaluated**. A branch is
   shown, not resolved.
@@ -545,8 +563,51 @@ screen with no components is a warning.
 - Terminal render per screen (default): phone frame, boxes, colors,
   clipped text, then the logic tree, then diagnostics.
 - `--json`: the box tree, logic tree, and diagnostics as structured
-  data for agents.
+  data for agents (JSON `"version":2`; edge `"args"` arrays).
 - `--screen NAME`: render one screen only.
+- `--storyboard "A,B,C"`: render a journey of screens in order
+  (repeats allowed), each frame preceded by a `Journey N/M: <Name>`
+  header; `--json` keeps only the journey screens, in order.
+  Conflicts with `--screen`, `--walk`, `--watch`, `--diff`,
+  `--update-goldens` (exit 2).
+- `[preview] resources = "res"`: optional directory of `strings.xml`
+  / `colors.xml`; whole-label `@string/name` and `color` /
+  `background-color` `@color/name` values resolve at load time.
+  Unresolved references warn (CCB-P1016) and keep the literal.
+- Lint warnings (always warnings, even under `--strict`, never
+  build-gate failures): CCB-P1017 tap target too small (`button` /
+  `textfield` under 8 columns or 2 rows, wireframe cells),
+  CCB-P1018 text contrast below 4.5:1 (3.0:1 at `font-size` ≥ 24px)
+  by WCAG relative luminance.
+- `--walk [screen]`: interactive static exploration of the logic
+  tree (arrow keys/`j`/`k`, Enter, `b`, `t` branch mode, `q`); see
+  `docs/preview.md` Walk mode. Still static only — never execution
+  or evaluation.
+- `--watch [screen]`: render once, then re-render on every change to
+  the styles/flow files or `ccb.toml` (~200ms debounce; TTY clear,
+  piped delimiter, `--json` JSONL, `--output` rewrite); Ctrl-C /
+  SIGTERM exits 0; a broken save prints diagnostics and keeps
+  watching. See `docs/preview.md` Watch mode. Conflicts with
+  `--update-goldens` and `--walk` (exit 2).
+- `--output FILE`, `--device phone|tablet`, `--update-goldens`:
+  write the render to a file, frame-width presets, regenerate the
+  checked-in goldens. `--json` carries an additive `"version":2`
+  field.
+- `--diff DIR`: compare the current renders against a snapshot
+  directory in the golden-file format; exit 0 identical, 1 with a
+  unified diff per differing file, 2 for usage/config errors
+  (unreadable snapshot dir, no usable [preview] section, unknown
+  --screen). `--screen` scopes to one screen; `--json` emits a
+  machine-readable diff object. Conflicts with --watch, --walk,
+  --update-goldens (exit 2).
+- Build gate (opt-in, off by default): `[preview] gate = true` or
+  `check`/`build --preview-gate` (`--no-preview-gate` forces off;
+  explicit flag beats config) runs preview diagnostics as part of
+  `check` (after toolchain validation) and `build` (before any
+  pipeline stage). Any preview ERROR fails the gate (exit 1, one
+  concise line per failing diagnostic on stderr); warnings alone
+  pass; preview-not-applicable projects pass silently. See
+  `docs/preview.md` Build gate.
 - Exit codes reuse §6.4 (2 for preview config errors, 1 for preview
   failures such as an unresolvable navigation target).
 
@@ -556,7 +617,9 @@ Preview is NOT: an emulator, a pixel-perfect render, an animation
 player, an interaction simulator, a Kotlin interpreter, or a source
 of real data. Fonts are the terminal's fonts. System UI, themes, and
 Android framework behavior are not modeled. An interactive walk mode
-(arrow keys through the logic tree) is a v2 candidate, not v1.
+(arrow keys through the logic tree) was a v2 candidate; it is
+implemented (see `docs/preview.md` Walk mode) — still static
+exploration only, never execution or evaluation.
 
 ### 10.7 Feasibility: yes, scoped this way
 

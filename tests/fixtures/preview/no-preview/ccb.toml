@@ -1,0 +1,13 @@
+ccb_version = 1
+
+[project]
+name = "no-preview"
+package = "com.example.no_preview"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"

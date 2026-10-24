@@ -1,0 +1,270 @@
+// ccb_preview: terminal UI preview for CCB UI-convention projects.
+// A linter with a picture, NOT an emulator: it statically parses a CSS
+// subset and Kotlin flow structure, lays boxes out on a phone frame in
+// terminal columns, and renders wireframes + a logic tree + diagnostics.
+// It never executes Kotlin, never evaluates conditions, never fetches
+// data, never animates. Everything outside the documented subset warns
+// and falls back; unknown constructs become labeled unknown nodes.
+//
+// Ownership: every preview allocation lives in one arena owned by the
+// project (or passed in by unit tests). Freeing the project destroys
+// the arena. The diagnostic list is the one exception: it owns malloc'd
+// strings and is freed with ccb_diag_list_free by pv_project_free.
+#ifndef CCB_PREVIEW_H
+#define CCB_PREVIEW_H
+
+#include "ccb_common.h"
+#include "ccb_alloc.h"
+#include "ccb_str.h"
+#include "ccb_diag.h"
+#include "ccb_config.h"
+
+// Diagnostic codes (see docs/diagnostics.md).
+// CCB-P1001 unknown CSS property (warning; error under --strict)
+// CCB-P1002 CSS parse error, partial parse kept (warning)
+// CCB-P1003 overlapping boxes (warning)
+// CCB-P1004 off-screen element (warning)
+// CCB-P1005 navigation to an unknown screen (error)
+// CCB-P1006 unreachable screen (warning)
+// CCB-P1007 empty screen (warning)
+// CCB-P1008 duplicate screen (error)
+// CCB-P1009 text clipped to its box (warning)
+// CCB-P1010 flow parse error, partial parse kept (warning)
+// CCB-P1011 no screens found (warning)
+// CCB-P1012 unknown Kotlin construct, kept as a generic box (warning)
+// CCB-P1013 frame width clamped to the minimum (warning)
+// CCB-P1014 CSS value outside the subset, e.g. unsupported unit or
+//   display value (warning; error under --strict)
+// CCB-P1015 CSS file ignored: it is neither common.css nor a
+//   <Screen>.css file for a screen in the project (warning)
+// CCB-P1016 unresolved @string/ or @color/ reference, or a skipped
+//   malformed/non-hex resource entry (warning)
+// CCB-P1017 tap target too small: button/textfield under 8 columns
+//   wide or 2 rows tall in wireframe cells (warning)
+// CCB-P1018 text contrast below threshold: 4.5:1, or 3.0:1 when the
+//   leaf rule's font-size is >= 24px (warning)
+
+// Lengths: px values scale to columns/rows by interior_cols /
+// phone_dp_width; % values are relative to the parent content size.
+typedef enum { PV_LEN_AUTO, PV_LEN_PX, PV_LEN_PCT } pv_len_kind;
+
+typedef struct {
+  pv_len_kind kind;
+  long value; // px value, or percent 0-100
+} pv_len;
+
+// One merged CSS rule: later declarations for the same selector override
+// earlier ones property by property. Unset properties keep has_* = 0.
+typedef struct {
+  char *selector; // "screen" or a lowercase component type, e.g. "button"
+  // Scope: NULL means the rule applies to every screen (common.css);
+  // otherwise the name of the one screen it applies to (<Screen>.css).
+  // Added additively: existing rules with scope NULL keep matching.
+  char *scope;
+  char *file;
+  long line; // line of the first declaration for this selector
+  int has_display, display_flex; // display: block (default) or flex
+  int has_flex_dir, flex_row; // flex-direction: column (default) or row
+  int has_width, has_height;
+  pv_len width, height;
+  int has_padding, has_margin;
+  long padding[4]; // top, right, bottom, left (px)
+  long margin[4]; // top, right, bottom, left (px)
+  char *bg, *fg; // color as written (#rrggbb or a named color), NULL unset
+  int has_font_size;
+  long font_size; // px, recorded only; it does not change layout
+  int has_position, absolute; // position: static (default) or absolute
+  int has_top, has_left;
+  long top, left; // px
+  int has_gap;
+  long gap; // px
+  int has_text_align, text_align; // 0 left (default), 1 center, 2 right
+  int has_border_width;
+  long border_width; // px; a scaled value >= 1 cell draws a 1-cell outline
+  char *border_color; // hex or named, NULL unset (default: fg, else none)
+  int has_flex_wrap, flex_wrap; // 0 nowrap (default), 1 wrap; rows only
+} pv_rule;
+
+typedef struct pv_box pv_box;
+
+// A component box. Children are individually arena-allocated; the
+// children array itself may move as it grows, so never hold a pointer
+// to an element of it across an append.
+struct pv_box {
+  char *type; // lowercase: "screen", "column", "row", "text", "button",
+              // "list", "textfield", "image", "box", "spacer", "branch",
+              // "branch-entry", or a generic type for unknown constructs
+  char *label; // first string argument (text content), NULL when absent
+  pv_box **children;
+  size_t nchildren, capchildren;
+  // Layout result, in frame columns/rows relative to the screen
+  // interior origin (0,0 is the first content cell inside the frame).
+  long x, y, w, h;
+  // Scaled padding, set by layout from the rule's px padding with the
+  // same interior/phone_dp_width scale used for sizes. The renderer
+  // paints leaf content inset by these values.
+  long pad_left_cols, pad_right_cols, pad_top_rows, pad_bottom_rows;
+  // Border outline, set by layout from the rule's border-width: 1
+  // when the scaled width is >= 1 cell, else 0. The renderer draws
+  // the outline around the box; layout insets content by this.
+  int has_border;
+  const pv_rule *rule; // resolved during layout; NULL when no rule matches
+  int is_branch; // true for when/if wrapper nodes
+};
+
+typedef struct {
+  char *from; // enclosing component label (or type when unlabeled)
+  char *target; // NULL when the destination is dynamic
+  int unknown; // true when the destination could not be resolved statically
+  // Arguments after the target, arena-owned. Each entry is the
+  // argument's literal text, the raw "name = value" text for a named
+  // static argument, or NULL (= unknown: identifier, template,
+  // expression, or call). Empty when the nav call has no extra args.
+  char **args;
+  size_t nargs;
+  // Parallel to args: 1 when the entry is a named "name = value"
+  // argument (shown as written), 0 for a literal (shown quoted).
+  // Internal only: JSON carries args alone, never this array.
+  int *args_named;
+} pv_edge;
+
+typedef struct {
+  char *name;
+  pv_box *root; // type "screen"
+  pv_edge *edges;
+  size_t nedges, capedges;
+  int reachable; // computed by pv_project_diagnose
+} pv_screen;
+
+typedef struct {
+  ccb_arena *arena;
+  pv_screen **screens;
+  size_t nscreens, capscreens;
+  pv_rule *rules; // merged, one per selector, in first-seen order
+  size_t nrules, caprules;
+  ccb_diag_list diags;
+  long frame_width; // terminal columns including frame borders
+  long interior_cols; // frame_width - 2
+  long phone_dp_width; // from config, for px scaling
+  int ascii; // --ascii: ASCII frame characters instead of Unicode
+  int strict; // --strict / [preview] strict: subset warnings become errors
+  // Transient: name of the screen currently being laid out, used by
+  // layout to skip rules scoped to another screen. NULL matches all
+  // rules; set by pv_layout_screen, cleared when it returns.
+  const char *layout_screen_name;
+} pv_project;
+
+// ---------- CSS subset parser + layout (ccb_preview_css.c) ----------
+
+// Parse CSS text into merged rules appended to *rules_out (arena).
+// Unknown properties warn (CCB-P1001) or error under strict; parse
+// errors warn (CCB-P1002) and keep what parsed. Always returns CCB_OK;
+// failures surface as diagnostics, never as crashes.
+ccb_status pv_css_parse(ccb_arena *arena, const char *text, const char *file,
+  int strict, ccb_diag_list *diags, pv_rule **rules_io, size_t *nrules_io);
+// Compute x/y/w/h for a screen tree. Rules are matched by box type
+// ("screen" for the root). Absolute boxes do not affect parent height.
+// Emits CCB-P1003/P1004/P1009 diagnostics (overlap/off-screen/clip).
+void pv_layout_screen(pv_project *p, pv_screen *screen);
+
+// ---------- Kotlin structure parser (ccb_preview_flow.c) ----------
+
+// Parse flow text into screens appended to *screens_io (arena).
+// Top-level `fun Name(` bodies are screens; component calls nest by
+// braces; nav("X") / navigateTo("X") calls become edges; when/if
+// become branch nodes labeled with their conditions, never evaluated.
+// Unknown constructs warn (CCB-P1012) and become generic boxes.
+// Always returns CCB_OK; failures surface as diagnostics.
+ccb_status pv_flow_parse(ccb_arena *arena, const char *text, const char *file,
+  ccb_diag_list *diags, pv_screen ***screens_io, size_t *nscreens_io);
+
+// Render one edge's argument list into out, in tree/walk format:
+// "(...)" with literals quoted, named args as written, unknown args
+// as "unknown"; nothing at all when the edge has no arguments.
+// Shared by the logic tree (ccb_preview_flow.c) and walk mode so
+// both show the same argument text.
+void pv_render_edge_args(ccb_str *out, const pv_edge *e);
+
+// ---------- Rendering (ccb_preview_render.c) ----------
+
+// Resolve a CSS color to RGB (hex #rgb/#rrggbb, or the renderer's
+// named-color table, case-insensitive, surrounding spaces ignored).
+// Returns 1 and fills *r/*g/*b on success, 0 when the color is
+// missing or unresolvable (including an unresolved @color/ literal).
+// Shared by the renderer and the P1018 contrast check so both use
+// one RGB resolution.
+int pv_color_rgb(const char *s, long *r, long *g, long *b);
+
+// Wireframe for one laid-out screen, including the phone frame. When
+// color is enabled, background/foreground colors approximate the CSS
+// colors with ANSI 256-color codes; color is disabled under NO_COLOR,
+// a dumb terminal, or --ascii. Text is clipped to its box, never wrapped.
+void pv_render_screen(ccb_str *out, pv_screen *screen, long frame_width,
+  int ascii, int color);
+// Logic tree for the whole project: one block per screen, edges with
+// their source labels, branch annotations, reachability marks.
+// Format (exact, golden-tested). Edges with arguments show them in
+// parens after the target: literals quoted, unknown args as
+// "unknown", named args as written (name = value):
+//   Home (entry)
+//     -> Detail via "Open note"
+//     -> Detail("note-42", unknown) via "Open note"
+//     -> unknown via "More"
+//   Detail
+//     branches: when state [is Loading, is Loaded, else]
+//     -> Home via "Back"
+void pv_render_logic_tree(ccb_str *out, pv_project *p);
+
+// ---------- Orchestration (ccb_preview.c) ----------
+
+// Load a project: read every *.css under cfg->preview_styles and every
+// *.kt under cfg->preview_flow (sorted, deterministic), parse, and lay
+// out. frame_width of 0 means the default (40); smaller widths clamp
+// to 24 with a CCB-P1013 warning. Flow files are parsed first, then
+// CSS: common.css first (scope NULL, all screens), then per-screen
+// files in sorted order (scope = the screen name); any other CSS file
+// is skipped with a CCB-P1015 warning. Returns CCB_ERR_CONFIG when
+// the config has no usable [preview] section; that case is the
+// caller's "preview not applicable" path, not a preview failure.
+// When diags is non-NULL, load parses into it and, on success,
+// ownership of its contents transfers to the project (the caller's
+// list is left empty and must not be freed again); on
+// CCB_ERR_CONFIG the caller keeps ownership. When diags is NULL the
+// project uses its own list. No SDK/toolchain is ever consulted.
+ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
+  int strict, ccb_diag_list *diags, pv_project **out);
+void pv_project_free(pv_project *p);
+// Error classification for one diagnostic code under a strict flag:
+// CCB-P1005 and CCB-P1008 are always errors; CCB-P1001 and
+// CCB-P1014 count as errors only when strict is set; everything
+// else is a warning. This is the single definition of the rule that
+// pv_project_diagnose counts with and that the preview gate
+// (ccb_preview_gate) collects with; keep the three in sync.
+int pv_diag_is_error(const char *code, int strict);
+// Run the diagnostics pass: overlap/off-screen/clip are emitted during
+// layout; this pass adds missing-target (error), duplicate-screen
+// (error), unreachable (warning), empty-screen (warning), and
+// no-screens (warning) diagnostics, and marks each screen reachable.
+// Returns the number of errors. The parsers emit CCB-P1001/CCB-P1014
+// with the same codes in both modes; under strict this pass counts
+// those codes as errors (promotion by counting, here).
+long pv_project_diagnose(pv_project *p);
+// JSON form of the same data the human render shows, one object, no
+// trailing newline, deterministic (stable order, no timestamps):
+// {"event":"preview","screens":[{"name":...,"entry":bool,
+// "reachable":bool,"boxes":{type,label,x,y,w,h,children:[...] (the
+// root box is the tree root)},"edges":[{"from":...,"target":...|null,
+// "unknown":bool}],"branches":[{"label":...,"entries":[...]}]}],
+// "diagnostics":[{"code":...,"phase":...,"message":...,"file":...|null,
+// "line":...}]}. Branches are collected depth-first from the tree.
+// The object carries "version":2; each edge carries "args" (an array
+// of string-or-null, [] when the nav call has no extra arguments).
+void pv_project_json(ccb_str *out, pv_project *p);
+// JSON for a subset of screens, in the given order: the same object
+// as pv_project_json, but the "screens" array contains only these
+// screens (repeats appear once per occurrence). Used by --storyboard;
+// pv_project_json is this function over every screen, in order.
+void pv_project_json_screens(ccb_str *out, pv_project *p,
+  pv_screen **screens, size_t nscreens);
+
+#endif
