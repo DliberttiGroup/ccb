@@ -33,6 +33,10 @@ typedef struct {
   char *ndk_version;
   char *kotlin_home;
   char *r8_jar;
+  // [sdk] tool overrides, stored exactly as written (a relative value
+  // is cwd-relative at invocation time, never rebased). NULL when unset.
+  char *aapt2_override;
+  char *zipalign_override;
   // [signing.debug]
   char *debug_store;
   char *debug_alias;
@@ -67,10 +71,18 @@ typedef struct {
   char *preview_styles;
   char *preview_flow;
   char *preview_resources; // [preview] resources: dir of strings.xml/colors.xml
+  char *preview_layout; // [preview] layout: dir (or file) of layout XML
+  char *preview_nav_graph; // [preview] nav_graph: nav-graph XML file or dir
   long preview_phone_width;
   long preview_phone_height;
   int preview_strict;
   int preview_gate; // [preview] gate: opt-in preview gate for check/build
+  // [preview.bindings]: parallel arrays mapping code identifiers to
+  // component labels for Slice 1 handler attribution. NULL/empty
+  // when the table is absent.
+  char **preview_binding_keys;
+  char **preview_binding_values;
+  size_t preview_binding_count;
 } ccb_config;
 
 // Search upward from start_dir for ccb.toml. When explicit is non-NULL it

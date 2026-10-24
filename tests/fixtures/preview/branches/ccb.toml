@@ -1,0 +1,27 @@
+ccb_version = 1
+
+[project]
+name = "branches"
+package = "com.example.branches"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[preview]
+styles = "styles"
+flow = "flow"
+phone_width = 390
+phone_height = 844
+
+[preview.bindings]
+condButton = "Cond"
+whenButton = "When"
+chainButton = "Chain"
+nestedButton = "Nested"
+actButton = "Act"
+namedButton = "Named"
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"

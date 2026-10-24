@@ -334,6 +334,14 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     ccb_str_init(&fp);
     ccb_str_append(&fp, "bt=");
     ccb_str_append(&fp, p->sdk->build_tools_version);
+    if (p->sdk->aapt2 != NULL) {
+      ccb_str_append(&fp, "|aapt2=");
+      ccb_str_append(&fp, p->sdk->aapt2);
+    }
+    if (p->sdk->zipalign != NULL) {
+      ccb_str_append(&fp, "|zipalign=");
+      ccb_str_append(&fp, p->sdk->zipalign);
+    }
     ccb_str_append(&fp, "|kt=");
     ccb_str_append(&fp, p->sdk->kotlin_version);
     ccb_str_appendf(&fp, "|java=%d", p->sdk->java_major);
@@ -612,6 +620,7 @@ static ccb_status ccb_step_compile_res(ccb_pipe *p) {
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
   ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
+  ccb_fp_add(&b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
   int failed = 0;
   for (size_t i = 0; i < tcount && !failed; i++) {
     char **files = NULL;
@@ -726,6 +735,7 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
   ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
+  ccb_fp_add(&b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
   ccb_fp_add(&b, "package", p->cfg->package);
   ccb_fp_add(&b, "version", p->cfg->version);
   ccb_fp_addl(&b, "version_code", p->cfg->version_code);
@@ -1885,11 +1895,20 @@ static ccb_status ccb_step_align(ccb_pipe *p) {
     return CCB_ERR_BUILD;
   }
   const char *old = ccb_cache_step_fp(p->cache, "align");
+  // The align fingerprint pairs the unsigned-APK hash with the
+  // effective zipalign path, so switching the zipalign tool
+  // invalidates the step even when the APK bytes are identical.
+  ccb_str afp;
+  ccb_str_init(&afp);
+  ccb_str_append(&afp, p->sdk->zipalign == NULL ? "" : p->sdk->zipalign);
+  ccb_str_append(&afp, "|");
+  ccb_str_append(&afp, hash == NULL ? "" : hash);
+  char *align_fp = ccb_str_steal(&afp);
   if (p->opts->explain) {
     if (p->package_will_run) {
       printf("align: run (packaging outputs will change)\n");
       p->align_will_run = 1;
-    } else if (old != NULL && hash != NULL && strcmp(old, hash) == 0) {
+    } else if (old != NULL && hash != NULL && strcmp(old, align_fp) == 0) {
       printf("align: skip (inputs unchanged)\n");
       p->align_will_run = 0;
     } else {
@@ -1897,11 +1916,13 @@ static ccb_status ccb_step_align(ccb_pipe *p) {
       p->align_will_run = 1;
     }
     free(hash);
+    free(align_fp);
     return CCB_OK;
   }
-  if (!p->opts->dry_run && old != NULL && hash != NULL && strcmp(old, hash) == 0 &&
+  if (!p->opts->dry_run && old != NULL && hash != NULL && strcmp(old, align_fp) == 0 &&
       ccb_path_exists(p->aligned_apk)) {
     free(hash);
+    free(align_fp);
     p->align_will_run = 0;
     p->steps_skipped++;
     ccb_log_cache(&p->log, "align", 1, "packaging outputs unchanged");
@@ -1922,12 +1943,14 @@ static ccb_status ccb_step_align(ccb_pipe *p) {
   free(av.v);
   if (rc != CCB_OK) {
     free(hash);
+    free(align_fp);
     return CCB_ERR_BUILD;
   }
   if (!p->opts->dry_run && hash != NULL) {
-    ccb_cache_set_step(p->cache, "align", hash);
+    ccb_cache_set_step(p->cache, "align", align_fp);
     p->cache_dirty = 1;
   }
+  free(align_fp);
   free(hash);
   p->steps_run++;
   return CCB_OK;

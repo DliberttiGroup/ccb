@@ -43,6 +43,14 @@
 //   wide or 2 rows tall in wireframe cells (warning)
 // CCB-P1018 text contrast below threshold: 4.5:1, or 3.0:1 when the
 //   leaf rule's font-size is >= 24px (warning)
+// CCB-P1019 handler found, button not bound: a click handler whose
+//   receiver has no [preview.bindings] entry (warning, always)
+// CCB-P1020 declared navigation disagrees with a derived edge for
+//   the same button; the declared edge stands (warning, always)
+// CCB-P1021 XML onClick button not found in any screen: an
+//   android:onClick handler whose bound component label appears in
+//   no screen's component tree, so its edges have nowhere to attach
+//   (warning, always)
 
 // Lengths: px values scale to columns/rows by interior_cols /
 // phone_dp_width; % values are relative to the parent content size.
@@ -126,7 +134,41 @@ typedef struct {
   // argument (shown as written), 0 for a literal (shown quoted).
   // Internal only: JSON carries args alone, never this array.
   int *args_named;
+  // Slice 1: 1 when this edge was derived from a click handler
+  // (listener lambda, onClick assignment, or named handler) rather
+  // than declared by a nav() call in the flow. Internal only: the
+  // JSON shape and the human tree render derived edges exactly like
+  // declared ones. The post-load reconciliation in pv_project_load
+  // drops derived edges that a declared edge for the same button
+  // duplicates or disagrees with.
+  int derived;
+  // Slices 2/3: the branch this edge is conditional on, e.g.
+  // "if ready: then" or "when state: is Loaded", or NULL when the
+  // nav call is unconditional. A label only, never evaluated. Shown
+  // in the tree and walk edge lists as " [branch]", and in JSON as
+  // the edge's "branch" field (null when unconditional). Edges
+  // deduplicate on branch too: the same destination under two
+  // branches is two edges.
+  char *branch;
 } pv_edge;
+
+// A derived edge from an XML android:onClick handler (Slice 3),
+// collected during flow parsing and attached to screens by
+// pv_project_load after every flow file is parsed (the button's
+// screen is the one whose component tree contains the bound label).
+// Field-for-field the edge the screen will carry, plus the onClick
+// method name it came from (used for the CCB-P1021 diagnostic when
+// no screen contains the label). All strings are arena-owned.
+typedef struct {
+  char *method;
+  char *from;
+  char *target;
+  int unknown;
+  char **args;
+  size_t nargs;
+  int *args_named;
+  char *branch;
+} pv_pending_edge;
 
 typedef struct {
   char *name;
@@ -177,6 +219,31 @@ void pv_layout_screen(pv_project *p, pv_screen *screen);
 // Always returns CCB_OK; failures surface as diagnostics.
 ccb_status pv_flow_parse(ccb_arena *arena, const char *text, const char *file,
   ccb_diag_list *diags, pv_screen ***screens_io, size_t *nscreens_io);
+// Slice 1 variant of pv_flow_parse: bind_keys/bind_vals are parallel
+// arrays (borrowed from the caller, e.g. the config's
+// [preview.bindings] table) mapping code identifiers to component
+// labels. A NULL/empty binding set means every handler receiver is
+// unbound (CCB-P1019). pv_flow_parse is this function with no
+// bindings. See docs/preview.md for the recognized handler shapes.
+ccb_status pv_flow_parse_bindings(ccb_arena *arena, const char *text,
+  const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
+  size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind);
+// Slices 2/3 full variant: additionally, onclick_methods/labels are
+// parallel arrays (borrowed) mapping android:onClick method names to
+// already-bound component labels — a top-level fun named by an
+// onClick method is a handler, not a screen, and its nav calls are
+// appended to *pending_io (arena-grown, count in *npending_io) for
+// the caller to attach to screens. graph_keys/vals map navigation
+// destination ids (e.g. "detail") to screen names for navigate()
+// calls inside handler bodies. NULL/empty for any set means that
+// input is absent. pv_flow_parse_bindings is this function with no
+// onClick mapping, no graph, and no pending output.
+ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
+  const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
+  size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind,
+  char **onclick_methods, char **onclick_labels, size_t nonclick,
+  char **graph_keys, char **graph_vals, size_t ngraph,
+  pv_pending_edge ***pending_io, size_t *npending_io);
 
 // Render one edge's argument list into out, in tree/walk format:
 // "(...)" with literals quoted, named args as written, unknown args
@@ -209,6 +276,7 @@ void pv_render_screen(ccb_str *out, pv_screen *screen, long frame_width,
 //   Home (entry)
 //     -> Detail via "Open note"
 //     -> Detail("note-42", unknown) via "Open note"
+//     -> Detail via "Open note" [if ready: then]
 //     -> unknown via "More"
 //   Detail
 //     branches: when state [is Loading, is Loaded, else]
@@ -219,7 +287,11 @@ void pv_render_logic_tree(ccb_str *out, pv_project *p);
 
 // Load a project: read every *.css under cfg->preview_styles and every
 // *.kt under cfg->preview_flow (sorted, deterministic), parse, and lay
-// out. frame_width of 0 means the default (40); smaller widths clamp
+// out. Flow parsing uses cfg's [preview.bindings] table (Slice 1
+// handler attribution), and after all flow files are parsed the
+// declared-beats-derived reconciliation drops derived edges that a
+// declared edge for the same button duplicates or disagrees with
+// (CCB-P1020 on disagreement). frame_width of 0 means the default (40); smaller widths clamp
 // to 24 with a CCB-P1013 warning. Flow files are parsed first, then
 // CSS: common.css first (scope NULL, all screens), then per-screen
 // files in sorted order (scope = the screen name); any other CSS file
@@ -237,7 +309,8 @@ void pv_project_free(pv_project *p);
 // Error classification for one diagnostic code under a strict flag:
 // CCB-P1005 and CCB-P1008 are always errors; CCB-P1001 and
 // CCB-P1014 count as errors only when strict is set; everything
-// else is a warning. This is the single definition of the rule that
+// else is a warning — including CCB-P1019, CCB-P1020, and CCB-P1021,
+// which are warnings always and never fail the build gate. This is the single definition of the rule that
 // pv_project_diagnose counts with and that the preview gate
 // (ccb_preview_gate) collects with; keep the three in sync.
 int pv_diag_is_error(const char *code, int strict);
@@ -258,7 +331,9 @@ long pv_project_diagnose(pv_project *p);
 // "diagnostics":[{"code":...,"phase":...,"message":...,"file":...|null,
 // "line":...}]}. Branches are collected depth-first from the tree.
 // The object carries "version":2; each edge carries "args" (an array
-// of string-or-null, [] when the nav call has no extra arguments).
+// of string-or-null, [] when the nav call has no extra arguments)
+// and "branch" (the Slice 2 branch label string, or null when the
+// edge is unconditional).
 void pv_project_json(ccb_str *out, pv_project *p);
 // JSON for a subset of screens, in the given order: the same object
 // as pv_project_json, but the "screens" array contains only these

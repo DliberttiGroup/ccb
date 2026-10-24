@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android">
+  <Button android:id="@+id/open_button" android:onClick="onOpenClick" />
+  <androidx.appcompat.widget.AppCompatButton android:id="@id/new_button" android:onClick="onNewClick" />
+  <Button android:id="@+id/silent_button" android:onClick="onSilentClick" />
+  <Button android:id="@+id/ghost_button" android:onClick="onGhostClick" />
+  <Button android:id="@+id/missing_button" android:onClick="onMissingClick" />
+  <Button android:id="@+id/stray_button" android:onClick="onStrayClick" />
+  <TextView android:id="@+id/text_view" android:onClick="onTextClick" />
+</LinearLayout>

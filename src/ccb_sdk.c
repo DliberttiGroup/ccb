@@ -76,6 +76,32 @@ static void ccb_sdk_diagf(ccb_diag_list *diags, const char *code, const char *wh
   ccb_str_free(&s);
 }
 
+// An empty env value counts as unset, so `CCB_AAPT2=` behaves like no
+// override at all instead of a broken empty path.
+static const char *ccb_nonempty_env(const char *name) {
+  const char *v = getenv(name);
+  if (v != NULL && v[0] == '\0') {
+    return NULL;
+  }
+  return v;
+}
+
+// A broken explicit tool override: CCB-E2009, naming both the source
+// (e.g. "[sdk] aapt2" or "CCB_AAPT2") and the path, so the user knows
+// exactly which setting to fix. Never falls back to the default.
+static void ccb_sdk_diag_override(ccb_diag_list *diags, const char *label, const char *path) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "explicit tool override ");
+  ccb_str_append(&s, label);
+  ccb_str_append(&s, " is missing or not executable: ");
+  ccb_str_append(&s, path);
+  ccb_diag d = ccb_diag_make("CCB-E2009", "toolchain", s.buf);
+  d.suggestion = ccb_xstrdup("fix the override path, or unset it to use the default SDK tool");
+  ccb_diag_list_push(diags, &d);
+  ccb_str_free(&s);
+}
+
 void ccb_sdk_free(ccb_sdk *sdk) {
   if (sdk == NULL) {
     return;
@@ -84,9 +110,11 @@ void ccb_sdk_free(ccb_sdk *sdk) {
   free(sdk->build_tools_dir);
   free(sdk->build_tools_version);
   free(sdk->aapt2);
+  free(sdk->aapt2_source);
   free(sdk->d8);
   free(sdk->apksigner);
   free(sdk->zipalign);
+  free(sdk->zipalign_source);
   free(sdk->android_jar);
   free(sdk->java);
   free(sdk->javac);
@@ -164,12 +192,58 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
   // Build-tools.
   s->build_tools_version = ccb_xstrdup(cfg->build_tools);
   s->build_tools_dir = ccb_path_join3(s->sdk_home, "build-tools", cfg->build_tools);
+  // Tool overrides, highest precedence first: [sdk] key, then env var,
+  // then the default SDK path. Overrides are resolved and validated
+  // here, independent of the build-tools directory branch below, so a
+  // broken override is reported even when build-tools is missing
+  // (a CCB-E2002 must not mask it). An override path is used exactly
+  // as given: a relative value is cwd-relative at invocation time.
+  const char *aapt2_override = cfg->aapt2_override;
+  const char *aapt2_label = "[sdk] aapt2";
+  if (aapt2_override == NULL) {
+    const char *env = ccb_nonempty_env("CCB_AAPT2");
+    if (env != NULL) {
+      aapt2_override = env;
+      aapt2_label = "CCB_AAPT2";
+    }
+  }
+  const char *zipalign_override = cfg->zipalign_override;
+  const char *zipalign_label = "[sdk] zipalign";
+  if (zipalign_override == NULL) {
+    const char *env = ccb_nonempty_env("CCB_ZIPALIGN");
+    if (env != NULL) {
+      zipalign_override = env;
+      zipalign_label = "CCB_ZIPALIGN";
+    }
+  }
+  s->aapt2_source = ccb_xstrdup(aapt2_override != NULL ? (cfg->aapt2_override != NULL ? "config" : "env") : "default");
+  s->zipalign_source = ccb_xstrdup(zipalign_override != NULL ? (cfg->zipalign_override != NULL ? "config" : "env") : "default");
+  if (aapt2_override != NULL) {
+    if (access(aapt2_override, X_OK) != 0) {
+      ccb_sdk_diag_override(diags, aapt2_label, aapt2_override);
+    } else {
+      s->aapt2 = ccb_xstrdup(aapt2_override);
+    }
+  }
+  if (zipalign_override != NULL) {
+    if (access(zipalign_override, X_OK) != 0) {
+      ccb_sdk_diag_override(diags, zipalign_label, zipalign_override);
+    } else {
+      s->zipalign = ccb_xstrdup(zipalign_override);
+    }
+  }
   if (!ccb_path_is_dir(s->build_tools_dir)) {
     ccb_sdk_diagf(diags, "CCB-E2002", "build-tools not installed", s->build_tools_dir);
   } else {
     static const char *tools[] = { "aapt2", "d8", "apksigner", "zipalign" };
     char **slots[] = { &s->aapt2, &s->d8, &s->apksigner, &s->zipalign };
     for (int i = 0; i < 4; i++) {
+      // An overridden tool is already resolved (or already diagnosed)
+      // above; never overwrite it with the default path.
+      if ((strcmp(tools[i], "aapt2") == 0 && aapt2_override != NULL) ||
+          (strcmp(tools[i], "zipalign") == 0 && zipalign_override != NULL)) {
+        continue;
+      }
       char *p = ccb_path_join(s->build_tools_dir, tools[i]);
       if (access(p, X_OK) != 0) {
         ccb_sdk_diagf(diags, "CCB-E2009", "tool missing or not executable", p);

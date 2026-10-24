@@ -626,6 +626,14 @@ static int ccb_cmd_check(ccb_args *a) {
     ccb_json_escape(&s, sdk->sdk_home);
     ccb_str_append(&s, ",\"build_tools\":");
     ccb_json_escape(&s, sdk->build_tools_version);
+    ccb_str_append(&s, ",\"aapt2\":");
+    ccb_json_escape(&s, sdk->aapt2);
+    ccb_str_append(&s, ",\"aapt2_source\":");
+    ccb_json_escape(&s, sdk->aapt2_source == NULL ? "default" : sdk->aapt2_source);
+    ccb_str_append(&s, ",\"zipalign\":");
+    ccb_json_escape(&s, sdk->zipalign);
+    ccb_str_append(&s, ",\"zipalign_source\":");
+    ccb_json_escape(&s, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
     ccb_str_append(&s, ",\"kotlin\":");
     ccb_json_escape(&s, sdk->kotlin_version);
     ccb_str_appendf(&s, ",\"java\":%d}", sdk->java_major);
@@ -633,8 +641,11 @@ static int ccb_cmd_check(ccb_args *a) {
     ccb_str_free(&s);
   } else {
     printf("ok: %s (%s, variant %s)\n", cfg->name, cfg->package, cfg->variant);
-    printf("  sdk: %s\n  build-tools: %s\n  kotlinc: %s\n  java: %d\n",
-      sdk->sdk_home, sdk->build_tools_version, sdk->kotlin_version, sdk->java_major);
+    printf("  sdk: %s\n  build-tools: %s\n  aapt2: %s (%s)\n  zipalign: %s (%s)\n  kotlinc: %s\n  java: %d\n",
+      sdk->sdk_home, sdk->build_tools_version,
+      sdk->aapt2, sdk->aapt2_source == NULL ? "default" : sdk->aapt2_source,
+      sdk->zipalign, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source,
+      sdk->kotlin_version, sdk->java_major);
     if (cfg->has_ndk) {
       printf("  ndk: %s\n", sdk->ndk_home);
     }
@@ -795,6 +806,14 @@ static int ccb_cmd_doctor(ccb_args *a) {
       ccb_json_escape(&s, sdk->sdk_home);
       ccb_str_append(&s, ",\"build_tools\":");
       ccb_json_escape(&s, sdk->build_tools_version);
+      ccb_str_append(&s, ",\"aapt2\":");
+      ccb_json_escape(&s, sdk->aapt2);
+      ccb_str_append(&s, ",\"aapt2_source\":");
+      ccb_json_escape(&s, sdk->aapt2_source == NULL ? "default" : sdk->aapt2_source);
+      ccb_str_append(&s, ",\"zipalign\":");
+      ccb_json_escape(&s, sdk->zipalign);
+      ccb_str_append(&s, ",\"zipalign_source\":");
+      ccb_json_escape(&s, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
       ccb_str_append(&s, ",\"kotlin\":");
       ccb_json_escape(&s, sdk->kotlin_version);
       ccb_str_appendf(&s, ",\"java\":%d", sdk->java_major);
@@ -812,6 +831,8 @@ static int ccb_cmd_doctor(ccb_args *a) {
       printf("project: %s (%s)\n", cfg->name, cfg->package);
       printf("sdk: %s\n", sdk->sdk_home);
       printf("build-tools: %s (%s)\n", sdk->build_tools_version, sdk->build_tools_dir);
+      printf("aapt2: %s (%s)\n", sdk->aapt2, sdk->aapt2_source == NULL ? "default" : sdk->aapt2_source);
+      printf("zipalign: %s (%s)\n", sdk->zipalign, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
       printf("platform: android-%ld\n", cfg->compile_sdk);
       printf("kotlinc: %s (%s)\n", sdk->kotlin_version, sdk->kotlinc);
       printf("java: %d (%s)\n", sdk->java_major, sdk->java);

@@ -13,11 +13,24 @@ never crashes and never silently guesses.
 styles = "styles"   # directory of CSS files
 flow = "flow"       # directory of Kotlin flow files
 resources = "res"   # optional: directory of strings.xml / colors.xml
+layout = "res/layout"     # optional: directory (or file) of layout XML, for android:onClick (Slice 3)
+nav_graph = "res/navigation"  # optional: nav-graph XML file or directory (Slice 3)
 phone_width = 390   # dp, informational: scales px values to columns
 phone_height = 844  # dp, informational
 strict = false      # true: subset warnings become errors
 gate = false        # true: preview errors fail ccb check / ccb build
 ```
+
+`layout` and `nav_graph` are optional and default by fallback, in
+order: the explicit `[preview]` key, then `<resources>/layout` /
+`<resources>/navigation` when `resources` is set, then
+`<paths res>/layout` / `<paths res>/navigation` when `[paths] res`
+is set. A configured path that does not exist is a config error
+(CCB-E1006); a fallback directory that does not exist is simply an
+empty input set (no graph file, or no layout file, is not an error —
+see the unknown cases below). A `layout`/`nav_graph` value may be a
+single file or a directory (a directory contributes every `*.xml`
+under it, in sorted order).
 
 `resources`, when set, must be an existing directory (like `styles`
 and `flow`). It holds Android values files, `strings.xml` and
@@ -85,7 +98,216 @@ structure only — it does not typecheck, compile, or run anything.
 - The entry screen is the screen named `Home` when one exists, else
   the first declared screen in sorted file order.
 
-Example:
+## Flow files: click handlers (Slices 1–3, derived edges)
+
+Production Kotlin rarely writes `Button { nav() }`; it writes
+listeners. Slices 1–3 recognize click-handler shapes and derive edges
+from them. A derived edge renders exactly like a flow-declared edge
+in the logic tree, walk mode, storyboard, diff, and JSON (no
+`derived` marker anywhere in output), and the build gate treats it
+like any other edge — except that a declared edge for the same
+button always wins over it (see precedence below). A branch edge
+(Slice 2) adds one visible annotation: the tree and walk edge lists
+show it as `-> Detail via "Open note" [if ready: then]`, and JSON
+carries it as the edge's `"branch"` field (a string, or `null` for
+an unconditional edge).
+
+Recognized shapes (all inside a screen fun body — see scope limit
+below):
+
+- Trailing lambda: `openButton.setOnClickListener { nav("Detail") }`
+- Parenthesized lambda:
+  `openButton.setOnClickListener({ nav("Detail") })`
+- Property assignment: `openButton.onClick = { nav("Detail") }`
+- Direct method reference:
+  `openButton.setOnClickListener(::onOpenClick)` where
+  `fun onOpenClick(v: View) { nav("Detail") }` is a top-level fun
+  in the same file. ONLY a direct `::name` reference resolves; a
+  reference held in a variable first (`val h = ::onOpenClick`, then
+  `setOnClickListener(h)`) resolves nothing.
+
+Navigation calls recognized inside a handler body: `nav("X")` and
+`navigateTo("X")` as usual, plus
+`startActivity(Intent(this, DetailActivity::class.java))`, where the
+destination is the class literal's simple name, exactly as written
+(no suffix stripped, no mapping guessed), plus (Slice 3)
+NavController `navigate(...)` — see below.
+
+### Slice 2: conditional nav → branch edges
+
+Slice 2 lifts Slice 1's depth-0 rule for `if`/`when` branches only:
+a nav/startActivity/navigate call inside an `if`/`when` branch body
+within a handler body becomes an edge annotated with the branch
+label. The condition is labeled, never evaluated. Branch labels
+mirror the flow branch-node labels: `if <cond>` with entries `then`
+/ `else`, `when <cond>` with the entry text (`is Loaded`, `else`,
+…); a subjectless `when { ... }` labels entries under just `when`.
+The full annotation is `"<base>: <entry>"`, e.g. `if ready: then`
+or `when state: is Loaded`. Both braced bodies and a single
+braceless statement count (`if (ready) nav("Detail")`,
+`is Loaded -> nav("Detail")`, `else nav("Form")`); a braceless body
+that is itself a conditional is skipped whole, so its nav can never
+leak out as an unconditional edge. Nested conditionals compound
+their labels with `", "` (`if x: then, if y: then`); an `else if`
+link stands alone (`else if b: then`, `else if b: else`) — its else
+branch means "not the outer condition either", so compounding it
+with the outer `then` label would be wrong. Nav inside any other
+nested block (a nested lambda/callback, a coroutine, any inner
+block) is still no edge at all. A nav call inside a flow-declared
+branch (a `when`/`if` node in the component tree, not in a handler
+body) keeps its existing behavior: an unannotated edge from the
+enclosing component.
+
+### Slice 2 (continued): literal arguments on handler edges
+
+Handler nav calls carrying literal arguments produce edges with
+args, reusing the flow-declared args machinery exactly:
+`nav("Detail", "note-42")` → args `["note-42"]`,
+`nav("Detail", id = 7)` → args `["id = 7"]` (named, shown as
+written). A non-literal argument is an `unknown` arg entry, not a
+dropped edge — the same rule as flow-declared navs. A non-literal
+destination stays an unknown edge (see the outcome table).
+
+### Slice 3: XML android:onClick
+
+A button declaring `android:onClick="methodName"` in a layout XML
+file resolves to the named handler function in code: nav calls
+inside that function produce derived edges from the button. The
+layout parser is a tiny subset parser (no XML library): it
+recognizes elements whose tag's local name ends in `Button`
+(`Button`, `AppCompatButton`, `ImageButton`, …) carrying
+`android:onClick` and `android:id` attributes. `android:id` values
+`@+id/x` and `@id/x` both bind under `x`. The binding from view id
+to flow component label reuses `[preview.bindings]` — the same
+table, keyed by view id (e.g. `open_button = "Open note"`), so a
+layout button and a listener receiver can share one label. The
+handler function must be a top-level fun in a flow file (any flow
+file, not necessarily the file declaring the screen); like a `::`
+handler, it is not a screen. Its derived edges attach to every
+screen whose component tree contains a component with the bound
+label (the button the layout declares). Layout files are located
+per the `layout` setting/fallbacks above. XML comments are skipped;
+a tag the subset parser does not recognize (including `onClick` on
+a non-Button element) is simply not an attachment — no edge, no
+warning. A layout button with no binding is the CCB-P1019 case
+(warning, no edge); a bound button whose label appears in no screen
+is CCB-P1021 (warning, no edge — attaching it to an unrelated
+screen would be a guess); an `onClick` method with no matching fun
+is silent (no edge, no warning), like a cross-file `::` reference;
+an `onClick` handler with no nav is silent. Distribution compares
+labels before `@string` resolution, matching the Slice 1
+reconciliation comparison — so a component labeled `@string/name`
+matches a binding only under the literal `@string/name` key.
+
+### Slice 3: NavController + nav graph
+
+`navigate(...)` calls inside handler bodies (only inside handler
+bodies — a `navigate()` call elsewhere in flow follows the same
+no-edge rule as any non-handler statement) resolve through a
+navigation-graph file into edges:
+
+- `navigate("Detail")` — the string form, a literal destination
+  like `nav("Detail")`.
+- `navigate(R.id.detail)` — the id form: `detail` is looked up in
+  the nav-graph table; the destination is the screen name it maps
+  to.
+- `navigate(R.id.detail, "note-42")` — extra arguments reuse the
+  nav-args classification.
+
+The nav-graph table comes from the `nav_graph` setting/fallbacks
+above: any element carrying both `android:id` and `android:name`
+is a destination, mapping the id entry name to `android:name`'s
+simple name exactly as written (no suffix stripped, no mapping
+guessed); the first entry wins for a duplicate id. `<action>`
+elements have no `android:name` and are not destinations, so
+navigating to an action id is unknown. A destination id with no
+graph entry, or a `navigate()` call with no graph file at all, is
+an unknown edge — never a guessed destination. A non-literal
+`navigate()` destination (a variable, an expression) is likewise an
+unknown edge.
+
+### Binding handlers to buttons: `[preview.bindings]`
+
+The flow file's component labels are the target; the code's view
+identifiers are the source. Binding is by an explicit table only —
+no guessing from declaration order, no fuzzy name matching:
+
+```toml
+[preview.bindings]
+openButton = "Open note"
+```
+
+The binding key is the RECEIVER identifier at the attachment site
+(the last identifier before the method in a dotted chain, so
+`binding.openButton.setOnClickListener` binds under `openButton`),
+not the handler fun's name. A bound handler's nav calls become
+derived edges with `from` = the bound component label. A non-string
+value in the table is a config error (CCB-E1007).
+
+### Precedence: declared beats derived
+
+After all flow files are parsed, a post-pass reconciles derived
+edges against declared edges for the same button (same `from`):
+
+- Same destination → the derived edge is dropped silently (dedup).
+- Different destinations → CCB-P1020 (naming the button and both
+  destinations), the declared edge stands, the derived edge is
+  dropped.
+- A declared edge of any kind stands over a derived edge that does
+  not match it exactly (including a derived unknown edge).
+
+### Unknown cases: exact outcomes, never a guess
+
+| Handler body | Outcome |
+| ---- | ---- |
+| Receiver has no `[preview.bindings]` entry | CCB-P1019 ("handler found, button not bound", naming the receiver), no edge — even with a literal nav call inside |
+| Nav with a non-literal/computed destination (`nav(target)`, a template) directly in the handler body | Unknown edge (`from` = bound label, `target: null, unknown: true`), exactly like a dynamic flow-declared nav |
+| Nav inside an `if`/`when` branch body of the handler body (braced or a single braceless statement) | Branch-annotated edge (Slice 2): `-> Detail via "Open note" [if ready: then]`, condition labeled, never evaluated |
+| Nav inside any other nested brace block of the handler body (a nested lambda/callback, a coroutine, any inner block) | NO edge at all, not even an unknown edge — this is async territory, never guessed |
+| Nav with literal arguments in the handler body (`nav("Detail", "note-42")`, `nav("Detail", id = 7)`) | Edge with args, exactly like a flow-declared nav with args (Slice 2) |
+| Nav with a non-literal argument in the handler body (`nav("Detail", noteId)`) | Edge with an `unknown` arg entry, like a flow-declared nav with a non-literal argument |
+| `navigate(R.id.x)` in the handler body, `x` in the nav graph | Edge to the graph's screen name for `x` (Slice 3) |
+| `navigate(R.id.x)` in the handler body, `x` not in the graph, or no graph file at all | Unknown edge (`from` = bound label, `target: null, unknown: true`), never a guessed destination |
+| `navigate("Detail")` in the handler body | Edge to `Detail`, like `nav("Detail")` (Slice 3) |
+| `navigate(...)` outside a handler body | NO edge — NavController calls follow the same handler-attribution rules as Slice 1 |
+| XML `android:onClick` button, bound, handler fun found | Derived edges from the bound label, attached to every screen containing that label (Slice 3) |
+| XML `android:onClick` button with no `[preview.bindings]` entry for its view id | CCB-P1019, no edge (same code as an unbound listener receiver) |
+| XML `android:onClick` button, bound, but its label in no screen | CCB-P1021, no edge |
+| XML `android:onClick` method with no matching fun, or handler with no nav | NO edge, no warning |
+| Handler that merely calls a shared helper (`openDetail()`), with the nav inside the helper | NO edge attributed to the button. The helper fun follows the existing top-level-fun rules (it is a screen if unreferenced, not an edge source) |
+| `startActivity` without a class literal (`startActivity(intent)`) | Unknown edge, never a guessed destination |
+| Method reference to a fun in another file, or to no fun at all | NO edge, no warning (the parser is per-file; see scope limit) |
+
+CCB-P1019, CCB-P1020, and CCB-P1021 are warnings always — even under
+`--strict` — so they never fail the build gate.
+
+### Scope limits (Slices 1–3, by design)
+
+- Handlers are recognized ONLY inside screen fun bodies (top-level
+  `fun Name` bodies that define screens). A handler written
+  elsewhere (e.g. an Activity `onCreate` outside any screen fun)
+  is ignored, not warned about.
+- Named handlers must be top-level funs in the SAME file as the
+  attachment. A top-level fun whose name is referenced via `::`
+  from a screen body is treated as a handler, NOT as a screen: it
+  does not appear in the screen list, and its nav targets become
+  resolvable only through the referencing button. A fun referenced
+  only from another handler, or only via a variable, stays a screen
+  under the existing rules.
+- Attachments inside an ignored-call lambda block (e.g. inside a
+  `foo { ... }` argument block, which the parser scans for navs
+  only) fall back to the existing generic scan instead of Slice 1
+  attribution.
+- XML `android:onClick` handler funs, unlike `::` handlers, may live
+  in any flow file (the layout file, not a screen body, is the
+  attachment site); they are still top-level funs only, never
+  nested funs.
+- NavController `navigate()` is recognized only inside handler
+  bodies (listener lambdas, `onClick` assignments, named handlers,
+  and `android:onClick` handler funs). A `navigate()` call in any
+  other position is not an edge.
+
+## Flow files example
 
 ```kotlin
 fun Home() {
@@ -299,9 +521,11 @@ depth-first from the tree; `diagnostics` are in emission order:
 diagnostics with no source position. In JSON mode stdout carries only
 this object; human-mode prose and diagnostics go to stderr or are
 suppressed. The object carries `"version":2` alongside
-`"event":"preview"` (version 2's only shape change over version 1
-is the per-edge `"args"` array, string-or-null, `[]` when the nav
-call has no extra arguments; resolved `@string` labels appear as
+`"event":"preview"` (version 2's shape changes over version 1 are
+the per-edge `"args"` array, string-or-null, `[]` when the nav
+call has no extra arguments, and the per-edge `"branch"` field,
+string-or-null, `null` for an unconditional edge — both additive,
+so the version stays 2; resolved `@string` labels appear as
 plain `label` values, a value change, not a shape change, and only
 in projects that use `@string`). With `--storyboard`, the `screens`
 array contains only the journey screens, in journey order.

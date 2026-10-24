@@ -439,7 +439,13 @@ void pv_walk_render(ccb_str *out, const pv_walk *w, long frame_width,
       pv_render_edge_args(out, e);
       ccb_str_append(out, " via \"");
       ccb_str_append(out, e->from != NULL ? e->from : "?");
-      ccb_str_append(out, "\"\n");
+      ccb_str_append(out, "\"");
+      if (e->branch != NULL) {
+        ccb_str_append(out, " [");
+        ccb_str_append(out, e->branch);
+        ccb_str_append(out, "]");
+      }
+      ccb_str_append(out, "\n");
     }
   }
   ccb_str_append(out, "Back: ");

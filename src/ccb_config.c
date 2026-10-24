@@ -183,6 +183,14 @@ static void ccb_require_dir(ccb_validator *v, const char *path, const char *what
   }
 }
 
+// A [preview] layout / nav_graph value may be a file or a directory.
+static void ccb_require_path(ccb_validator *v, const char *path,
+    const char *what) {
+  if (!ccb_path_exists(path)) {
+    ccb_vdiagf(v, "CCB-E1006", "%s does not exist: %s", what, path);
+  }
+}
+
 void ccb_config_free(ccb_config *c) {
   if (c == NULL) {
     return;
@@ -203,6 +211,8 @@ void ccb_config_free(ccb_config *c) {
   free(c->ndk_version);
   free(c->kotlin_home);
   free(c->r8_jar);
+  free(c->aapt2_override);
+  free(c->zipalign_override);
   free(c->debug_store);
   free(c->debug_alias);
   free(c->release_store);
@@ -216,6 +226,14 @@ void ccb_config_free(ccb_config *c) {
   free(c->preview_styles);
   free(c->preview_flow);
   free(c->preview_resources);
+  free(c->preview_layout);
+  free(c->preview_nav_graph);
+  for (size_t i = 0; i < c->preview_binding_count; i++) {
+    free(c->preview_binding_keys[i]);
+    free(c->preview_binding_values[i]);
+  }
+  free(c->preview_binding_keys);
+  free(c->preview_binding_values);
   ccb_free_str_array(c->jars, c->jars_count);
   ccb_free_str_array(c->aars, c->aars_count);
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
@@ -270,23 +288,23 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     static const char *root_keys[] = { "ccb_version" };
     static const char *project_keys[] = { "name", "package", "version", "version_code", "min_sdk", "target_sdk", "compile_sdk" };
     static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "libs" };
-    static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar" };
+    static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign" };
     static const char *debug_keys[] = { "store", "alias" };
     static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
     static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules" };
     static const char *deps_keys[] = { "jars", "aars" };
     static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
-    static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources" };
+    static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
     ccb_check_unknown_keys(&v, "", root_keys, 1);
     ccb_check_unknown_keys(&v, "project", project_keys, 7);
     ccb_check_unknown_keys(&v, "paths", paths_keys, 6);
-    ccb_check_unknown_keys(&v, "sdk", sdk_keys, 5);
+    ccb_check_unknown_keys(&v, "sdk", sdk_keys, 7);
     ccb_check_unknown_keys(&v, "signing.debug", debug_keys, 2);
     ccb_check_unknown_keys(&v, "signing.release", release_keys, 4);
     ccb_check_unknown_keys(&v, "build", build_keys, 5);
     ccb_check_unknown_keys(&v, "deps", deps_keys, 2);
     ccb_check_unknown_keys(&v, "ndk", ndk_keys, 3);
-    ccb_check_unknown_keys(&v, "preview", preview_keys, 7);
+    ccb_check_unknown_keys(&v, "preview", preview_keys, 9);
   }
 
   // Root: ccb_version.
@@ -422,6 +440,19 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     if (ccb_get_str(&v, "sdk", "r8_jar", &p)) {
       c->r8_jar = ccb_resolve(c->project_root, p);
       free(p);
+    }
+    // Tool overrides are stored exactly as written: a relative value
+    // stays relative and is interpreted against the caller's working
+    // directory when the tool runs, not against the project root or
+    // the SDK home. No existence check here: ccb_sdk_resolve validates
+    // the effective path (config, env, or default) at Stage 0.
+    p = NULL;
+    if (ccb_get_str(&v, "sdk", "aapt2", &p)) {
+      c->aapt2_override = p;
+    }
+    p = NULL;
+    if (ccb_get_str(&v, "sdk", "zipalign", &p)) {
+      c->zipalign_override = p;
     }
   }
 
@@ -594,6 +625,16 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
       c->preview_resources = ccb_resolve(c->project_root, p);
       free(p);
     }
+    p = NULL;
+    if (ccb_get_str(&v, "preview", "layout", &p)) {
+      c->preview_layout = ccb_resolve(c->project_root, p);
+      free(p);
+    }
+    p = NULL;
+    if (ccb_get_str(&v, "preview", "nav_graph", &p)) {
+      c->preview_nav_graph = ccb_resolve(c->project_root, p);
+      free(p);
+    }
     long w = 0;
     if (ccb_get_int(&v, "preview", "phone_width", &w)) {
       c->preview_phone_width = w;
@@ -609,6 +650,33 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     int gate = 0;
     if (ccb_get_bool(&v, "preview", "gate", &gate)) {
       c->preview_gate = gate;
+    }
+    // [preview.bindings]: code identifier -> component label, both
+    // strings. A non-string value is the existing wrong-type error
+    // (CCB-E1007); the table itself needs no unknown-key check
+    // because any identifier may be a key.
+    {
+      const ccb_toml_table *bt = ccb_toml_find_table(doc,
+        "preview.bindings");
+      if (bt != NULL) {
+        for (size_t i = 0; i < bt->count; i++) {
+          if (bt->kvs[i].value.type != CCB_TOML_STRING) {
+            ccb_vdiagf(&v, "CCB-E1007",
+              "key '%s' must be a string", bt->kvs[i].key, "");
+            continue;
+          }
+          size_t n = c->preview_binding_count;
+          c->preview_binding_keys = ccb_xrealloc(
+            c->preview_binding_keys, (n + 1) * sizeof(*c->preview_binding_keys));
+          c->preview_binding_values = ccb_xrealloc(
+            c->preview_binding_values,
+            (n + 1) * sizeof(*c->preview_binding_values));
+          c->preview_binding_keys[n] = ccb_xstrdup(bt->kvs[i].key);
+          c->preview_binding_values[n] =
+            ccb_xstrdup(bt->kvs[i].value.str);
+          c->preview_binding_count = n + 1;
+        }
+      }
     }
   }
 
@@ -667,6 +735,12 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   }
   if (c->preview_resources != NULL) {
     ccb_require_dir(&v, c->preview_resources, "preview resources directory");
+  }
+  if (c->preview_layout != NULL) {
+    ccb_require_path(&v, c->preview_layout, "preview layout path");
+  }
+  if (c->preview_nav_graph != NULL) {
+    ccb_require_path(&v, c->preview_nav_graph, "preview nav_graph path");
   }
 
   ccb_toml_free_doc(doc);

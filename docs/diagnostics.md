@@ -33,7 +33,7 @@ error).
 | CCB-E2006 | kotlinc is not 2.x |
 | CCB-E2007 | NDK not installed for the requested version |
 | CCB-E2008 | NDK revision mismatch |
-| CCB-E2009 | A required tool binary is missing or not executable |
+| CCB-E2009 | A required tool binary is missing or not executable. Also covers a broken explicit tool override: a `[sdk] aapt2` / `[sdk] zipalign` key or a `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, and the message names the override source (e.g. `[sdk] aapt2`, `CCB_ZIPALIGN`) and the path. No silent fallback to the default tool. |
 
 ## Build (exit 1 unless noted)
 
@@ -79,9 +79,12 @@ error).
 | CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
 | CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells (warning, always) |
 | CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always) |
+| CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
+| CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
+| CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
 
 Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under
-`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018 are
+`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021 are
 warnings even under `--strict`, so they never fail the build gate.
 A project with no usable
 `[preview]` section is not a diagnostic at all: `ccb preview` prints

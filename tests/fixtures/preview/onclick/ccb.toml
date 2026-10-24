@@ -1,0 +1,27 @@
+ccb_version = 1
+
+[project]
+name = "onclick"
+package = "com.example.onclick"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[preview]
+styles = "styles"
+flow = "flow"
+layout = "res/layout"
+phone_width = 390
+phone_height = 844
+
+[preview.bindings]
+open_button = "Open note"
+new_button = "New note"
+silent_button = "Silent"
+ghost_button = "Missing button"
+missing_button = "Open note"
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"

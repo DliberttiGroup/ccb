@@ -41,6 +41,31 @@ repository error; the SDK must then be provisioned by direct download
 provisioned. This is an environment limitation, not a CCB bug: on a
 machine with direct repository access, `ccb setup` works normally.
 
+## Custom tool paths
+
+`aapt2` and `zipalign` do not have to come from the SDK's build-tools
+directory. Set `[sdk] aapt2` / `[sdk] zipalign` in `ccb.toml`, or the
+env vars `CCB_AAPT2` / `CCB_ZIPALIGN`. Precedence, highest first:
+`[sdk]` key, env var, default
+`<sdk-home>/build-tools/<version>/<tool>`. An empty env value counts
+as unset. A relative value is used exactly as written (relative to
+the working directory when the tool runs, not to the project root or
+SDK home). A set-but-broken override fails before any build stage
+with `CCB-E2009` naming the source and the path — CCB never silently
+falls back to the default tool. `ccb doctor` and `ccb check` print
+the effective path and its source (`config`, `env`, or `default`)
+for both tools, in text and `--json` output.
+
+Motivating case: on Termux (aarch64), the SDK's build-tools `aapt2`
+is an x86-64-only binary (2.19) that cannot run natively, while the
+Termux package `aapt2` (16.0.0.4-4, reports aapt 2.20) runs natively.
+Point CCB at it with `[sdk] aapt2 =
+"/data/data/com.termux/files/usr/bin/aapt2"` (the expanded form of
+`$PREFIX/bin/aapt2`; TOML values are not shell-expanded) or
+`CCB_AAPT2=$PREFIX/bin/aapt2` in the shell. There is no Termux `zipalign`
+package, so `zipalign` keeps its default SDK path unless it gets its
+own override.
+
 ## r8 (release minification)
 
 r8 does not ship in build-tools; it is distributed via Google's Maven

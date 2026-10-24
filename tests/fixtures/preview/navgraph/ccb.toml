@@ -1,0 +1,26 @@
+ccb_version = 1
+
+[project]
+name = "navgraph"
+package = "com.example.navgraph"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[preview]
+styles = "styles"
+flow = "flow"
+nav_graph = "res/navigation"
+phone_width = 390
+phone_height = 844
+
+[preview.bindings]
+aButton = "A"
+bButton = "B"
+cButton = "C"
+dButton = "D"
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"

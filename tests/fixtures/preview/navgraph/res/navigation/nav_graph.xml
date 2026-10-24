@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:app="http://schemas.android.com/apk/res-auto">
+  <fragment android:id="@+id/detail" android:name="com.example.Detail" />
+  <fragment android:id="@id/form" android:name="com.example.Form" />
+  <activity android:id="@+id/settings" android:name="com.example.Settings" />
+  <action android:id="@+id/action_home_to_detail" app:destination="@id/detail" />
+</navigation>

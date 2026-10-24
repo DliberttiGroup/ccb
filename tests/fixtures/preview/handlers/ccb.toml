@@ -1,0 +1,25 @@
+ccb_version = 1
+
+[project]
+name = "handlers"
+package = "com.example.handlers"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[preview]
+styles = "styles"
+flow = "flow"
+phone_width = 390
+phone_height = 844
+
+[preview.bindings]
+openButton = "Open note"
+detailButton = "Detail button"
+namedButton = "Named button"
+activityButton = "Activity button"
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"

@@ -119,6 +119,16 @@ libs = "app/libs"
 home = "/opt/android-sdk"
 build_tools = "35.0.0"
 ndk = "27.0.12077973"  # optional; required only if [ndk] is present
+# Tool overrides (optional): aapt2 / zipalign may point at a different
+# binary than the SDK's build-tools copy, e.g. a distro package build.
+# Precedence: this key, then $CCB_AAPT2 / $CCB_ZIPALIGN, then the default
+# <sdk-home>/build-tools/<version>/<tool>. A relative value is used
+# exactly as given (cwd-relative at invocation time), never rebased
+# against the project dir or SDK home. A set-but-broken override is a
+# Stage 0 error (CCB-E2009 naming the source and path); CCB never
+# silently falls back to the default tool.
+# aapt2 = "/usr/bin/aapt2"
+# zipalign = "/usr/bin/zipalign"
 
 [signing.debug]
 store = "debug.keystore"   # auto-generated with standard debug credentials if missing
@@ -164,6 +174,20 @@ c_sources = ["app/src/main/cpp/native.c"]
   must never print a password, even in `--verbose` or `--dry-run` output.
 - `ccb.toml` must be validatable without building: `ccb check` parses,
   resolves paths, and reports every problem at once (not one error per run).
+- Tool overrides: `[sdk] aapt2` / `[sdk] zipalign` and the env vars
+  `CCB_AAPT2` / `CCB_ZIPALIGN` select a different aapt2 or zipalign
+  binary for every invocation (compile, link, badging, zipalign,
+  doctor/check reporting, dry-run output). Precedence, highest first:
+  `[sdk]` key, env var, default SDK build-tools path. An empty env
+  value counts as unset. A relative override path is used exactly as
+  written — it is relative to the working directory at invocation
+  time, not to the project root or SDK home. A set override that does
+  not exist or is not executable fails Stage 0 with CCB-E2009 naming
+  the source and the path; there is no silent fallback to the default.
+  `ccb doctor` and `ccb check` report the effective path and its
+  source (`config`, `env`, or `default`) for both tools, and the
+  effective paths participate in the cache fingerprints, so switching
+  tools invalidates the affected stages.
 
 ## 5. Build pipeline
 
@@ -176,6 +200,13 @@ skippable by the cache (see §7) and independently reportable in JSON output
 Parse `ccb.toml`, resolve all paths, validate the schema, check the SDK,
 build-tools, platform, `kotlinc`, and `d8`/`r8` exist and meet minimum
 versions. Fail here, before any work, if the toolchain is incomplete.
+Tool overrides are validated here too: a `[sdk] aapt2` / `[sdk]
+zipalign` key or a `CCB_AAPT2` / `CCB_ZIPALIGN` env var that points at
+a missing or non-executable binary fails Stage 0 with CCB-E2009 naming
+the source and the path, independently of whether the build-tools
+directory itself exists — a missing build-tools directory (CCB-E2002)
+never masks a broken override, and a broken override never falls back
+to the default tool.
 
 Supported v1 ranges (pinned here; `ccb doctor` judges against them):
 compileSdk 34–35, build-tools 35.x, kotlinc 2.x, JDK 17+. A tool
@@ -549,6 +580,34 @@ execute Kotlin. It statically parses structure:
   (string literals literally, `name = value` pairs as written,
   anything else as `unknown`) and shown in the tree, walk mode's
   edge list, and JSON (`"args"` array; JSON `"version":2`).
+- Slice 1 click handlers (implemented 2026-10-24): `setOnClickListener`
+  lambdas (trailing and parenthesized), `onClick = { ... }`
+  assignments, and direct `::handler` references inside screen fun
+  bodies also yield edges — derived, not declared. Binding is an
+  explicit `[preview.bindings]` table (code identifier → component
+  label); an unbound handler warns (CCB-P1019) and yields no edge.
+  `startActivity(Intent(this, X::class.java))` yields the class
+  simple name as the target. A nav nested in any non-branch brace
+  block inside a handler yields no edge (branch bodies are Slice 2,
+  below); a computed destination
+  yields an unknown edge; a declared edge for the same button always
+  wins, with a CCB-P1020 warning on disagreement. See
+  `docs/preview.md` (click handlers) for the exact outcome table
+  and scope limits. Slice 2 (conditional nav → branch edges,
+  implemented 2026-10-24: `if`/`when` branch bodies in handlers,
+  braced or braceless, yield edges annotated with the branch label,
+  e.g. `if ready: then`; literal arguments on handler nav calls
+  yield edges with args) and Slice 3 (XML onClick, NavController,
+  implemented 2026-10-24: layout `android:onClick` buttons resolve
+  via `[preview.bindings]` view-id keys to handler funs, whose
+  edges attach to screens containing the bound label — unbound is
+  CCB-P1019, label in no screen is CCB-P1021; `navigate(R.id.x)`
+  resolves through a nav-graph file — unlisted id or no graph file
+  is an unknown edge; layout/graph locations: explicit `[preview]`
+  `layout`/`nav_graph` keys, else `<resources>/layout` /
+  `<resources>/navigation`, else `<paths res>/layout` /
+  `<paths res>/navigation`) are implemented; see `docs/preview.md`
+  for the exact shapes, locations, and outcome tables.
 - `when`/`if` branches over state variables → branches in the logic
   tree, labeled with their conditions, **not evaluated**. A branch is
   shown, not resolved.
@@ -579,6 +638,18 @@ screen with no components is a warning.
   `textfield` under 8 columns or 2 rows, wireframe cells),
   CCB-P1018 text contrast below 4.5:1 (3.0:1 at `font-size` ≥ 24px)
   by WCAG relative luminance.
+- Derived handler edges (Slices 1–3, implemented 2026-10-24) render
+  exactly like declared edges in every output mode (tree, walk,
+  storyboard, diff, JSON — no `derived` marker in output), and the
+  post-load reconciliation (declared beats derived, CCB-P1020 on
+  disagreement, CCB-P1019 for unbound handlers, CCB-P1021 for an
+  onClick label in no screen) runs before layout
+  and diagnosis, so every consumer sees the reconciled edges.
+  CCB-P1019/CCB-P1020/CCB-P1021 are warnings always, never gate failures.
+  Branch edges (Slice 2) add the tree/walk suffix ` [branch]` and
+  the JSON per-edge `"branch"` field (string, or `null` when
+  unconditional); JSON stays `"version":2` (both edge fields are
+  additive).
 - `--walk [screen]`: interactive static exploration of the logic
   tree (arrow keys/`j`/`k`, Enter, `b`, `t` branch mode, `q`); see
   `docs/preview.md` Walk mode. Still static only — never execution

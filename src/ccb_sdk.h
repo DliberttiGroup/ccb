@@ -15,9 +15,13 @@ typedef struct {
   char *build_tools_dir;
   char *build_tools_version;
   char *aapt2;
+  // Where the effective aapt2/zipalign came from: "config", "env", or
+  // "default". Owned strings, always set on a successful resolve.
+  char *aapt2_source;
   char *d8;
   char *apksigner;
   char *zipalign;
+  char *zipalign_source;
   char *android_jar;
   char *java;
   char *javac;

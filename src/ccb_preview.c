@@ -489,6 +489,483 @@ static void pv_res_resolve_colors(ccb_arena *arena, pv_project *p,
   }
 }
 
+// ---------- Slices 2/3: layout XML + nav-graph inputs ----------
+//
+// Both are tiny subset parsers (no XML library), in the same spirit
+// as the values parser above: they recognize exactly one shape each
+// and skip everything else, never guessing. Layout: an element
+// whose tag's local name ends in "Button" with an android:onClick
+// attribute. Nav graph: any element carrying both android:id and
+// android:name (a destination); android:name's simple name (after
+// the last '.') is the screen name, exactly as written.
+
+// Append a key/value pair to arena arrays; with first_wins, an
+// existing key keeps its first value (deterministic: files are
+// collected in sorted order).
+static void pv_pair_add(ccb_arena *arena, char ***keys_io, char ***vals_io,
+    size_t *n_io, char *key, char *val, int first_wins) {
+  size_t n = *n_io;
+  size_t k = 0;
+  char **next_keys = NULL;
+  char **next_vals = NULL;
+  if (first_wins) {
+    for (k = 0; k < n; k++) {
+      if (strcmp((*keys_io)[k], key) == 0) {
+        return;
+      }
+    }
+  }
+  next_keys = ccb_arena_alloc(arena, (n + 1) * sizeof(*next_keys));
+  next_vals = ccb_arena_alloc(arena, (n + 1) * sizeof(*next_vals));
+  for (k = 0; k < n; k++) {
+    next_keys[k] = (*keys_io)[k];
+    next_vals[k] = (*vals_io)[k];
+  }
+  next_keys[n] = key;
+  next_vals[n] = val;
+  *keys_io = next_keys;
+  *vals_io = next_vals;
+  *n_io = n + 1;
+}
+
+// Attribute value of `attr` inside the tag text [start, end)
+// (between '<' and '>'): walks real attributes, so a name occurring
+// inside another attribute's quoted value never matches. Returns a
+// malloc'd value, or NULL when the attribute is absent/malformed.
+static char *pv_xml_attr(const char *text, size_t start, size_t end,
+    const char *attr) {
+  size_t i = start;
+  size_t alen = strlen(attr);
+  while (i < end) {
+    size_t ns = 0;
+    size_t ne = 0;
+    while (i < end && (text[i] == ' ' || text[i] == '\t' ||
+        text[i] == '\n' || text[i] == '\r')) {
+      i++;
+    }
+    if (i >= end || text[i] == '/') {
+      return NULL;
+    }
+    ns = i;
+    while (i < end && text[i] != ' ' && text[i] != '\t' &&
+        text[i] != '\n' && text[i] != '\r' && text[i] != '=' &&
+        text[i] != '/' && text[i] != '>') {
+      i++;
+    }
+    ne = i;
+    while (i < end && (text[i] == ' ' || text[i] == '\t' ||
+        text[i] == '\n' || text[i] == '\r')) {
+      i++;
+    }
+    if (i < end && text[i] == '=') {
+      char quote = '\0';
+      size_t vs = 0;
+      size_t ve = 0;
+      i++;
+      while (i < end && (text[i] == ' ' || text[i] == '\t' ||
+          text[i] == '\n' || text[i] == '\r')) {
+        i++;
+      }
+      if (i < end && (text[i] == '"' || text[i] == '\'')) {
+        quote = text[i];
+        vs = i + 1;
+        ve = vs;
+        while (ve < end && text[ve] != quote) {
+          ve++;
+        }
+        if (ve < end) {
+          if (ne - ns == alen && memcmp(text + ns, attr, alen) == 0) {
+            char *out = ccb_xmalloc(ve - vs + 1);
+            memcpy(out, text + vs, ve - vs);
+            out[ve - vs] = '\0';
+            return out;
+          }
+          i = ve + 1;
+          continue;
+        }
+      }
+      return NULL;
+    }
+    // A valueless attribute: keep walking.
+  }
+  return NULL;
+}
+
+typedef void (*pv_tag_fn)(void *ctx, const char *text, size_t tag_start,
+  size_t tag_end, const char *local, size_t local_len);
+
+// Call fn for every opening tag in the text: tag_start/tag_end bound
+// the tag content (between '<' and '>'); local is the tag name's
+// local part (after the last '.'), not NUL-terminated. Comments,
+// closing tags, processing instructions, and declarations are
+// skipped; '>' inside a quoted attribute value does not end a tag.
+static void pv_xml_scan_tags(const char *text, size_t len, pv_tag_fn fn,
+    void *ctx) {
+  size_t i = 0;
+  while (i < len) {
+    size_t gt = 0;
+    size_t ns = 0;
+    size_t ne = 0;
+    const char *local = NULL;
+    size_t local_len = 0;
+    char quote = '\0';
+    int found = 0;
+    size_t k = 0;
+    if (i + 4 <= len && memcmp(text + i, "<!--", 4) == 0) {
+      size_t j = 0;
+      for (j = i + 4; j + 3 <= len; j++) {
+        if (memcmp(text + j, "-->", 3) == 0) {
+          i = j + 3;
+          break;
+        }
+      }
+      if (j + 3 > len) {
+        break;
+      }
+      continue;
+    }
+    if (text[i] != '<') {
+      i++;
+      continue;
+    }
+    if (i + 1 >= len || text[i + 1] == '/' || text[i + 1] == '?' ||
+        text[i + 1] == '!') {
+      while (i < len && text[i] != '>') {
+        i++;
+      }
+      if (i < len) {
+        i++;
+      }
+      continue;
+    }
+    for (k = i + 1; k < len; k++) {
+      if (quote != '\0') {
+        if (text[k] == quote) {
+          quote = '\0';
+        }
+        continue;
+      }
+      if (text[k] == '"' || text[k] == '\'') {
+        quote = text[k];
+      } else if (text[k] == '>') {
+        gt = k;
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      break;
+    }
+    ns = i + 1;
+    ne = ns;
+    while (ne < gt && text[ne] != ' ' && text[ne] != '\t' &&
+        text[ne] != '\n' && text[ne] != '\r' && text[ne] != '/' &&
+        text[ne] != '>') {
+      ne++;
+    }
+    local = text + ns;
+    local_len = ne - ns;
+    {
+      size_t d = 0;
+      for (d = 0; d < local_len; d++) {
+        if (local[d] == '.') {
+          local = text + ns + d + 1;
+          local_len = ne - (ns + d + 1);
+        }
+      }
+    }
+    fn(ctx, text, ns, gt, local, local_len);
+    i = gt + 1;
+  }
+}
+
+// Strip an Android resource reference to its entry name:
+// "@+id/detail" and "@id/detail" both become "detail"; anything
+// without a '/' is kept as-is.
+static const char *pv_res_name(const char *v) {
+  const char *slash = strrchr(v, '/');
+  return slash != NULL ? slash + 1 : v;
+}
+
+// Simple name of a qualified class name: after the last '.'.
+static const char *pv_simple_name(const char *v) {
+  const char *dot = strrchr(v, '.');
+  return dot != NULL ? dot + 1 : v;
+}
+
+typedef struct {
+  char ***methods_io;
+  char ***ids_io;
+  size_t *n_io;
+} pv_layout_ctx;
+
+static void pv_layout_tag(void *ctx_v, const char *text, size_t tag_start,
+    size_t tag_end, const char *local, size_t local_len) {
+  pv_layout_ctx *ctx = ctx_v;
+  char *onclick = NULL;
+  char *id = NULL;
+  size_t n = 0;
+  char **next_m = NULL;
+  char **next_i = NULL;
+  if (local_len < 6 || memcmp(local + local_len - 6, "Button", 6) != 0) {
+    return;
+  }
+  onclick = pv_xml_attr(text, tag_start, tag_end, "android:onClick");
+  if (onclick == NULL) {
+    return;
+  }
+  id = pv_xml_attr(text, tag_start, tag_end, "android:id");
+  n = *ctx->n_io;
+  // xrealloc preserves the existing entries; only the new slot is
+  // filled here.
+  next_m = ccb_xrealloc(*ctx->methods_io, (n + 1) * sizeof(*next_m));
+  next_i = ccb_xrealloc(*ctx->ids_io, (n + 1) * sizeof(*next_i));
+  next_m[n] = onclick;
+  next_i[n] = id != NULL ? ccb_xstrdup(pv_res_name(id)) : NULL;
+  free(id);
+  *ctx->methods_io = next_m;
+  *ctx->ids_io = next_i;
+  *ctx->n_io = n + 1;
+}
+
+typedef struct {
+  ccb_arena *arena;
+  char ***keys_io;
+  char ***vals_io;
+  size_t *n_io;
+} pv_graph_ctx;
+
+static void pv_graph_tag(void *ctx_v, const char *text, size_t tag_start,
+    size_t tag_end, const char *local, size_t local_len) {
+  pv_graph_ctx *ctx = ctx_v;
+  char *id = NULL;
+  char *name = NULL;
+  (void)local;
+  (void)local_len;
+  id = pv_xml_attr(text, tag_start, tag_end, "android:id");
+  name = pv_xml_attr(text, tag_start, tag_end, "android:name");
+  if (id != NULL && name != NULL) {
+    pv_pair_add(ctx->arena, ctx->keys_io, ctx->vals_io, ctx->n_io,
+      ccb_arena_strdup(ctx->arena, pv_res_name(id)),
+      ccb_arena_strdup(ctx->arena, pv_simple_name(name)), 1);
+  }
+  free(id);
+  free(name);
+}
+
+// XML input files for a configured path: the file itself when the
+// path is a file, every *.xml under it when it is a directory, and
+// nothing when it does not exist (a fallback dir that is absent is
+// simply an empty input set). The list is malloc'd; free with
+// ccb_free_str_array.
+static void pv_xml_inputs(const char *path, char ***files_io,
+    size_t *nfiles_io) {
+  *files_io = NULL;
+  *nfiles_io = 0;
+  if (path == NULL || !ccb_path_exists(path)) {
+    return;
+  }
+  if (ccb_path_is_dir(path)) {
+    (void)ccb_collect_files(path, ".xml", files_io, nfiles_io);
+    return;
+  }
+  *files_io = ccb_xmalloc(sizeof(**files_io));
+  (*files_io)[0] = ccb_xstrdup(path);
+  *nfiles_io = 1;
+}
+
+// Location of the layout inputs: [preview] layout, else
+// <resources>/layout, else <paths res>/layout, else none.
+static char *pv_layout_path(const ccb_config *cfg) {
+  if (cfg->preview_layout != NULL) {
+    return ccb_xstrdup(cfg->preview_layout);
+  }
+  if (cfg->preview_resources != NULL) {
+    return ccb_path_join(cfg->preview_resources, "layout");
+  }
+  if (cfg->res != NULL) {
+    return ccb_path_join(cfg->res, "layout");
+  }
+  return NULL;
+}
+
+// Location of the nav-graph inputs: [preview] nav_graph, else
+// <resources>/navigation, else <paths res>/navigation, else none.
+static char *pv_nav_path(const ccb_config *cfg) {
+  if (cfg->preview_nav_graph != NULL) {
+    return ccb_xstrdup(cfg->preview_nav_graph);
+  }
+  if (cfg->preview_resources != NULL) {
+    return ccb_path_join(cfg->preview_resources, "navigation");
+  }
+  if (cfg->res != NULL) {
+    return ccb_path_join(cfg->res, "navigation");
+  }
+  return NULL;
+}
+
+// Append an edge to a screen, with the same dedup key as the flow
+// parser's pv_edge_add (from, target, unknown, args, branch).
+static void pv_screen_edge_add(ccb_arena *arena, pv_screen *screen,
+    char *from, char *target, int unknown, char **args, size_t nargs,
+    int *args_named, char *branch) {
+  size_t i = 0;
+  size_t k = 0;
+  for (i = 0; i < screen->nedges; i++) {
+    pv_edge *e = &screen->edges[i];
+    int same_target = (e->target == NULL && target == NULL) ||
+      (e->target != NULL && target != NULL && strcmp(e->target, target) == 0);
+    int same_branch = (e->branch == NULL && branch == NULL) ||
+      (e->branch != NULL && branch != NULL && strcmp(e->branch, branch) == 0);
+    int same_args = e->nargs == nargs;
+    if (same_args) {
+      for (k = 0; k < nargs; k++) {
+        int same = (e->args[k] == NULL && args[k] == NULL) ||
+          (e->args[k] != NULL && args[k] != NULL &&
+           strcmp(e->args[k], args[k]) == 0 &&
+           e->args_named[k] == args_named[k]);
+        if (!same) {
+          same_args = 0;
+          break;
+        }
+      }
+    }
+    if (strcmp(e->from, from) == 0 && same_target && e->unknown == unknown &&
+        same_args && same_branch) {
+      return;
+    }
+  }
+  if (screen->nedges == screen->capedges) {
+    size_t ncap = screen->capedges == 0 ? 4 : screen->capedges * 2;
+    pv_edge *next = ccb_arena_alloc(arena, ncap * sizeof(*next));
+    for (i = 0; i < screen->nedges; i++) {
+      next[i] = screen->edges[i];
+    }
+    screen->edges = next;
+    screen->capedges = ncap;
+  }
+  screen->edges[screen->nedges].from = from;
+  screen->edges[screen->nedges].target = target;
+  screen->edges[screen->nedges].unknown = unknown;
+  screen->edges[screen->nedges].args = args;
+  screen->edges[screen->nedges].nargs = nargs;
+  screen->edges[screen->nedges].args_named = args_named;
+  screen->edges[screen->nedges].derived = 1;
+  screen->edges[screen->nedges].branch = branch;
+  screen->nedges++;
+}
+
+// True when the component tree contains a component box (not the
+// screen root, not a branch node) with the given label.
+static int pv_tree_has_label(pv_box *box, const char *label) {
+  size_t i = 0;
+  if (box == NULL || label == NULL) {
+    return 0;
+  }
+  if (box->label != NULL && strcmp(box->label, label) == 0 &&
+      strcmp(box->type, "screen") != 0 &&
+      strcmp(box->type, "branch") != 0 &&
+      strcmp(box->type, "branch-entry") != 0) {
+    return 1;
+  }
+  for (i = 0; i < box->nchildren; i++) {
+    if (pv_tree_has_label(box->children[i], label)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static const char *pv_binding_lookup(const ccb_config *cfg,
+    const char *key) {
+  size_t i = 0;
+  if (cfg == NULL || key == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < cfg->preview_binding_count; i++) {
+    if (strcmp(cfg->preview_binding_keys[i], key) == 0) {
+      return cfg->preview_binding_values[i];
+    }
+  }
+  return NULL;
+}
+
+// Slice 1 reconciliation (the declared-beats-derived post-pass).
+// Runs once after every flow file is parsed, so it applies to every
+// consumer (render, walk, storyboard, diff, gate): for each derived
+// edge, a declared edge from the same button (same `from`) stands.
+// Same destination (or both unknown) -> the derived edge is dropped
+// silently; different known destinations -> a CCB-P1020 warning
+// naming the button and both destinations, and the derived edge is
+// dropped; a declared edge of any kind with a derived unknown edge
+// -> the derived edge is dropped silently. Derived edges with no
+// declared edge for their button are kept unchanged.
+static void pv_reconcile_derived(pv_project *p, ccb_diag_list *diags) {
+  size_t si = 0;
+  for (si = 0; si < p->nscreens; si++) {
+    pv_screen *screen = p->screens[si];
+    int *keep = NULL;
+    size_t w = 0;
+    size_t r = 0;
+    if (screen->nedges == 0) {
+      continue;
+    }
+    keep = ccb_xmalloc(screen->nedges * sizeof(*keep));
+    for (r = 0; r < screen->nedges; r++) {
+      pv_edge *e = &screen->edges[r];
+      const pv_edge *decl = NULL;
+      size_t d = 0;
+      keep[r] = 1;
+      if (!e->derived) {
+        continue;
+      }
+      for (d = 0; d < screen->nedges; d++) {
+        if (d != r && !screen->edges[d].derived &&
+            strcmp(screen->edges[d].from, e->from) == 0) {
+          decl = &screen->edges[d];
+          break;
+        }
+      }
+      if (decl == NULL) {
+        continue;
+      }
+      if (decl->target != NULL && e->target != NULL) {
+        if (strcmp(decl->target, e->target) == 0) {
+          keep[r] = 0;
+        } else {
+          ccb_str msg;
+          ccb_str_init(&msg);
+          ccb_str_append(&msg,
+            "declared navigation for button '");
+          ccb_str_append(&msg, e->from);
+          ccb_str_append(&msg, "' to '");
+          ccb_str_append(&msg, decl->target);
+          ccb_str_append(&msg,
+            "' disagrees with derived navigation to '");
+          ccb_str_append(&msg, e->target);
+          ccb_str_append(&msg, "'; declared edge kept");
+          pv_diag(diags, "CCB-P1020", msg.buf != NULL ? msg.buf : "",
+            NULL, -1);
+          ccb_str_free(&msg);
+          keep[r] = 0;
+        }
+      } else {
+        // Any declared edge (known or unknown) stands over a
+        // derived edge that does not match it exactly.
+        keep[r] = 0;
+      }
+    }
+    for (r = 0; r < screen->nedges; r++) {
+      if (keep[r]) {
+        screen->edges[w] = screen->edges[r];
+        w++;
+      }
+    }
+    screen->nedges = w;
+    free(keep);
+  }
+}
+
 ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
     int strict, ccb_diag_list *diags, pv_project **out) {
   ccb_diag_list own_diags;
@@ -536,22 +1013,198 @@ ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
   }
   p->frame_width = frame_width;
   p->interior_cols = frame_width - 2;
-  // Flow first: screens must exist before CSS files can be scoped.
-  if (cfg->preview_flow != NULL) {
-    if (ccb_collect_files(cfg->preview_flow, ".kt", &flow_files,
-        &nflow) == CCB_OK) {
-      for (i = 0; i < nflow; i++) {
-        char *text = NULL;
-        size_t len = 0;
-        if (ccb_read_file(flow_files[i], &text, &len) != CCB_OK) {
-          continue;
-        }
-        pv_flow_parse(arena, text, flow_files[i], dl, &p->screens,
-          &p->nscreens);
-        free(text);
+  // Slice 3 inputs, before flow parsing: the nav graph (destination
+  // id -> screen name) and the layout onClick mapping (method ->
+  // bound component label, resolved through [preview.bindings]).
+  // A layout button with no binding is the CCB-P1019 case (warning,
+  // no edge), exactly like an unbound listener receiver.
+  {
+    char *nav_path = pv_nav_path(cfg);
+    char **nav_files = NULL;
+    size_t nnav = 0;
+    char **graph_keys = NULL;
+    char **graph_vals = NULL;
+    size_t ngraph = 0;
+    char *layout_path = pv_layout_path(cfg);
+    char **layout_files = NULL;
+    size_t nlayout = 0;
+    char **lay_methods = NULL;
+    char **lay_ids = NULL;
+    size_t nlay = 0;
+    char **onclick_methods = NULL;
+    char **onclick_labels = NULL;
+    size_t nonclick = 0;
+    char **warned_ids = NULL;
+    size_t nwarned_ids = 0;
+    pv_pending_edge **pending = NULL;
+    size_t npending = 0;
+    size_t li = 0;
+    size_t pi = 0;
+    pv_xml_inputs(nav_path, &nav_files, &nnav);
+    free(nav_path);
+    for (li = 0; li < nnav; li++) {
+      char *text = NULL;
+      size_t len = 0;
+      pv_graph_ctx gctx;
+      if (ccb_read_file(nav_files[li], &text, &len) != CCB_OK) {
+        continue;
       }
-      ccb_free_str_array(flow_files, nflow);
+      gctx.arena = arena;
+      gctx.keys_io = &graph_keys;
+      gctx.vals_io = &graph_vals;
+      gctx.n_io = &ngraph;
+      pv_xml_scan_tags(text, len, pv_graph_tag, &gctx);
+      free(text);
     }
+    ccb_free_str_array(nav_files, nnav);
+    pv_xml_inputs(layout_path, &layout_files, &nlayout);
+    free(layout_path);
+    for (li = 0; li < nlayout; li++) {
+      char *text = NULL;
+      size_t len = 0;
+      pv_layout_ctx lctx;
+      if (ccb_read_file(layout_files[li], &text, &len) != CCB_OK) {
+        continue;
+      }
+      lctx.methods_io = &lay_methods;
+      lctx.ids_io = &lay_ids;
+      lctx.n_io = &nlay;
+      pv_xml_scan_tags(text, len, pv_layout_tag, &lctx);
+      free(text);
+    }
+    ccb_free_str_array(layout_files, nlayout);
+    for (pi = 0; pi < nlay; pi++) {
+      const char *label = NULL;
+      size_t w = 0;
+      int warned = 0;
+      const char *id_key = lay_ids[pi] != NULL ? lay_ids[pi] : "";
+      for (w = 0; w < nwarned_ids; w++) {
+        if (strcmp(warned_ids[w], id_key) == 0 &&
+            strcmp(warned_ids[w] + strlen(id_key) + 1,
+              lay_methods[pi]) == 0) {
+          warned = 1;
+          break;
+        }
+      }
+      label = lay_ids[pi] != NULL ?
+        pv_binding_lookup(cfg, lay_ids[pi]) : NULL;
+      if (label == NULL) {
+        ccb_str msg;
+        if (!warned) {
+          // Dedup key: "id\0method" in one malloc'd string.
+          size_t kl = strlen(id_key) + 1 + strlen(lay_methods[pi]) + 1;
+          char *key = ccb_xmalloc(kl);
+          memcpy(key, id_key, strlen(id_key) + 1);
+          memcpy(key + strlen(id_key) + 1, lay_methods[pi],
+            strlen(lay_methods[pi]) + 1);
+          warned_ids = ccb_xrealloc(warned_ids,
+            (nwarned_ids + 1) * sizeof(*warned_ids));
+          warned_ids[nwarned_ids] = key;
+          nwarned_ids++;
+        }
+        if (!warned) {
+          ccb_str_init(&msg);
+          ccb_str_append(&msg,
+            "handler found, button not bound: layout button '");
+          ccb_str_append(&msg, id_key);
+          ccb_str_append(&msg, "' (android:onClick '");
+          ccb_str_append(&msg, lay_methods[pi]);
+          ccb_str_append(&msg,
+            "') has no [preview.bindings] entry; no edge recorded");
+          pv_diag(dl, "CCB-P1019", msg.buf != NULL ? msg.buf : "",
+            NULL, -1);
+          ccb_str_free(&msg);
+        }
+        continue;
+      }
+      {
+        // Identical (method, label) pairs (e.g. a button declared
+        // in two layout variants) collapse to one; distinct labels
+        // for one method are all kept.
+        size_t q = 0;
+        int dup = 0;
+        for (q = 0; q < nonclick; q++) {
+          if (strcmp(onclick_methods[q], lay_methods[pi]) == 0 &&
+              strcmp(onclick_labels[q], label) == 0) {
+            dup = 1;
+            break;
+          }
+        }
+        if (!dup) {
+          pv_pair_add(arena, &onclick_methods, &onclick_labels,
+            &nonclick, ccb_arena_strdup(arena, lay_methods[pi]),
+            ccb_arena_strdup(arena, label), 0);
+        }
+      }
+    }
+    for (pi = 0; pi < nlay; pi++) {
+      free(lay_methods[pi]);
+      free(lay_ids[pi]);
+    }
+    free(lay_methods);
+    free(lay_ids);
+    for (pi = 0; pi < nwarned_ids; pi++) {
+      free(warned_ids[pi]);
+    }
+    free(warned_ids);
+    // Flow first: screens must exist before CSS files can be scoped.
+    if (cfg->preview_flow != NULL) {
+      if (ccb_collect_files(cfg->preview_flow, ".kt", &flow_files,
+          &nflow) == CCB_OK) {
+        for (i = 0; i < nflow; i++) {
+          char *text = NULL;
+          size_t len = 0;
+          if (ccb_read_file(flow_files[i], &text, &len) != CCB_OK) {
+            continue;
+          }
+          pv_flow_parse_full(arena, text, flow_files[i], dl,
+            &p->screens, &p->nscreens, cfg->preview_binding_keys,
+            cfg->preview_binding_values, cfg->preview_binding_count,
+            onclick_methods, onclick_labels, nonclick,
+            graph_keys, graph_vals, ngraph, &pending, &npending);
+          free(text);
+        }
+        ccb_free_str_array(flow_files, nflow);
+      }
+    }
+    // Slice 3 distribution: an onClick edge attaches to every screen
+    // whose component tree contains the bound label (the button the
+    // layout declares). A label in no screen is CCB-P1021 (warning,
+    // no edge): the edge has nowhere to attach, and attaching it to
+    // an unrelated screen would be a guess. Distribution runs before
+    // reconciliation, so declared edges still beat these derived
+    // edges exactly as they beat Slice 1 derived edges. Note the
+    // labels compared here are pre-@string-resolution, matching the
+    // Slice 1 reconciliation comparison.
+    for (pi = 0; pi < npending; pi++) {
+      pv_pending_edge *pe = pending[pi];
+      int attached = 0;
+      size_t si = 0;
+      for (si = 0; si < p->nscreens; si++) {
+        if (pv_tree_has_label(p->screens[si]->root, pe->from)) {
+          pv_screen_edge_add(arena, p->screens[si], pe->from,
+            pe->target, pe->unknown, pe->args, pe->nargs,
+            pe->args_named, pe->branch);
+          attached = 1;
+        }
+      }
+      if (!attached) {
+        ccb_str msg;
+        ccb_str_init(&msg);
+        ccb_str_append(&msg,
+          "onClick handler '");
+        ccb_str_append(&msg, pe->method);
+        ccb_str_append(&msg, "' for button '");
+        ccb_str_append(&msg, pe->from);
+        ccb_str_append(&msg,
+          "' matches no component in any screen; no edge recorded");
+        pv_diag(dl, "CCB-P1021", msg.buf != NULL ? msg.buf : "",
+          NULL, -1);
+        ccb_str_free(&msg);
+      }
+    }
+    // Declared-beats-derived reconciliation, after all flow files.
+    pv_reconcile_derived(p, dl);
   }
   // CSS: common.css first, then per-screen files in sorted order.
   if (cfg->preview_styles != NULL) {
@@ -951,7 +1604,9 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
         }
         pv_json_str(out, e->args[k]);
       }
-      ccb_str_append(out, "]}");
+      ccb_str_append(out, "],\"branch\":");
+      pv_json_str(out, e->branch);
+      ccb_str_append(out, "}");
     }
     ccb_str_append(out, "],\"branches\":[");
     if (screen->root != NULL) {
