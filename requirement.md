@@ -70,8 +70,9 @@ Gradle is the wrong tool for small, agent-driven Android work:
 
 - Not a Gradle replacement for large multi-module apps. Single app module
   only in v1.
-- No Maven Central / Gradle dependency resolution. Dependencies are local
-  files declared in TOML (see §5.4). Remote resolution is a v2 question.
+- No Gradle dependency resolution. Dependencies are local files or Maven
+  coordinates declared in TOML (see §5.4); Gradle itself (daemon, build
+  scripts, plugins) is out of scope.
 - No annotation processing (kapt/KSP). Apps using Dagger, Hilt, or Room
   codegen are out of scope for v1; CCB must fail with a clear message if it
   detects them, not a cryptic compiler error.
@@ -249,7 +250,7 @@ version.
   `[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error, not a Stage 2
   surprise.
 
-### 5.4 Stage 3 — Dependencies (local only, v1)
+### 5.4 Stage 3 — Dependencies (local files + remote Maven)
 
 - JARs go straight onto the compile classpath and into the dex input.
 - AARs are unzipped into the build dir: `classes.jar` to the classpath,
@@ -258,6 +259,16 @@ version.
   merged into the app manifest (see §5.2).
 - Duplicate classes across dependencies are a hard error naming both
   sources. No silent shadowing.
+- Remote dependencies: `[deps] maven = ["group:artifact:version", ...]`
+  resolves through Google Maven (plus Maven Central when
+  `[deps] maven_central = true`) into the local Maven cache
+  (`~/.cache/ccb/maven2`), and the resolved AARs/JARs feed this stage
+  exactly like local files. Exact versions only; packaging comes from
+  the POM; transitive resolution is breadth-first nearest-wins over
+  compile + runtime scopes. `ccb setup` prefetches the cache (it is
+  the only command allowed network access); builds and `ccb check`
+  resolve cache-only and fail with `CCB-E3021` on a miss. Full rules
+  in `docs/maven.md`.
 
 ### 5.5 Stage 4 — Dex (`d8`, or `r8` for release)
 
@@ -356,7 +367,7 @@ not agent-oriented. CCB must satisfy all of the following:
 | Command | Purpose |
 |---|---|
 | `ccb init [dir]` | Scaffold a minimal project: `ccb.toml`, manifest, one Kotlin Activity, `res/`, `.gitignore`. Must work offline. |
-| `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), the official kotlinc 2.4.21 compiler into the SDK home when missing, the NDK revision for `[ndk]` projects, r8 9.5.28 into the SDK home for minify projects without an explicit jar, and missing host tools from the platform package manager (Termux: aapt2/android-tools from the official repos, zipalign from the rendiix repo only when the official repos have no candidate; Linux: adb from the distro manager). Ends with a final verification pass (toolchain resolve + adb) reported as warnings. `--upgrade` reinstalls setup-managed kotlinc/r8 to pinned versions and implies `--yes`; `--print-env` prints shell exports instead of the ready line. Pinned downloads are cached under `~/.cache/ccb/downloads` with resume. This is the only command allowed network access; builds stay hermetic. |
+| `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), the official kotlinc 2.4.21 compiler into the SDK home when missing, the NDK revision for `[ndk]` projects, r8 9.5.28 into the SDK home for minify projects without an explicit jar, and missing host tools from the platform package manager (Termux: aapt2/android-tools from the official repos, zipalign from the rendiix repo only when the official repos have no candidate; Linux: adb from the distro manager). In a project with `[deps] maven`, also prefetches every direct + transitive artifact into the local Maven cache (see §5.4). Ends with a final verification pass (toolchain resolve + adb) reported as warnings. `--upgrade` reinstalls setup-managed kotlinc/r8 to pinned versions and implies `--yes`; `--print-env` prints shell exports instead of the ready line. Pinned downloads are cached under `~/.cache/ccb/downloads` with resume. This is the only command allowed network access; builds stay hermetic. |
 | `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. |
 | `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`, `--aab` (build `app.aab` instead of `app.apk`, see §5.10). |
 | `ccb clean` | Remove the build directory only. Never touches sources. |
@@ -503,7 +514,9 @@ every pointer it returns: who owns it, who frees it, and when.
 |---|---|
 | `ccb_toml` | Parse and validate `ccb.toml`; schema errors with key names. |
 | `ccb_fs` | Path resolution, directory walking, file read/write. |
-| `ccb_hash` | SHA-256 and file hashing for the cache. |
+| `ccb_hash` | SHA-256 / SHA-1 and file hashing for the cache. |
+| `ccb_net` | curl-based downloads and the shared cache root (used by setup and Maven). |
+| `ccb_maven` | Maven coordinate parsing, POM subset parser, breadth-first transitive resolution, checksum-verified cache (§5.4). |
 | `ccb_zip` | APK ZIP reader/writer (sorted entries, alignment-aware). |
 | `ccb_proc` | Spawn tools, capture output, render commands for `--dry-run`. |
 | `ccb_sdk` | SDK/NDK/kotlinc discovery and version checks. |
@@ -847,8 +860,11 @@ crashes on input it does not understand, and never silently guesses.
 1. **AAB support?** Implemented: `ccb build --aab` produces a
    base-module-only `.aab` (see §5.10); bundletool-based split APK
    generation stays out of scope.
-2. **Remote dependencies?** Stay local-files-only, or add a minimal
-   Maven resolver (with a lockfile) in v2?
+2. **Remote dependencies?** Implemented: a minimal Maven resolver
+   (Google Maven + opt-in Central, exact versions, POM packaging,
+   transitive nearest-wins, checksum-verified cache, setup-time
+   prefetch, cache-only builds) — see §5.4 and `docs/maven.md`. A
+   lockfile remains a v2 follow-up.
 3. **Compose?** Add the Compose compiler plugin path in v2, or declare
    Compose out of scope?
 4. **Manifest merging?** Implemented: the AAR manifest merge subset

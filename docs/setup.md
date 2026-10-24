@@ -41,8 +41,10 @@ missing kotlinc"); (7) install the NDK revision when the project
 declares `[ndk]` (see "Installing the NDK"); (8) install r8 when
 the project is minify-enabled without an explicit jar (see
 "Installing r8"); (9) install missing host tools from the platform
-package manager (see "Host tools"); (10) run a final verification
-pass (see "Final verification pass"); (11) print "SDK ready".
+package manager (see "Host tools"); (10) prefetch `[deps] maven`
+artifacts into the local Maven cache (see `docs/maven.md`); (11) run
+a final verification pass (see "Final verification pass"); (12)
+print "SDK ready".
 A config that was found but fails to load is an error, not a
 silent fallback to the default SDK home; defaults apply only when
 no `ccb.toml` exists at all.

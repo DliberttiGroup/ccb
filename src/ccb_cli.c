@@ -5,6 +5,8 @@
 #include "ccb_fs.h"
 #include "ccb_hash.h"
 #include "ccb_json.h"
+#include "ccb_net.h"
+#include "ccb_maven.h"
 #include "ccb_diag.h"
 #include "ccb_log.h"
 #include "ccb_proc.h"
@@ -366,19 +368,10 @@ static char *ccb_find_sdkmanager(const char *sdk_home) {
 }
 
 // Download a file with curl (follows redirects) to a temp path.
-// ccb_proc_run uses execve (no PATH lookup), so resolve curl first.
+// Shared implementation lives in ccb_net; this wrapper keeps the
+// existing setup call sites unchanged.
 static int ccb_download(const char *url, const char *dest) {
-  char *curl = ccb_sdk_find_on_path("curl");
-  if (curl == NULL) {
-    return -1;
-  }
-  char *argv[] = { curl, "-sL", "--fail", "-o", (char *)dest, (char *)url, NULL };
-  ccb_proc_result r;
-  ccb_status rc = ccb_proc_run(argv, NULL, NULL, &r);
-  int ok = rc == CCB_OK && r.exit_code == 0;
-  ccb_proc_result_free(&r);
-  free(curl);
-  return ok ? 0 : -1;
+  return ccb_net_download(url, dest);
 }
 
 // Like ccb_download, but resumes a partial file when the server
@@ -432,15 +425,13 @@ static int ccb_copy_file(const char *src, const char *dst) {
 // Shared download cache: $XDG_CACHE_HOME/ccb/downloads, else
 // ~/.cache/ccb/downloads. NULL when neither base is available.
 static char *ccb_cache_dir(void) {
-  const char *xdg = getenv("XDG_CACHE_HOME");
-  if (xdg != NULL && xdg[0] != '\0') {
-    return ccb_path_join(xdg, "ccb/downloads");
+  char *root = ccb_net_cache_root();
+  if (root == NULL) {
+    return NULL;
   }
-  const char *home = getenv("HOME");
-  if (home != NULL && home[0] != '\0') {
-    return ccb_path_join3(home, ".cache", "ccb/downloads");
-  }
-  return NULL;
+  char *dir = ccb_path_join(root, "downloads");
+  free(root);
+  return dir;
 }
 
 // Download with a shared cache. Pinned downloads (expected_sha
@@ -1726,6 +1717,26 @@ static int ccb_cmd_setup(ccb_args *a) {
     free(inst.path);
     free(inst.sudo_path);
   }
+  // Maven prefetch: the one network step setup owns for dependencies.
+  // Builds never download; a project that declares [deps] maven gets
+  // its artifacts into the local cache here, and a failure stops setup
+  // instead of leaving a half-prefetched cache behind as "ready".
+  if (cfg != NULL && cfg->maven_count > 0) {
+    ccb_maven_result mv;
+    if (ccb_maven_resolve(cfg, 1, a->verbose, 0, &mv, &diags) != CCB_OK) {
+      ccb_print_diags(a, &diags);
+      ccb_diag_list_free(&diags);
+      ccb_str_free(&platform);
+      ccb_str_free(&bt);
+      free(sdkmanager);
+      free(default_home);
+      ccb_config_free(cfg);
+      return 3;
+    }
+    fprintf(stderr, "maven: prefetched %zu artifacts (%zu aar, %zu jar)\n",
+      mv.aars_count + mv.jars_count, mv.aars_count, mv.jars_count);
+    ccb_maven_result_free(&mv);
+  }
   ccb_setup_final_pass(cfg, compile_sdk, build_tools);
   if (a->print_env) {
     printf("export ANDROID_HOME=\"%s\"\n", sdk_home);
@@ -1814,6 +1825,26 @@ static int ccb_cmd_check(ccb_args *a) {
     ccb_config_free(cfg);
     return 3;
   }
+  // Maven dependencies (cache-only): a missing prefetch is reported
+  // here, not as a surprise at build time. The counts print with the
+  // rest of the report below, after the ok line.
+  size_t mv_aars = 0;
+  size_t mv_jars = 0;
+  int have_maven = 0;
+  if (cfg->maven_count > 0) {
+    ccb_maven_result mv;
+    if (ccb_maven_resolve(cfg, 0, a->verbose, 0, &mv, &diags) != CCB_OK) {
+      ccb_print_diags(a, &diags);
+      ccb_sdk_free(sdk);
+      ccb_config_free(cfg);
+      ccb_diag_list_free(&diags);
+      return 3;
+    }
+    mv_aars = mv.aars_count;
+    mv_jars = mv.jars_count;
+    have_maven = 1;
+    ccb_maven_result_free(&mv);
+  }
   // Preview build gate (opt-in): runs after toolchain validation so a
   // failing gate does not mask a broken toolchain, and a broken
   // toolchain does not mask gate failures either way — the gate only
@@ -1862,6 +1893,10 @@ static int ccb_cmd_check(ccb_args *a) {
       sdk->kotlin_version, sdk->java_major);
     if (cfg->has_ndk) {
       printf("  ndk: %s\n", sdk->ndk_home);
+    }
+    if (have_maven) {
+      printf("  maven: %zu artifacts (%zu aar, %zu jar)\n",
+        mv_aars + mv_jars, mv_aars, mv_jars);
     }
   }
   ccb_sdk_free(sdk);

@@ -162,3 +162,139 @@ ccb_status ccb_sha256_file(const char *path, char out_hex[65]) {
   out_hex[64] = '\0';
   return CCB_OK;
 }
+
+// ---------- SHA-1 (FIPS 180-1) ----------
+
+static uint32_t ccb_sha1_rol(uint32_t v, unsigned n) {
+  return (v << n) | (v >> (32 - n));
+}
+
+static void ccb_sha1_block(ccb_sha1 *c, const unsigned char *p) {
+  uint32_t w[80];
+  for (int i = 0; i < 16; i++) {
+    w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+      ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+  }
+  for (int i = 16; i < 80; i++) {
+    w[i] = ccb_sha1_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+  }
+  uint32_t a = c->h[0];
+  uint32_t b = c->h[1];
+  uint32_t cc = c->h[2];
+  uint32_t d = c->h[3];
+  uint32_t e = c->h[4];
+  for (int i = 0; i < 80; i++) {
+    uint32_t f = 0;
+    uint32_t k = 0;
+    if (i < 20) {
+      f = (b & cc) | ((~b) & d);
+      k = 0x5a827999u;
+    } else if (i < 40) {
+      f = b ^ cc ^ d;
+      k = 0x6ed9eba1u;
+    } else if (i < 60) {
+      f = (b & cc) | (b & d) | (cc & d);
+      k = 0x8f1bbcdcu;
+    } else {
+      f = b ^ cc ^ d;
+      k = 0xca62c1d6u;
+    }
+    uint32_t tmp = ccb_sha1_rol(a, 5) + f + e + k + w[i];
+    e = d;
+    d = cc;
+    cc = ccb_sha1_rol(b, 30);
+    b = a;
+    a = tmp;
+  }
+  c->h[0] += a;
+  c->h[1] += b;
+  c->h[2] += cc;
+  c->h[3] += d;
+  c->h[4] += e;
+}
+
+void ccb_sha1_init(ccb_sha1 *c) {
+  c->h[0] = 0x67452301u;
+  c->h[1] = 0xefcdab89u;
+  c->h[2] = 0x98badcfeu;
+  c->h[3] = 0x10325476u;
+  c->h[4] = 0xc3d2e1f0u;
+  c->total = 0;
+  c->buflen = 0;
+}
+
+void ccb_sha1_update(ccb_sha1 *c, const void *data, size_t len) {
+  const unsigned char *p = data;
+  c->total += len;
+  while (len > 0) {
+    size_t take = 64 - c->buflen;
+    if (take > len) {
+      take = len;
+    }
+    memcpy(c->buf + c->buflen, p, take);
+    c->buflen += take;
+    p += take;
+    len -= take;
+    if (c->buflen == 64) {
+      ccb_sha1_block(c, c->buf);
+      c->buflen = 0;
+    }
+  }
+}
+
+void ccb_sha1_final(ccb_sha1 *c, unsigned char out[20]) {
+  uint64_t bits = c->total * 8;
+  unsigned char pad = 0x80;
+  ccb_sha1_update(c, &pad, 1);
+  unsigned char zero = 0;
+  while (c->buflen != 56) {
+    ccb_sha1_update(c, &zero, 1);
+  }
+  unsigned char lenbuf[8];
+  for (int i = 0; i < 8; i++) {
+    lenbuf[i] = (unsigned char)(bits >> (56 - 8 * i));
+  }
+  // Feed the length directly without touching c->total again: the
+  // block call below processes the buffered final block as-is.
+  memcpy(c->buf + c->buflen, lenbuf, 8);
+  ccb_sha1_block(c, c->buf);
+  c->buflen = 0;
+  for (int i = 0; i < 5; i++) {
+    out[i * 4] = (unsigned char)(c->h[i] >> 24);
+    out[i * 4 + 1] = (unsigned char)(c->h[i] >> 16);
+    out[i * 4 + 2] = (unsigned char)(c->h[i] >> 8);
+    out[i * 4 + 3] = (unsigned char)c->h[i];
+  }
+}
+
+void ccb_sha1_to_hex(const unsigned char digest[20], char out[41]) {
+  static const char hexd[] = "0123456789abcdef";
+  for (int i = 0; i < 20; i++) {
+    out[i * 2] = hexd[digest[i] >> 4];
+    out[i * 2 + 1] = hexd[digest[i] & 15];
+  }
+  out[40] = '\0';
+}
+
+ccb_status ccb_sha1_file(const char *path, char out_hex[41]) {
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return CCB_ERR_IO;
+  }
+  ccb_sha1 c;
+  unsigned char digest[20];
+  unsigned char chunk[8192];
+  ccb_sha1_init(&c);
+  size_t n = 0;
+  while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+    ccb_sha1_update(&c, chunk, n);
+  }
+  int err = ferror(f) ? 1 : 0;
+  fclose(f);
+  if (err != 0) {
+    return CCB_ERR_IO;
+  }
+  ccb_sha1_final(&c, digest);
+  ccb_sha1_to_hex(digest, out_hex);
+  return CCB_OK;
+}

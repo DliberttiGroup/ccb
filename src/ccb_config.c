@@ -166,6 +166,58 @@ static char *ccb_resolve(const char *root, const char *value) {
   return ccb_path_join(root, value);
 }
 
+// Exact-version coordinate check for [deps] maven entries (kept here
+// rather than in ccb_maven so config does not depend on the resolver
+// module, which itself depends on config). Exactly three non-empty
+// colon-separated parts, no path-unsafe characters, no ranges,
+// LATEST, RELEASE, or -SNAPSHOT versions.
+static int ccb_config_maven_coord_ok(const char *s) {
+  const char *c1 = strchr(s, ':');
+  const char *c2 = c1 != NULL ? strchr(c1 + 1, ':') : NULL;
+  if (c1 == NULL || c2 == NULL || strchr(c2 + 1, ':') != NULL) {
+    return 0;
+  }
+  const char *parts[3];
+  size_t lens[3];
+  parts[0] = s;
+  lens[0] = (size_t)(c1 - s);
+  parts[1] = c1 + 1;
+  lens[1] = (size_t)(c2 - (c1 + 1));
+  parts[2] = c2 + 1;
+  lens[2] = strlen(c2 + 1);
+  for (int i = 0; i < 3; i++) {
+    if (lens[i] == 0) {
+      return 0;
+    }
+    for (size_t k = 0; k < lens[i]; k++) {
+      char ch = parts[i][k];
+      if (ch <= ' ' || ch == '/' || ch == '\\' || ch == ':' || ch == 0x7f) {
+        return 0;
+      }
+    }
+  }
+  if (lens[2] == 1 && parts[2][0] == '.') {
+    return 0;
+  }
+  if (lens[2] == 2 && parts[2][0] == '.' && parts[2][1] == '.') {
+    return 0;
+  }
+  for (size_t k = 0; k < lens[2]; k++) {
+    char ch = parts[2][k];
+    if (ch == '[' || ch == ']' || ch == '(' || ch == ')') {
+      return 0;
+    }
+  }
+  if ((lens[2] == 6 && memcmp(parts[2], "LATEST", 6) == 0) ||
+      (lens[2] == 7 && memcmp(parts[2], "RELEASE", 7) == 0)) {
+    return 0;
+  }
+  if (lens[2] >= 9 && memcmp(parts[2] + lens[2] - 9, "-SNAPSHOT", 9) == 0) {
+    return 0;
+  }
+  return 1;
+}
+
 static int ccb_key_present(const ccb_toml_doc *doc, const char *table_name, const char *key) {
   const ccb_toml_table *t = ccb_toml_find_table(doc, table_name);
   return ccb_toml_find_value(t, key) != NULL;
@@ -237,6 +289,7 @@ void ccb_config_free(ccb_config *c) {
   free(c->preview_binding_values);
   ccb_free_str_array(c->jars, c->jars_count);
   ccb_free_str_array(c->aars, c->aars_count);
+  ccb_free_str_array(c->maven, c->maven_count);
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
   ccb_free_str_array(c->ndk_sources, c->ndk_sources_count);
   ccb_free_str_array(c->ndk_cflags, c->ndk_cflags_count);
@@ -293,7 +346,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     static const char *debug_keys[] = { "store", "alias" };
     static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
     static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules" };
-    static const char *deps_keys[] = { "jars", "aars" };
+    static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central" };
     static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
     static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
     ccb_check_unknown_keys(&v, "", root_keys, 1);
@@ -303,7 +356,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     ccb_check_unknown_keys(&v, "signing.debug", debug_keys, 2);
     ccb_check_unknown_keys(&v, "signing.release", release_keys, 4);
     ccb_check_unknown_keys(&v, "build", build_keys, 5);
-    ccb_check_unknown_keys(&v, "deps", deps_keys, 2);
+    ccb_check_unknown_keys(&v, "deps", deps_keys, 4);
     ccb_check_unknown_keys(&v, "ndk", ndk_keys, 3);
     ccb_check_unknown_keys(&v, "preview", preview_keys, 9);
   }
@@ -568,6 +621,15 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   // [deps]
   ccb_get_str_array(&v, "deps", "jars", &c->jars, &c->jars_count);
   ccb_get_str_array(&v, "deps", "aars", &c->aars, &c->aars_count);
+  ccb_get_str_array(&v, "deps", "maven", &c->maven, &c->maven_count);
+  ccb_get_bool(&v, "deps", "maven_central", &c->maven_central);
+  for (size_t i = 0; i < c->maven_count; i++) {
+    if (!ccb_config_maven_coord_ok(c->maven[i])) {
+      ccb_vdiagf(&v, "CCB-E1005",
+        "maven coordinate '%s' must be 'group:artifact:version' with an exact version (no ranges, LATEST, RELEASE, or -SNAPSHOT)",
+        c->maven[i], "");
+    }
+  }
   for (size_t i = 0; i < c->jars_count; i++) {
     char *resolved = ccb_resolve(c->project_root, c->jars[i]);
     free(c->jars[i]);

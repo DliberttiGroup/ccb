@@ -10,6 +10,7 @@
 #include "ccb_sdk.h"
 #include "ccb_cache.h"
 #include "ccb_manifest.h"
+#include "ccb_maven.h"
 #include "ccb_zip.h"
 #include "ccb_bundle.h"
 #include "ccb_pipeline.h"
@@ -319,6 +320,33 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
       ccb_str_free(&msg);
       return CCB_ERR_SIGNING;
     }
+  }
+  // Maven dependencies (cache-only: builds never touch the network).
+  // Resolved AARs/JARs join the local deps, so the deps step, manifest
+  // merge, classpath, and dex all treat them as local files. A cache
+  // miss fails here, before any stage runs, naming the coordinate and
+  // pointing at `ccb setup`.
+  if (p->cfg->maven_count > 0) {
+    ccb_maven_result mv;
+    ccb_status mrc = ccb_maven_resolve(p->cfg, 0, p->opts->verbose,
+      p->opts->dry_run || p->opts->explain, &mv, p->diags);
+    if (mrc != CCB_OK) {
+      return CCB_ERR_TOOLCHAIN;
+    }
+    for (size_t i = 0; i < mv.aars_count; i++) {
+      p->cfg->aars = ccb_xrealloc(p->cfg->aars,
+        (p->cfg->aars_count + 1) * sizeof(*p->cfg->aars));
+      p->cfg->aars[p->cfg->aars_count++] = mv.aars[i];
+    }
+    for (size_t i = 0; i < mv.jars_count; i++) {
+      p->cfg->jars = ccb_xrealloc(p->cfg->jars,
+        (p->cfg->jars_count + 1) * sizeof(*p->cfg->jars));
+      p->cfg->jars[p->cfg->jars_count++] = mv.jars[i];
+    }
+    // Ownership of the paths moved into cfg; only the arrays themselves
+    // are freed here (result_free would free the paths too).
+    free(mv.aars);
+    free(mv.jars);
   }
   // Directories.
   p->intermediates = ccb_path_join(p->cfg->build_dir, "intermediates");

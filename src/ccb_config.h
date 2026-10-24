@@ -59,6 +59,12 @@ typedef struct {
   size_t jars_count;
   char **aars;
   size_t aars_count;
+  // [deps] maven: raw "group:artifact:version" coordinates, validated
+  // at load (exact versions only) but resolved to cache paths later:
+  // builds and checks read the cache, `ccb setup` prefetches it.
+  char **maven;
+  size_t maven_count;
+  int maven_central; // [deps] maven_central: also search Maven Central
   // [ndk]
   int has_ndk;
   char **ndk_abis;

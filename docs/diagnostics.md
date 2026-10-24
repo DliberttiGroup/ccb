@@ -57,6 +57,9 @@ error).
 | CCB-E3016 | Cannot create or write a build directory or file |
 | CCB-E3017 | r8 failed |
 | CCB-E3018 | Malformed manifest during merge (names the AAR or the app manifest) |
+| CCB-E3019 | Maven resolution failed: unresolvable coordinate, malformed or unsupported POM, or artifact not found in any configured repository |
+| CCB-E3020 | Maven checksum mismatch: downloaded or cached file does not match its published or recorded checksum |
+| CCB-E3021 | Maven artifact not in the local cache; run `ccb setup` to prefetch it (builds never download) |
 
 ## Preview (exit 1 unless noted)
 
