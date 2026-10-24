@@ -25,6 +25,9 @@
 #define SDK_APT BASE "/sdk-apt"
 #define SDK_PTY BASE "/sdk-pty"
 #define SDK_KOT BASE "/sdk-kot"
+#define SDK_NDK BASE "/sdk-ndk"
+#define SDK_R8 BASE "/sdk-r8"
+#define SDK_UPG BASE "/sdk-upg"
 #define PROJ_OK BASE "/proj-ok"
 #define PROJ_BROKEN BASE "/proj-broken"
 #define PROJ_INVALID BASE "/proj-invalid"
@@ -32,6 +35,9 @@
 #define PROJ_APT BASE "/proj-apt"
 #define PROJ_PTY BASE "/proj-pty"
 #define PROJ_KOT BASE "/proj-kot"
+#define PROJ_NDK BASE "/proj-ndk"
+#define PROJ_R8 BASE "/proj-r8"
+#define PROJ_UPG BASE "/proj-upg"
 
 static void write_text(const char *path, const char *text) {
   CHECK(ccb_write_file(path, text, strlen(text)) == CCB_OK);
@@ -61,7 +67,7 @@ static char *find_binary(int argc, char **argv) {
   return NULL;
 }
 
-static void write_config(const char *proj, const char *sdk_home) {
+static void write_config(const char *proj, const char *sdk_home, const char *ndk_version, int minify) {
   ccb_str s;
   ccb_str_init(&s);
   ccb_str_append(&s, "ccb_version = 1\n"
@@ -80,9 +86,61 @@ static void write_config(const char *proj, const char *sdk_home) {
     "home = \"");
   ccb_str_append(&s, sdk_home);
   ccb_str_append(&s, "\"\nbuild_tools = \"35.0.0\"\n");
+  if (ndk_version != NULL) {
+    ccb_str_append(&s, "ndk_version = \"");
+    ccb_str_append(&s, ndk_version);
+    ccb_str_append(&s, "\"\n");
+  }
+  if (minify) {
+    ccb_str_append(&s, "[build]\nvariant = \"release\"\nminify = true\nproguard_rules = \"proguard-rules.pro\"\n");
+  }
+  if (ndk_version != NULL) {
+    ccb_str_append(&s, "[ndk]\nabis = [\"arm64-v8a\"]\n");
+  }
   char *cfg = ccb_path_join(proj, "ccb.toml");
   write_text(cfg, s.buf);
   free(cfg);
+  ccb_str_free(&s);
+}
+
+// Fake Termux pkg: "install" drops a fake java for openjdk-17, or a
+// runnable stub for aapt2/zipalign/android-tools.
+static void write_fake_pkg(const char *path) {
+  write_script(path,
+    "#!/bin/sh\nDIR=${0%/*}\nif [ \"$1\" = \"install\" ]; then\n"
+    "  case \"$3\" in\n"
+    "    openjdk-17) /bin/cat \"" BASE "/java-script\" > \"$DIR/java\"; /bin/chmod +x \"$DIR/java\";;\n"
+    "    aapt2) printf '#!/bin/sh\nexit 0\n' > \"$DIR/aapt2\"; /bin/chmod +x \"$DIR/aapt2\";;\n"
+    "    zipalign) printf '#!/bin/sh\nexit 0\n' > \"$DIR/zipalign\"; /bin/chmod +x \"$DIR/zipalign\";;\n"
+    "    android-tools) printf '#!/bin/sh\nexit 0\n' > \"$DIR/adb\"; /bin/chmod +x \"$DIR/adb\";;\n"
+    "  esac\nfi\nexit 0\n");
+}
+
+// Like write_sdkmanager_ok, but an "ndk;<version>" argument also
+// creates the NDK dir.
+static void write_sdkmanager_ndk(const char *sdk, const char *log, const char *marker, const char *version) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "#!/bin/sh\necho \"$@\" >> \"");
+  ccb_str_append(&s, log);
+  ccb_str_append(&s, "\"\nif [ \"$1\" = \"--licenses\" ]; then\n  touch \"");
+  ccb_str_append(&s, marker);
+  ccb_str_append(&s, "\"\n  exit 0\nfi\nif [ -f \"");
+  ccb_str_append(&s, marker);
+  ccb_str_append(&s, "\" ]; then\n  mkdir -p \"");
+  ccb_str_append(&s, sdk);
+  ccb_str_append(&s, "/platform-tools\" \"");
+  ccb_str_append(&s, sdk);
+  ccb_str_append(&s, "/platforms/android-35\" \"");
+  ccb_str_append(&s, sdk);
+  ccb_str_append(&s, "/build-tools/35.0.0\"\n  case \"$*\" in *\"ndk;\"*) mkdir -p \"");
+  ccb_str_append(&s, sdk);
+  ccb_str_append(&s, "/ndk/");
+  ccb_str_append(&s, version);
+  ccb_str_append(&s, "\";; esac\nfi\nexit 0\n");
+  char *path = ccb_path_join(sdk, "cmdline-tools/latest/bin/sdkmanager");
+  write_script(path, s.buf);
+  free(path);
   ccb_str_free(&s);
 }
 
@@ -204,24 +262,18 @@ int main(int argc, char **argv) {
   write_script(BASE "/khome/bin/kotlinc",
     "#!/bin/sh\necho 'info: kotlinc-jvm 2.4.21 (JRE 17.0.1)' >&2\n");
   // Fake Termux pkg: "install" drops a fake java next to itself.
-  write_script(BASE "/termux-prefix/bin/pkg",
-    "#!/bin/sh\nDIR=${0%/*}\nif [ \"$1\" = \"install\" ]; then\n"
-    "  /bin/cat \"" BASE "/java-script\" > \"$DIR/java\"\n"
-    "  /bin/chmod +x \"$DIR/java\"\nfi\nexit 0\n");
-  write_script(BASE "/termux-prefix2/bin/pkg",
-    "#!/bin/sh\nDIR=${0%/*}\nif [ \"$1\" = \"install\" ]; then\n"
-    "  /bin/cat \"" BASE "/java-script\" > \"$DIR/java\"\n"
-    "  /bin/chmod +x \"$DIR/java\"\nfi\nexit 0\n");
-  write_script(BASE "/termux-prefix3/bin/pkg",
-    "#!/bin/sh\nDIR=${0%/*}\nif [ \"$1\" = \"install\" ]; then\n"
-    "  /bin/cat \"" BASE "/java-script\" > \"$DIR/java\"\n"
-    "  /bin/chmod +x \"$DIR/java\"\nfi\nexit 0\n");
-  // Fake apt-get (update is a no-op; install drops a fake java) and a
-  // fake sudo that just execs its arguments.
+  write_fake_pkg(BASE "/termux-prefix/bin/pkg");
+  write_fake_pkg(BASE "/termux-prefix2/bin/pkg");
+  write_fake_pkg(BASE "/termux-prefix3/bin/pkg");
+  // Fake apt-get (update is a no-op; install drops a fake java for
+  // openjdk-17-jdk, or a runnable adb stub for adb) and a fake sudo
+  // that just execs its arguments.
   write_script(BASE "/aptbin/apt-get",
     "#!/bin/sh\nDIR=${0%/*}\nif [ \"$1\" = \"install\" ]; then\n"
-    "  /bin/cat \"" BASE "/java-script\" > \"$DIR/java\"\n"
-    "  /bin/chmod +x \"$DIR/java\"\nfi\nexit 0\n");
+    "  case \"$3\" in\n"
+    "    openjdk-17-jdk) /bin/cat \"" BASE "/java-script\" > \"$DIR/java\"; /bin/chmod +x \"$DIR/java\";;\n"
+    "    adb) printf '#!/bin/sh\nexit 0\n' > \"$DIR/adb\"; /bin/chmod +x \"$DIR/adb\";;\n"
+    "  esac\nfi\nexit 0\n");
   write_script(BASE "/aptbin/sudo", "#!/bin/sh\nexec \"$@\"\n");
 
   write_sdkmanager_ok(SDK_OK, BASE "/ok-calls.log", BASE "/ok-licensed");
@@ -236,6 +288,69 @@ int main(int argc, char **argv) {
   write_script(SDK_KOT "/build-tools/35.0.0/apksigner", "#!/bin/sh\nexit 0\n");
   write_script(SDK_KOT "/build-tools/35.0.0/zipalign", "#!/bin/sh\nexit 0\n");
   write_text(SDK_KOT "/platforms/android-35/android.jar", "");
+  // SDKs/projects for the NDK, r8, and upgrade cases.
+  CHECK(ccb_mkdir_p(SDK_NDK "/cmdline-tools/latest/bin") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_NDK "/build-tools/35.0.0") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_NDK "/platforms/android-35") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_R8 "/cmdline-tools/latest/bin") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_R8 "/build-tools/35.0.0") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_R8 "/platforms/android-35") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_UPG "/cmdline-tools/latest/bin") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_UPG "/build-tools/35.0.0") == CCB_OK);
+  CHECK(ccb_mkdir_p(SDK_UPG "/platforms/android-35") == CCB_OK);
+  CHECK(ccb_mkdir_p(PROJ_NDK "/src/main/res/values") == CCB_OK);
+  CHECK(ccb_mkdir_p(PROJ_NDK "/src/main/kotlin") == CCB_OK);
+  CHECK(ccb_mkdir_p(PROJ_R8 "/src/main/res/values") == CCB_OK);
+  CHECK(ccb_mkdir_p(PROJ_R8 "/src/main/kotlin") == CCB_OK);
+  CHECK(ccb_mkdir_p(PROJ_UPG "/src/main/res/values") == CCB_OK);
+  CHECK(ccb_mkdir_p(PROJ_UPG "/src/main/kotlin") == CCB_OK);
+  write_text(PROJ_NDK "/src/main/AndroidManifest.xml", "<manifest package=\"com.example.hello\" />\n");
+  write_text(PROJ_R8 "/src/main/AndroidManifest.xml", "<manifest package=\"com.example.hello\" />\n");
+  write_text(PROJ_UPG "/src/main/AndroidManifest.xml", "<manifest package=\"com.example.hello\" />\n");
+  write_config(PROJ_NDK, SDK_NDK, "27.0.12077973", 0);
+  write_config(PROJ_R8, SDK_R8, NULL, 1);
+  write_text(PROJ_R8 "/proguard-rules.pro", "");
+  write_config(PROJ_UPG, SDK_UPG, NULL, 0);
+  write_sdkmanager_ndk(SDK_NDK, BASE "/ndk-calls.log", BASE "/ndk-licensed", "27.0.12077973");
+  write_sdkmanager_ok(SDK_R8, BASE "/r8-calls.log", BASE "/r8-licensed");
+  write_sdkmanager_ok(SDK_UPG, BASE "/upg-calls.log", BASE "/upg-licensed");
+  {
+    const char *sdks[] = { SDK_NDK, SDK_R8, SDK_UPG };
+    const char *tools[] = { "aapt2", "d8", "apksigner", "zipalign" };
+    for (size_t i = 0; i < 3; i++) {
+      for (size_t j = 0; j < 4; j++) {
+        char *bt = ccb_path_join3(sdks[i], "build-tools/35.0.0", tools[j]);
+        write_script(bt, "#!/bin/sh\nexit 0\n");
+        free(bt);
+      }
+      char *jar = ccb_path_join(sdks[i], "platforms/android-35/android.jar");
+      write_text(jar, "");
+      free(jar);
+    }
+  }
+  // Stale SDK-home kotlinc for the upgrade case.
+  CHECK(ccb_mkdir_p(SDK_UPG "/kotlinc/bin") == CCB_OK);
+  write_script(SDK_UPG "/kotlinc/bin/kotlinc",
+    "#!/bin/sh\necho 'info: kotlinc-jvm 1.9.24 (JRE 17.0.1)' >&2\n");
+  // Fixture r8 jar + a java that answers both -version and the R8
+  // --version probe.
+  write_text(BASE "/r8-fixture.jar", "fake r8 jar\n");
+  CHECK(ccb_mkdir_p(BASE "/r8-java/bin") == CCB_OK);
+  write_script(BASE "/r8-java/bin/java",
+    "#!/bin/sh\nfor a in \"$@\"; do\n"
+    "  if [ \"$a\" = \"com.android.tools.r8.R8\" ]; then echo \"R8 9.5.28\"; exit 0; fi\n"
+    "done\necho 'openjdk version \"17.0.1\"' >&2\n");
+  write_script(BASE "/r8-java/bin/javac", "#!/bin/sh\nexit 0\n");
+  // Rendiix prefix: tool-aware pkg + apt-cache (no official
+  // candidate for zipalign) + wget + apt.
+  CHECK(ccb_mkdir_p(BASE "/termux-prefix-rendiix/bin") == CCB_OK);
+  write_fake_pkg(BASE "/termux-prefix-rendiix/bin/pkg");
+  write_script(BASE "/termux-prefix-rendiix/bin/apt-cache",
+    "#!/bin/sh\necho \"zipalign:\"\necho \"  Installed: (none)\"\necho \"  Candidate: (none)\"\nexit 0\n");
+  write_script(BASE "/termux-prefix-rendiix/bin/wget",
+    "#!/bin/sh\ntouch \"$2/rendiix.gpg\"\nexit 0\n");
+  write_script(BASE "/termux-prefix-rendiix/bin/apt",
+    "#!/bin/sh\ntouch \"" BASE "/apt-updated\"\nexit 0\n");
   // Fixture kotlinc zip (real layout: kotlinc/bin/kotlinc) + its hash.
   {
     ccb_zip_writer w;
@@ -263,13 +378,13 @@ int main(int argc, char **argv) {
   write_text(PROJ_KOT "/src/main/AndroidManifest.xml",
     "<manifest package=\"com.example.hello\" />\n");
 
-  write_config(PROJ_OK, SDK_OK);
-  write_config(PROJ_BROKEN, SDK_BROKEN);
-  write_config(PROJ_INVALID, SDK_INVALID);
-  write_config(PROJ_PKG, SDK_PKG);
-  write_config(PROJ_APT, SDK_APT);
-  write_config(PROJ_PTY, SDK_PTY);
-  write_config(PROJ_KOT, SDK_KOT);
+  write_config(PROJ_OK, SDK_OK, NULL, 0);
+  write_config(PROJ_BROKEN, SDK_BROKEN, NULL, 0);
+  write_config(PROJ_INVALID, SDK_INVALID, NULL, 0);
+  write_config(PROJ_PKG, SDK_PKG, NULL, 0);
+  write_config(PROJ_APT, SDK_APT, NULL, 0);
+  write_config(PROJ_PTY, SDK_PTY, NULL, 0);
+  write_config(PROJ_KOT, SDK_KOT, NULL, 0);
 
   ccb_str jh, jh_empty, path_shbin, khome;
   ccb_str_init(&jh);
@@ -357,8 +472,14 @@ int main(int argc, char **argv) {
     CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
     CHECK(r.exit_code == 0);
     CHECK(strstr(r.out, "SDK ready") != NULL);
+    // The final pass warns about the fixture SDK's missing
+    // android.jar even though setup itself succeeded.
+    CHECK(strstr(r.err, "warning:") != NULL);
     ccb_proc_result_free(&r);
     CHECK(ccb_path_exists(BASE "/termux-prefix/bin/java"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix/bin/aapt2"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix/bin/zipalign"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix/bin/adb"));
     CHECK(ccb_path_exists(SDK_PKG "/platform-tools"));
     CHECK(ccb_path_exists(SDK_PKG "/platforms/android-35"));
     CHECK(ccb_path_exists(SDK_PKG "/build-tools/35.0.0"));
@@ -380,6 +501,7 @@ int main(int argc, char **argv) {
     CHECK(strstr(r.out, "SDK ready") != NULL);
     ccb_proc_result_free(&r);
     CHECK(ccb_path_exists(BASE "/aptbin/java"));
+    CHECK(ccb_path_exists(BASE "/aptbin/adb"));
     CHECK(ccb_path_exists(SDK_APT "/platform-tools"));
     CHECK(ccb_path_exists(SDK_APT "/platforms/android-35"));
     CHECK(ccb_path_exists(SDK_APT "/build-tools/35.0.0"));
@@ -449,6 +571,8 @@ int main(int argc, char **argv) {
     CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
     CHECK(r.exit_code == 0);
     CHECK(strstr(r.out, "SDK ready") != NULL);
+    // The final pass resolves the whole fixture toolchain.
+    CHECK(strstr(r.err, "toolchain check: ok") != NULL);
     CHECK(strstr(r.err, "found") != NULL);
     ccb_proc_result_free(&r);
     CHECK(!ccb_path_exists(SDK_KOT "/kotlinc"));
@@ -533,6 +657,120 @@ int main(int argc, char **argv) {
     CHECK(strstr(r.out, "SDK ready") != NULL);
     ccb_proc_result_free(&r);
     ccb_str_free(&sdk_kot);
+  }
+
+  // NDK. A project declaring [ndk] gets its revision installed.
+  {
+    char *args[] = { bin, "--config", PROJ_NDK "/ccb.toml", "setup", NULL };
+    char *env[] = { path_shbin.buf, jh.buf, khome.buf, "ANDROID_HOME", "PREFIX", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "SDK ready") != NULL);
+    CHECK(strstr(r.err, "ndk 27.0.12077973 installed") != NULL);
+    ccb_proc_result_free(&r);
+    CHECK(ccb_path_is_dir(SDK_NDK "/ndk/27.0.12077973"));
+  }
+
+  // R8. A minify project without [sdk] r8_jar gets the official jar
+  // installed into the SDK home.
+  {
+    char r8_sha[65];
+    CHECK(ccb_sha256_file(BASE "/r8-fixture.jar", r8_sha) == CCB_OK);
+    ccb_str url, sha, jh_r8;
+    ccb_str_init(&url);
+    ccb_str_init(&sha);
+    ccb_str_init(&jh_r8);
+    ccb_str_append(&url, "CCB_R8_URL=file://" BASE "/r8-fixture.jar");
+    ccb_str_append(&sha, "CCB_R8_SHA256=");
+    ccb_str_append(&sha, r8_sha);
+    ccb_str_append(&jh_r8, "JAVA_HOME=" BASE "/r8-java");
+    char *args[] = { bin, "--config", PROJ_R8 "/ccb.toml", "setup", NULL };
+    char *env[] = { path_shbin.buf, jh_r8.buf, khome.buf, url.buf, sha.buf,
+      "ANDROID_HOME", "PREFIX", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "SDK ready") != NULL);
+    CHECK(strstr(r.err, "r8 9.5.28 installed") != NULL);
+    ccb_proc_result_free(&r);
+    CHECK(ccb_path_exists(SDK_R8 "/r8/r8.jar"));
+    ccb_str_free(&url);
+    ccb_str_free(&sha);
+    ccb_str_free(&jh_r8);
+  }
+
+  // RENDIIX. On Termux, zipalign (absent from the official repos)
+  // comes from the rendiix repo, added only after apt-cache shows
+  // no official candidate.
+  {
+    ccb_str prefix, path_rendiix;
+    ccb_str_init(&prefix);
+    ccb_str_init(&path_rendiix);
+    ccb_str_append(&prefix, "PREFIX=" BASE "/termux-prefix-rendiix");
+    ccb_str_append(&path_rendiix, "PATH=" BASE "/termux-prefix-rendiix/bin:" BASE "/shbin");
+    char *args[] = { bin, "--config", PROJ_PKG "/ccb.toml", "--yes", "setup", NULL };
+    char *env[] = { prefix.buf, path_rendiix.buf, khome.buf, jh.buf, "ANDROID_HOME", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "SDK ready") != NULL);
+    ccb_proc_result_free(&r);
+    CHECK(ccb_path_exists(BASE "/termux-prefix-rendiix/etc/apt/sources.list.d/rendiix.list"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix-rendiix/etc/apt/trusted.gpg.d/rendiix.gpg"));
+    CHECK(ccb_path_exists(BASE "/apt-updated"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix-rendiix/bin/aapt2"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix-rendiix/bin/zipalign"));
+    CHECK(ccb_path_exists(BASE "/termux-prefix-rendiix/bin/adb"));
+    char *list_text = NULL;
+    size_t list_len = 0;
+    CHECK(ccb_read_file(BASE "/termux-prefix-rendiix/etc/apt/sources.list.d/rendiix.list",
+      &list_text, &list_len) == CCB_OK);
+    CHECK(strcmp(list_text, "deb https://rendiix.github.io android-tools termux\n") == 0);
+    free(list_text);
+    ccb_str_free(&prefix);
+    ccb_str_free(&path_rendiix);
+  }
+
+  // UPG. --upgrade reinstalls a stale SDK-home kotlinc to the pinned
+  // version; user-managed kotlins are never touched.
+  {
+    ccb_str url, sha;
+    ccb_str_init(&url);
+    ccb_str_init(&sha);
+    ccb_str_append(&url, "CCB_KOTLIN_URL=file://" BASE "/kotlin-fixture.zip");
+    ccb_str_append(&sha, "CCB_KOTLIN_SHA256=");
+    ccb_str_append(&sha, kot_sha);
+    char *args[] = { bin, "--config", PROJ_UPG "/ccb.toml", "--upgrade", "setup", NULL };
+    char *env[] = { path_shbin.buf, jh.buf, url.buf, sha.buf,
+      "KOTLIN_HOME", "ANDROID_HOME", "PREFIX", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "SDK ready") != NULL);
+    CHECK(strstr(r.err, "upgrading SDK-home kotlinc 1.9.24 -> 2.4.21") != NULL);
+    ccb_proc_result_free(&r);
+    char *kargv[] = { SDK_UPG "/kotlinc/bin/kotlinc", "-version", NULL };
+    CHECK(ccb_proc_run(kargv, NULL, env, &r) == CCB_OK);
+    CHECK(strstr(r.err, "2.4.21") != NULL);
+    ccb_proc_result_free(&r);
+    ccb_str_free(&url);
+    ccb_str_free(&sha);
+  }
+
+  // PRINT-ENV. --print-env puts the exports on stdout and the ready
+  // line on stderr.
+  {
+    char *args[] = { bin, "--config", PROJ_UPG "/ccb.toml", "--print-env", "setup", NULL };
+    char *env[] = { path_shbin.buf, jh.buf, "KOTLIN_HOME", "ANDROID_HOME", "PREFIX", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "export ANDROID_HOME=\"" SDK_UPG "\"") != NULL);
+    CHECK(strstr(r.out, "export PATH=\"" SDK_UPG "/kotlinc/bin:$PATH\"") != NULL);
+    CHECK(strstr(r.out, "SDK ready") == NULL);
+    CHECK(strstr(r.err, "SDK ready") != NULL);
+    ccb_proc_result_free(&r);
   }
 
   ccb_str_free(&jh);

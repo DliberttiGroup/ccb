@@ -476,6 +476,98 @@ int main(int argc, char **argv) {
     }
   }
 
+  // PATH fallback: an SDK tool that cannot run (bad interpreter, so
+  // exec fails, as with a wrong-architecture binary) falls back to
+  // a runnable copy on PATH, and the source reports "path". A
+  // missing SDK copy falls back the same way; when neither copy
+  // runs, resolve fails naming the SDK copy.
+  {
+    char *save_path = saved_env("PATH");
+    CHECK(ccb_mkdir_p(BASE "/pathtools") == CCB_OK);
+    write_script(BASE "/pathtools/aapt2", "#!/bin/sh\nexit 0\n");
+    write_script(BASE "/pathtools/zipalign", "#!/bin/sh\nexit 0\n");
+    write_script(BT "/aapt2", "#!/nonexistent/interp\nexit 0\n");
+    write_script(BT "/zipalign", "#!/nonexistent/interp\nexit 0\n");
+    set_env("CCB_AAPT2", NULL);
+    set_env("CCB_ZIPALIGN", NULL);
+    set_env("PATH", BASE "/pathtools");
+    write_config(NULL, NULL);
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    ccb_sdk *sdk = NULL;
+    CHECK(resolve_proj(&sdk, &diags) == CCB_OK);
+    CHECK(sdk != NULL);
+    CHECK(strcmp(sdk->aapt2, BASE "/pathtools/aapt2") == 0);
+    CHECK(strcmp(sdk->aapt2_source, "path") == 0);
+    CHECK(strcmp(sdk->zipalign, BASE "/pathtools/zipalign") == 0);
+    CHECK(strcmp(sdk->zipalign_source, "path") == 0);
+    ccb_sdk_free(sdk);
+    ccb_diag_list_free(&diags);
+    // Missing SDK copy also falls back to PATH.
+    remove(BT "/aapt2");
+    ccb_diag_list_init(&diags);
+    sdk = NULL;
+    CHECK(resolve_proj(&sdk, &diags) == CCB_OK);
+    CHECK(sdk != NULL);
+    CHECK(strcmp(sdk->aapt2, BASE "/pathtools/aapt2") == 0);
+    CHECK(strcmp(sdk->aapt2_source, "path") == 0);
+    ccb_sdk_free(sdk);
+    ccb_diag_list_free(&diags);
+    // Neither copy runs: resolve fails, naming the SDK copy.
+    remove(BASE "/pathtools/aapt2");
+    remove(BASE "/pathtools/zipalign");
+    ccb_diag_list_init(&diags);
+    sdk = NULL;
+    CHECK(resolve_proj(&sdk, &diags) != CCB_OK);
+    CHECK(sdk == NULL);
+    CHECK(diag_contains(&diags, "CCB-E2009", "cannot run"));
+    ccb_diag_list_free(&diags);
+    restore_env("PATH", save_path);
+    free(save_path);
+    write_script(BT "/aapt2", "#!/bin/sh\nexit 0\n");
+    write_script(BT "/zipalign", "#!/bin/sh\nexit 0\n");
+  }
+
+  // adb override through the real binary: a broken override fails
+  // fast naming itself (logcat), and a runnable override is used
+  // (install dry-run prints it).
+  {
+    char *bin = find_binary(argc, argv);
+    CHECK(bin != NULL);
+    if (bin != NULL) {
+      write_text(BASE "/broken-adb", "not an executable\n");
+      CHECK(chmod(BASE "/broken-adb", 0644) == 0);
+      write_script(BASE "/good-adb", "#!/bin/sh\nexit 0\n");
+      ccb_str bad, good;
+      ccb_str_init(&bad);
+      ccb_str_init(&good);
+      ccb_str_append(&bad, "CCB_ADB=" BASE "/broken-adb");
+      ccb_str_append(&good, "CCB_ADB=" BASE "/good-adb");
+      {
+        char *args[] = { bin, "logcat", NULL };
+        char *env[] = { bad.buf, NULL };
+        ccb_proc_result r;
+        CHECK(ccb_proc_run(args, BASE, env, &r) == CCB_OK);
+        CHECK(r.exit_code == 3);
+        CHECK(strstr(r.err, "CCB-E2009") != NULL);
+        CHECK(strstr(r.err, BASE "/broken-adb") != NULL);
+        ccb_proc_result_free(&r);
+      }
+      {
+        char *args[] = { bin, "--dry-run", "--config", PROJ "/ccb.toml", "install", NULL };
+        char *env[] = { good.buf, NULL };
+        ccb_proc_result r;
+        CHECK(ccb_proc_run(args, NULL, env, &r) == CCB_OK);
+        CHECK(r.exit_code == 0);
+        CHECK(strstr(r.out, BASE "/good-adb") != NULL);
+        ccb_proc_result_free(&r);
+      }
+      ccb_str_free(&bad);
+      ccb_str_free(&good);
+      free(bin);
+    }
+  }
+
   restore_env("JAVA_HOME", save_java);
   restore_env("KOTLIN_HOME", save_kotlin);
   restore_env("CCB_AAPT2", save_aapt2);

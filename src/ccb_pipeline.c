@@ -1111,10 +1111,11 @@ code_fail:
 
 static ccb_status ccb_step_dex(ccb_pipe *p) {
   int use_r8 = strcmp(p->cfg->variant, "release") == 0 && p->cfg->minify;
-  if (use_r8 && p->cfg->r8_jar == NULL) {
+  if (use_r8 && p->sdk->r8_jar == NULL) {
     ccb_pipe_diag(p, "CCB-E3014", "r8",
       "release minification needs r8: set [sdk] r8_jar to an r8 jar "
-      "(com.android.tools:r8 from Google's Maven repository)");
+      "(com.android.tools:r8 from Google's Maven repository), or run "
+      "`ccb setup` in a minify project to install it");
     return CCB_ERR_BUILD;
   }
   char **class_files = NULL;
@@ -1141,7 +1142,7 @@ static ccb_status ccb_step_dex(ccb_pipe *p) {
   int failed = 0;
   if (use_r8) {
     ccb_fp_add(&b, "tool", "r8");
-    if (ccb_fp_add_file(p, &b, p->cfg->r8_jar) != 0) {
+    if (ccb_fp_add_file(p, &b, p->sdk->r8_jar) != 0) {
       failed = 1;
     }
     if (!failed && ccb_fp_add_file(p, &b, p->cfg->proguard_rules) != 0) {
@@ -1217,7 +1218,7 @@ static ccb_status ccb_step_dex(ccb_pipe *p) {
     // java -jar fails; invoke the compiler class directly on the classpath.
     ccb_argv_push(&av, p->sdk->java);
     ccb_argv_push(&av, "-cp");
-    ccb_argv_push(&av, p->cfg->r8_jar);
+    ccb_argv_push(&av, p->sdk->r8_jar);
     ccb_argv_push(&av, "com.android.tools.r8.R8");
     ccb_argv_push(&av, "--release");
     ccb_argv_push(&av, "--min-api");

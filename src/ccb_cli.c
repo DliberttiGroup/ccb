@@ -29,6 +29,9 @@
 #define CCB_KOTLIN_VERSION "2.4.21"
 #define CCB_KOTLIN_URL "https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip"
 #define CCB_KOTLIN_SHA256 "7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd"
+#define CCB_R8_VERSION "9.5.28"
+#define CCB_R8_URL "https://dl.google.com/dl/android/maven2/com/android/tools/r8/9.5.28/r8-9.5.28.jar"
+#define CCB_R8_SHA256 "38a9ffaaebbd17d1514e3ecbff5a85b989bb13c551b9e224c7409514eea84ff5"
 
 static const char *CCB_USAGE =
   "usage: ccb [--json] [--verbose] [--config PATH] [--variant debug|release]\n"
@@ -36,7 +39,7 @@ static const char *CCB_USAGE =
   "\n"
   "commands:\n"
   "  init [dir] [--package PKG] [--name NAME]  scaffold a new project\n"
-  "  setup [--yes]                             install missing SDK components\n"
+  "  setup [--yes] [--upgrade] [--print-env]  install missing SDK components\n"
   "  check [--preview-gate] [--no-preview-gate]\n"
   "                                            validate config + toolchain\n"
   "  build [--preview-gate] [--no-preview-gate]  build the APK\n"
@@ -57,6 +60,8 @@ typedef struct {
   int dry_run;
   int explain;
   int yes;
+  int upgrade;
+  int print_env;
   const char *config_path;
   const char *variant;
   const char *command;
@@ -374,6 +379,153 @@ static int ccb_download(const char *url, const char *dest) {
   return ok ? 0 : -1;
 }
 
+// Like ccb_download, but resumes a partial file when the server
+// supports byte ranges.
+static int ccb_download_resume(const char *url, const char *dest) {
+  char *curl = ccb_sdk_find_on_path("curl");
+  if (curl == NULL) {
+    return -1;
+  }
+  char *argv[] = { curl, "-sL", "--fail", "-C", "-", "-o", (char *)dest, (char *)url, NULL };
+  ccb_proc_result r;
+  ccb_status rc = ccb_proc_run(argv, NULL, NULL, &r);
+  int ok = rc == CCB_OK && r.exit_code == 0;
+  ccb_proc_result_free(&r);
+  free(curl);
+  return ok ? 0 : -1;
+}
+
+static int ccb_copy_file(const char *src, const char *dst) {
+  FILE *in = fopen(src, "rb");
+  if (in == NULL) {
+    return -1;
+  }
+  FILE *out = fopen(dst, "wb");
+  if (out == NULL) {
+    fclose(in);
+    return -1;
+  }
+  char buf[65536];
+  size_t n;
+  int ok = 1;
+  while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+    if (fwrite(buf, 1, n, out) != n) {
+      ok = 0;
+      break;
+    }
+  }
+  if (ferror(in)) {
+    ok = 0;
+  }
+  if (fclose(out) != 0) {
+    ok = 0;
+  }
+  fclose(in);
+  if (!ok) {
+    remove(dst);
+  }
+  return ok ? 0 : -1;
+}
+
+// Shared download cache: $XDG_CACHE_HOME/ccb/downloads, else
+// ~/.cache/ccb/downloads. NULL when neither base is available.
+static char *ccb_cache_dir(void) {
+  const char *xdg = getenv("XDG_CACHE_HOME");
+  if (xdg != NULL && xdg[0] != '\0') {
+    return ccb_path_join(xdg, "ccb/downloads");
+  }
+  const char *home = getenv("HOME");
+  if (home != NULL && home[0] != '\0') {
+    return ccb_path_join3(home, ".cache", "ccb/downloads");
+  }
+  return NULL;
+}
+
+// Download with a shared cache. Pinned downloads (expected_sha
+// given) are cached by URL basename and reused when the cached
+// copy's hash matches, so the ~250MB of setup downloads is fetched
+// once per version even across SDK homes. A partial download is
+// resumed on the next run; a server that rejects ranges falls back
+// to a fresh download. Returns 0 on success, -1 on download
+// failure, -2 on checksum failure. Unpinned downloads and file://
+// URLs are never cached (a custom URL without a hash cannot be
+// told apart from a different file with the same basename).
+static int ccb_download_cached(const char *url, const char *dest, const char *expected_sha) {
+  if (expected_sha == NULL || strncmp(url, "file://", 7) == 0) {
+    return ccb_download(url, dest);
+  }
+  char *dir = ccb_cache_dir();
+  if (dir == NULL || ccb_mkdir_p(dir) != CCB_OK) {
+    // No cache available: download directly, but still verify.
+    free(dir);
+    if (ccb_download(url, dest) != 0) {
+      return -1;
+    }
+    char hex0[65];
+    if (ccb_sha256_file(dest, hex0) != CCB_OK || strcmp(hex0, expected_sha) != 0) {
+      remove(dest);
+      return -2;
+    }
+    return 0;
+  }
+  const char *base = strrchr(url, '/');
+  base = base != NULL ? base + 1 : url;
+  if (base[0] == '\0') {
+    free(dir);
+    if (ccb_download(url, dest) != 0) {
+      return -1;
+    }
+    char hex0[65];
+    if (ccb_sha256_file(dest, hex0) != CCB_OK || strcmp(hex0, expected_sha) != 0) {
+      remove(dest);
+      return -2;
+    }
+    return 0;
+  }
+  char *cached = ccb_path_join(dir, base);
+  free(dir);
+  char hex[65];
+  if (ccb_path_exists(cached) && ccb_sha256_file(cached, hex) == CCB_OK &&
+      strcmp(hex, expected_sha) == 0) {
+    int rc = ccb_copy_file(cached, dest);
+    free(cached);
+    return rc;
+  }
+  ccb_str t;
+  ccb_str_init(&t);
+  ccb_str_append(&t, cached);
+  ccb_str_append(&t, ".tmp");
+  char *tmp = ccb_str_steal(&t);
+  if (ccb_download_resume(url, tmp) != 0) {
+    remove(tmp);
+    if (ccb_download(url, tmp) != 0) {
+      remove(tmp);
+      free(tmp);
+      free(cached);
+      return -1;
+    }
+  }
+  if (ccb_sha256_file(tmp, hex) != CCB_OK || strcmp(hex, expected_sha) != 0) {
+    remove(tmp);
+    free(tmp);
+    free(cached);
+    return -2;
+  }
+  if (rename(tmp, cached) != 0) {
+    // The cache store failed (permissions?): the download itself
+    // is verified, so use it directly.
+    int rc = ccb_copy_file(tmp, dest);
+    remove(tmp);
+    free(tmp);
+    free(cached);
+    return rc;
+  }
+  free(tmp);
+  int rc = ccb_copy_file(cached, dest);
+  free(cached);
+  return rc;
+}
+
 // ---------- setup: JDK install ----------
 
 typedef enum {
@@ -524,6 +676,28 @@ static int ccb_prompt_yes(const char *question) {
   return line[0] == 'y' || line[0] == 'Y';
 }
 
+// Derive a JAVA_HOME for a resolved java path: Termux's JDK dir
+// first, else the java path's parent of bin/. NULL when neither
+// applies. Owned.
+static char *ccb_derive_java_home(const char *java_path) {
+  const char *prefix = getenv("PREFIX");
+  if (prefix != NULL) {
+    char *cand = ccb_path_join3(prefix, "lib/jvm/java-17-openjdk", "bin/java");
+    int ok = access(cand, X_OK) == 0;
+    free(cand);
+    if (ok) {
+      return ccb_path_join(prefix, "lib/jvm/java-17-openjdk");
+    }
+  }
+  const char *suffix = "/bin/java";
+  size_t plen = strlen(java_path);
+  size_t slen = strlen(suffix);
+  if (plen > slen && strcmp(java_path + plen - slen, suffix) == 0) {
+    return ccb_xstrndup(java_path, plen - slen);
+  }
+  return NULL;
+}
+
 // Point JAVA_HOME at the resolved JDK when it is unset and a JDK home
 // can be derived: Termux's JDK dir first, else the java path's parent
 // of bin/. Only affects this process and its children (sdkmanager).
@@ -531,24 +705,8 @@ static void ccb_configure_java_home(const char *java_path) {
   if (getenv("JAVA_HOME") != NULL) {
     return;
   }
-  const char *prefix = getenv("PREFIX");
-  if (prefix != NULL) {
-    char *cand = ccb_path_join3(prefix, "lib/jvm/java-17-openjdk", "bin/java");
-    if (access(cand, X_OK) == 0) {
-      char *home = ccb_path_join(prefix, "lib/jvm/java-17-openjdk");
-      setenv("JAVA_HOME", home, 1);
-      free(home);
-    }
-    free(cand);
-    if (getenv("JAVA_HOME") != NULL) {
-      return;
-    }
-  }
-  const char *suffix = "/bin/java";
-  size_t plen = strlen(java_path);
-  size_t slen = strlen(suffix);
-  if (plen > slen && strcmp(java_path + plen - slen, suffix) == 0) {
-    char *home = ccb_xstrndup(java_path, plen - slen);
+  char *home = ccb_derive_java_home(java_path);
+  if (home != NULL) {
     setenv("JAVA_HOME", home, 1);
     free(home);
   }
@@ -634,23 +792,18 @@ static int ccb_setup_install_kotlinc(const char *sdk_home) {
   if (sha == NULL && !url_custom) {
     sha = CCB_KOTLIN_SHA256;
   }
-  fprintf(stderr, "kotlinc not found, downloading the official compiler (%s)...\n",
+  fprintf(stderr, "downloading the official kotlinc compiler (%s)...\n",
     CCB_KOTLIN_VERSION);
   char *tmp = ccb_path_join(sdk_home, "kotlin.zip");
-  if (ccb_download(url, tmp) != 0) {
-    fprintf(stderr, "error: download failed: %s\n", url);
+  int drc = ccb_download_cached(url, tmp, sha);
+  if (drc != 0) {
+    fprintf(stderr, "error: %s: %s\n",
+      drc == -2 ? "downloaded kotlinc archive failed checksum verification" : "download failed", url);
+    remove(tmp);
     free(tmp);
     return -1;
   }
-  if (sha != NULL) {
-    char hex[65];
-    if (ccb_sha256_file(tmp, hex) != CCB_OK || strcmp(hex, sha) != 0) {
-      fprintf(stderr, "error: downloaded kotlinc archive failed checksum verification\n");
-      remove(tmp);
-      free(tmp);
-      return -1;
-    }
-  } else {
+  if (sha == NULL) {
     fprintf(stderr, "note: checksum verification skipped for custom kotlinc URL\n");
   }
   char *unzip_dir = ccb_path_join(sdk_home, "kotlin-tmp");
@@ -724,6 +877,337 @@ static int ccb_setup_install_kotlinc(const char *sdk_home) {
   return 0;
 }
 
+// ---------- setup: r8 install ----------
+
+// Install the official r8 jar into <sdk-home>/r8/r8.jar, the
+// setup-managed location the build picks up when [sdk] r8_jar is
+// unset. Returns 0 on success, -1 otherwise.
+static int ccb_setup_install_r8(const char *sdk_home) {
+  const char *url = getenv("CCB_R8_URL");
+  int url_custom = url != NULL;
+  if (url == NULL) {
+    url = CCB_R8_URL;
+  }
+  const char *sha = getenv("CCB_R8_SHA256");
+  if (sha == NULL && !url_custom) {
+    sha = CCB_R8_SHA256;
+  }
+  fprintf(stderr, "downloading the official r8 jar (%s)...\n", CCB_R8_VERSION);
+  char *dir = ccb_path_join(sdk_home, "r8");
+  if (ccb_mkdir_p(dir) != CCB_OK) {
+    free(dir);
+    return -1;
+  }
+  char *dst = ccb_path_join(dir, "r8.jar");
+  free(dir);
+  int drc = ccb_download_cached(url, dst, sha);
+  if (drc != 0) {
+    fprintf(stderr, "error: %s: %s\n",
+      drc == -2 ? "downloaded r8 jar failed checksum verification" : "download failed", url);
+    remove(dst);
+    free(dst);
+    return -1;
+  }
+  if (sha == NULL) {
+    fprintf(stderr, "note: checksum verification skipped for custom r8 URL\n");
+  }
+  // Verify the jar actually runs as R8 (needs java; setup already
+  // ensured a JDK). The jar's manifest Main-Class is broken, so
+  // invoke the class explicitly, as the build does.
+  char *java = NULL;
+  int major = 0;
+  if (ccb_sdk_find_java(&java, &major) == CCB_OK) {
+    char *argv[] = { java, "-cp", dst, "com.android.tools.r8.R8", "--version", NULL };
+    ccb_proc_result r;
+    int ok = 0;
+    if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK && r.exit_code == 0) {
+      ok = (strstr(r.out, "R8 ") != NULL) || (strstr(r.err, "R8 ") != NULL);
+    }
+    ccb_proc_result_free(&r);
+    free(java);
+    if (!ok) {
+      fprintf(stderr, "error: installed r8 jar at %s failed verification\n", dst);
+      free(dst);
+      return -1;
+    }
+  }
+  fprintf(stderr, "r8 %s installed at %s\n", CCB_R8_VERSION, dst);
+  free(dst);
+  return 0;
+}
+
+// ---------- setup: NDK install ----------
+
+// Install one NDK revision through sdkmanager, then verify the dir.
+// Returns 0 on success, -1 otherwise.
+static int ccb_setup_install_ndk(const char *sdk_home, const char *sdkmanager, const char *version) {
+  ccb_str pkg;
+  ccb_str_init(&pkg);
+  ccb_str_append(&pkg, "ndk;");
+  ccb_str_append(&pkg, version);
+  char *argv[] = { (char *)sdkmanager, pkg.buf, NULL };
+  ccb_proc_result r;
+  ccb_status prc = ccb_proc_run(argv, NULL, NULL, &r);
+  int ok = prc == CCB_OK && r.exit_code == 0;
+  if (!ok) {
+    fprintf(stderr, "error: sdkmanager failed to install %s\n%s\n", pkg.buf, r.err);
+  }
+  ccb_proc_result_free(&r);
+  ccb_str_free(&pkg);
+  if (!ok) {
+    return -1;
+  }
+  char *dir = ccb_path_join3(sdk_home, "ndk", version);
+  int exists = ccb_path_is_dir(dir);
+  free(dir);
+  if (!exists) {
+    fprintf(stderr, "error: sdkmanager finished but ndk/%s is still missing\n", version);
+    return -1;
+  }
+  fprintf(stderr, "ndk %s installed\n", version);
+  return 0;
+}
+
+// ---------- setup: host tools (Termux + distro packages) ----------
+
+static int ccb_env_nonempty(const char *name) {
+  const char *v = getenv(name);
+  return v != NULL && v[0] != '\0';
+}
+
+// 1 when the tool at path exists, is executable, and runs.
+static int ccb_tool_runs(const char *path, const char *arg) {
+  return access(path, X_OK) == 0 && ccb_sdk_tool_runnable(path, arg);
+}
+
+// 1 when a runnable copy of the tool is on PATH.
+static int ccb_path_tool_runs(const char *name, const char *arg) {
+  char *p = ccb_sdk_find_on_path(name);
+  if (p == NULL) {
+    return 0;
+  }
+  int ok = ccb_tool_runs(p, arg);
+  free(p);
+  return ok;
+}
+
+// rendiix's repo: the only known source for zipalign on Termux (the
+// official repos do not carry it). Used ONLY when the official repos
+// have no candidate for the package.
+#define CCB_RENDIIX_LIST "etc/apt/sources.list.d/rendiix.list"
+#define CCB_RENDIIX_LINE "deb https://rendiix.github.io android-tools termux"
+#define CCB_RENDIIX_KEY_URL "https://rendiix.github.io/rendiix.gpg"
+
+static int ccb_termux_repo_present(void) {
+  const char *prefix = getenv("PREFIX");
+  if (prefix == NULL) {
+    return 0;
+  }
+  char *list = ccb_path_join(prefix, CCB_RENDIIX_LIST);
+  int ok = ccb_path_exists(list);
+  free(list);
+  return ok;
+}
+
+// Add the rendiix repo (list file + key + apt update). Idempotent:
+// when the list file already exists, nothing is done. On failure the
+// list file is removed again so a retry redoes the whole add.
+static int ccb_termux_add_rendiix(const char *pkg) {
+  if (ccb_termux_repo_present()) {
+    return 0;
+  }
+  const char *prefix = getenv("PREFIX");
+  if (prefix == NULL) {
+    return -1;
+  }
+  char *deps[] = { (char *)pkg, "install", "-y", "gnupg", "wget", NULL };
+  ccb_proc_result r;
+  int ok = ccb_proc_run(deps, NULL, NULL, &r) == CCB_OK && r.exit_code == 0;
+  if (!ok) {
+    fputs(r.err != NULL ? r.err : "", stderr);
+  }
+  ccb_proc_result_free(&r);
+  if (!ok) {
+    return -1;
+  }
+  char *list = ccb_path_join(prefix, CCB_RENDIIX_LIST);
+  char *list_dir = ccb_path_join(prefix, "etc/apt/sources.list.d");
+  if (ccb_mkdir_p(list_dir) != CCB_OK) {
+    free(list_dir);
+    free(list);
+    return -1;
+  }
+  free(list_dir);
+  FILE *f = fopen(list, "w");
+  if (f == NULL) {
+    free(list);
+    return -1;
+  }
+  fputs(CCB_RENDIIX_LINE "\n", f);
+  if (fclose(f) != 0) {
+    free(list);
+    return -1;
+  }
+  char *keydir = ccb_path_join(prefix, "etc/apt/trusted.gpg.d");
+  if (ccb_mkdir_p(keydir) != CCB_OK) {
+    free(keydir);
+    remove(list);
+    free(list);
+    return -1;
+  }
+  char *wget = ccb_sdk_find_on_path("wget");
+  char *wargv[] = { wget == NULL ? "wget" : wget, "-qP", keydir, (char *)CCB_RENDIIX_KEY_URL, NULL };
+  ok = wget != NULL && ccb_proc_run(wargv, NULL, NULL, &r) == CCB_OK && r.exit_code == 0;
+  if (!ok) {
+    fputs(r.err != NULL ? r.err : "", stderr);
+  }
+  ccb_proc_result_free(&r);
+  free(wget);
+  free(keydir);
+  if (!ok) {
+    remove(list);
+    free(list);
+    return -1;
+  }
+  char *apt = ccb_sdk_find_on_path("apt");
+  char *uargv[] = { apt == NULL ? "apt" : apt, "update", NULL };
+  ok = apt != NULL && ccb_proc_run(uargv, NULL, NULL, &r) == CCB_OK && r.exit_code == 0;
+  if (!ok) {
+    fputs(r.err != NULL ? r.err : "", stderr);
+  }
+  ccb_proc_result_free(&r);
+  free(apt);
+  if (!ok) {
+    remove(list);
+    free(list);
+    return -1;
+  }
+  free(list);
+  return 0;
+}
+
+// 1 when the currently enabled repos offer the package, 0 when they
+// do not, -1 when apt-cache is unavailable. Runs BEFORE any
+// third-party repo is added, so a candidate means the official repos
+// carry it.
+static int ccb_termux_pkg_candidate(const char *pkg) {
+  char *apt_cache = ccb_sdk_find_on_path("apt-cache");
+  if (apt_cache == NULL) {
+    return -1;
+  }
+  char *argv[] = { apt_cache, "policy", (char *)pkg, NULL };
+  ccb_proc_result r;
+  int found = 0;
+  if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK && r.exit_code == 0) {
+    const char *p = strstr(r.out, "Candidate:");
+    if (p != NULL) {
+      p += strlen("Candidate:");
+      while (*p == ' ' || *p == '\t') {
+        p++;
+      }
+      found = strncmp(p, "(none)", 6) != 0 && *p != '\0' && *p != '\n';
+    }
+  }
+  ccb_proc_result_free(&r);
+  free(apt_cache);
+  return found;
+}
+
+// Install one system package for a tool: Termux via pkg, Linux via
+// the detected distro installer. needs_repo (Termux only) adds the
+// rendiix repo first, but only when the official repos have no
+// candidate. Returns 0 on success.
+static int ccb_setup_install_system_tool(const ccb_jdkinst_info *inst, const char *pkg_name, int needs_repo) {
+  if (inst->kind == CCB_JDKINST_TERMUX) {
+    if (needs_repo && ccb_termux_pkg_candidate(pkg_name) == 0) {
+      if (ccb_termux_add_rendiix(inst->path) != 0) {
+        return -1;
+      }
+    }
+    char *cmd[] = { "install", "-y", (char *)pkg_name, NULL };
+    return ccb_run_jdkinst_cmd(inst, cmd);
+  }
+  switch (inst->kind) {
+    case CCB_JDKINST_APT: {
+      char *upd[] = { "update", NULL };
+      if (ccb_run_jdkinst_cmd(inst, upd) != 0) {
+        return -1;
+      }
+      char *cmd[] = { "install", "-y", (char *)pkg_name, NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_DNF:
+    case CCB_JDKINST_YUM:
+    case CCB_JDKINST_ZYPPER: {
+      char *cmd[] = { "install", "-y", (char *)pkg_name, NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_PACMAN: {
+      char *cmd[] = { "-Sy", "--noconfirm", (char *)pkg_name, NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    case CCB_JDKINST_APK: {
+      char *cmd[] = { "add", (char *)pkg_name, NULL };
+      return ccb_run_jdkinst_cmd(inst, cmd);
+    }
+    default:
+      return -1;
+  }
+}
+
+// Forward declaration: defined with install/run/logcat below.
+static char *ccb_find_adb(ccb_config *cfg, ccb_diag_list *diags);
+
+// After every install step, resolve the toolchain and report what
+// still needs attention (e.g. an old kotlinc on PATH shadowing the
+// SDK-home install). Informational only: setup already did what it
+// can; the remaining items need user action. adb is outside the
+// toolchain resolve, so it is checked separately.
+static void ccb_setup_final_pass(ccb_config *cfg, long compile_sdk, const char *build_tools) {
+  ccb_config *pass_cfg = cfg;
+  ccb_config defcfg;
+  if (cfg == NULL) {
+    memset(&defcfg, 0, sizeof(defcfg));
+    defcfg.compile_sdk = compile_sdk;
+    defcfg.build_tools = ccb_xstrdup(build_tools);
+    pass_cfg = &defcfg;
+  }
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  ccb_sdk *sdk = NULL;
+  if (ccb_sdk_resolve(pass_cfg, &sdk, &diags) == CCB_OK) {
+    fprintf(stderr, "toolchain check: ok\n");
+    ccb_sdk_free(sdk);
+  } else {
+    for (size_t i = 0; i < diags.count; i++) {
+      ccb_diag *d = &diags.items[i];
+      fprintf(stderr, "warning: %s: %s\n", d->code, d->message);
+      if (d->suggestion != NULL) {
+        fprintf(stderr, "  suggestion: %s\n", d->suggestion);
+      }
+    }
+    fprintf(stderr, "warning: setup finished with the above gaps; fix them, then rerun `ccb setup` or `ccb check`.\n");
+  }
+  ccb_diag_list_free(&diags);
+  ccb_diag_list adiags;
+  ccb_diag_list_init(&adiags);
+  char *adb = ccb_find_adb(pass_cfg, &adiags);
+  if (adb == NULL) {
+    if (adiags.count > 0) {
+      for (size_t i = 0; i < adiags.count; i++) {
+        fprintf(stderr, "warning: %s: %s\n", adiags.items[i].code, adiags.items[i].message);
+      }
+    } else {
+      fprintf(stderr, "warning: adb not found: install platform-tools or put adb on PATH to use `ccb install` / `ccb run`.\n");
+    }
+  }
+  free(adb);
+  ccb_diag_list_free(&adiags);
+  if (cfg == NULL) {
+    free(defcfg.build_tools);
+  }
+}
+
 static int ccb_cmd_setup(ccb_args *a) {
   // sdkmanager is a Java program. When no usable JDK is present, offer
   // to install one (Termux pkg or the distro package manager) instead
@@ -742,7 +1226,7 @@ static int ccb_cmd_setup(ccb_args *a) {
         return 3;
       }
       int go = 0;
-      if (a->yes) {
+      if (a->yes || a->upgrade) {
         go = 1;
       } else if (isatty(STDIN_FILENO)) {
         ccb_str q;
@@ -851,16 +1335,11 @@ static int ccb_cmd_setup(ccb_args *a) {
     }
     char *tmp = ccb_path_join(sdk_home, "cmdline-tools.zip");
     const char *url = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip";
-    if (ccb_download(url, tmp) != 0) {
-      fprintf(stderr, "error: download failed: %s\n", url);
-      free(tmp);
-      free(default_home);
-      ccb_config_free(cfg);
-      return 3;
-    }
-    char hex[65];
-    if (ccb_sha256_file(tmp, hex) != CCB_OK || strcmp(hex, CCB_CMDLINE_SHA256) != 0) {
-      fprintf(stderr, "error: downloaded cmdline-tools archive failed checksum verification\n");
+    int drc = ccb_download_cached(url, tmp, CCB_CMDLINE_SHA256);
+    if (drc != 0) {
+      fprintf(stderr, "error: %s: %s\n",
+        drc == -2 ? "downloaded cmdline-tools archive failed checksum verification" : "download failed",
+        url);
       remove(tmp);
       free(tmp);
       free(default_home);
@@ -1030,6 +1509,41 @@ static int ccb_cmd_setup(ccb_args *a) {
   // Automatic, like the SDK component install: the destination is
   // CCB's own directory, not a system package.
   {
+    int upgraded = 0;
+    if (a->upgrade) {
+      // Upgrade only the setup-managed copy: when the SDK-home
+      // kotlinc exists and is not the pinned version, reinstall it.
+      // A user-managed kotlinc (config, KOTLIN_HOME, PATH) is never
+      // touched, and SDK component versions stay pinned by config.
+      char *home_bin = ccb_path_join3(sdk_home, "kotlinc", "bin/kotlinc");
+      if (access(home_bin, X_OK) == 0) {
+        char *argv[] = { home_bin, "-version", NULL };
+        ccb_proc_result vr;
+        char *ver = NULL;
+        if (ccb_proc_run(argv, NULL, NULL, &vr) == CCB_OK) {
+          ver = ccb_sdk_parse_kotlin_version(vr.err);
+        }
+        ccb_proc_result_free(&vr);
+        if (ver == NULL || strcmp(ver, CCB_KOTLIN_VERSION) != 0) {
+          fprintf(stderr, "upgrading SDK-home kotlinc %s -> %s\n",
+            ver != NULL ? ver : "unversioned", CCB_KOTLIN_VERSION);
+          if (ccb_setup_install_kotlinc(sdk_home) != 0) {
+            free(ver);
+            free(home_bin);
+            ccb_str_free(&platform);
+            ccb_str_free(&bt);
+            free(sdkmanager);
+            free(default_home);
+            ccb_config_free(cfg);
+            return 3;
+          }
+          upgraded = 1;
+        }
+        free(ver);
+      }
+      free(home_bin);
+    }
+    if (!upgraded) {
     char *kpath = NULL;
     char *kver = NULL;
     int kprobe = ccb_setup_probe_kotlinc(cfg, sdk_home, &kpath, &kver);
@@ -1055,8 +1569,188 @@ static int ccb_cmd_setup(ccb_args *a) {
     }
     free(kpath);
     free(kver);
+    }
   }
-  printf("SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
+  // NDK: a project declaring [ndk] needs its revision installed, or
+  // check fails after setup says ready.
+  if (cfg != NULL && cfg->has_ndk && cfg->ndk_version != NULL) {
+    char *ndk_dir = ccb_path_join3(sdk_home, "ndk", cfg->ndk_version);
+    if (!ccb_path_is_dir(ndk_dir)) {
+      fprintf(stderr, "ndk %s not found, installing via sdkmanager...\n", cfg->ndk_version);
+      if (ccb_setup_install_ndk(sdk_home, sdkmanager, cfg->ndk_version) != 0) {
+        free(ndk_dir);
+        ccb_str_free(&platform);
+        ccb_str_free(&bt);
+        free(sdkmanager);
+        free(default_home);
+        ccb_config_free(cfg);
+        return 3;
+      }
+    } else {
+      fprintf(stderr, "ndk %s found at %s\n", cfg->ndk_version, ndk_dir);
+    }
+    free(ndk_dir);
+  }
+  // r8: only for minify projects without an explicit jar. The
+  // setup-managed copy lives at <sdk-home>/r8/r8.jar, where the
+  // build picks it up.
+  if (cfg != NULL && cfg->minify && cfg->r8_jar == NULL) {
+    char *r8_path = ccb_path_join3(sdk_home, "r8", "r8.jar");
+    int need = !ccb_path_exists(r8_path);
+    if (!need && a->upgrade && getenv("CCB_R8_URL") == NULL && getenv("CCB_R8_SHA256") == NULL) {
+      char hex[65];
+      need = ccb_sha256_file(r8_path, hex) != CCB_OK || strcmp(hex, CCB_R8_SHA256) != 0;
+    }
+    if (need) {
+      if (ccb_setup_install_r8(sdk_home) != 0) {
+        free(r8_path);
+        ccb_str_free(&platform);
+        ccb_str_free(&bt);
+        free(sdkmanager);
+        free(default_home);
+        ccb_config_free(cfg);
+        return 3;
+      }
+    } else {
+      fprintf(stderr, "r8 found at %s\n", r8_path);
+    }
+    free(r8_path);
+  }
+  // Host tools: on Termux, the SDK's native tools can exist yet not
+  // run (x86-64 binaries on aarch64). When no runnable copy resolves
+  // (SDK or PATH) and no override pins the choice, install the
+  // platform package. Termux: aapt2 and android-tools from the
+  // official repos, zipalign from the rendiix repo (only when the
+  // official repos have no candidate). Linux: adb from the distro
+  // package manager. aapt2/zipalign on Linux are SDK-native on
+  // x86-64; on aarch64 Linux there is no package fix, so the final
+  // pass warns instead. Best effort: declining, or lacking an
+  // installer, only skips the installs; a failed install errors.
+  {
+    int ov_aapt2 = (cfg != NULL && cfg->aapt2_override != NULL) || ccb_env_nonempty("CCB_AAPT2");
+    int ov_zipalign = (cfg != NULL && cfg->zipalign_override != NULL) || ccb_env_nonempty("CCB_ZIPALIGN");
+    int ov_adb = (cfg != NULL && cfg->adb_override != NULL) || ccb_env_nonempty("CCB_ADB");
+    char *bt_dir = ccb_path_join3(sdk_home, "build-tools", build_tools);
+    char *sdk_aapt2 = ccb_path_join(bt_dir, "aapt2");
+    char *sdk_zipalign = ccb_path_join(bt_dir, "zipalign");
+    char *sdk_adb = ccb_path_join(sdk_home, "platform-tools/adb");
+    free(bt_dir);
+    int need_aapt2 = !ov_aapt2 && !ccb_tool_runs(sdk_aapt2, "version") && !ccb_path_tool_runs("aapt2", "version");
+    int need_zipalign = !ov_zipalign && !ccb_tool_runs(sdk_zipalign, NULL) && !ccb_path_tool_runs("zipalign", NULL);
+    int need_adb = !ov_adb && !ccb_tool_runs(sdk_adb, "version") && !ccb_path_tool_runs("adb", "version");
+    free(sdk_aapt2);
+    free(sdk_zipalign);
+    free(sdk_adb);
+    ccb_jdkinst_info inst;
+    ccb_detect_jdkinst(&inst);
+    struct ccb_tool_need { const char *tool; const char *pkg; const char *arg; int needs_repo; int needed; } tools[3] = {
+      { "aapt2", "aapt2", "version", 0, need_aapt2 },
+      { "zipalign", "zipalign", NULL, 1, need_zipalign },
+      { "adb", "android-tools", "version", 0, need_adb },
+    };
+    if (inst.kind != CCB_JDKINST_TERMUX) {
+      // Linux: only adb has a package fix.
+      tools[0].needed = 0;
+      tools[1].needed = 0;
+      if (inst.kind == CCB_JDKINST_APT) {
+        tools[2].pkg = "adb";
+      }
+    }
+    int any = tools[0].needed || tools[1].needed || tools[2].needed;
+    if (any && inst.kind != CCB_JDKINST_NONE) {
+      int go = 0;
+      if (a->yes || a->upgrade) {
+        go = 1;
+      } else if (isatty(STDIN_FILENO)) {
+        ccb_str q;
+        ccb_str_init(&q);
+        ccb_str_append(&q, "Install missing host tools via ");
+        ccb_str_append(&q, inst.display);
+        ccb_str_append(&q, " (");
+        int first = 1;
+        for (int i = 0; i < 3; i++) {
+          if (!tools[i].needed) {
+            continue;
+          }
+          if (!first) {
+            ccb_str_append(&q, ", ");
+          }
+          ccb_str_append(&q, tools[i].tool);
+          first = 0;
+        }
+        ccb_str_append(&q, ")?");
+        if (inst.kind == CCB_JDKINST_TERMUX && tools[1].needed && !ccb_termux_repo_present()) {
+          ccb_str_append(&q, " zipalign is not in the official Termux repos, so this adds the rendiix repository (https://rendiix.github.io) for it.");
+        }
+        go = ccb_prompt_yes(q.buf);
+        ccb_str_free(&q);
+        if (!go) {
+          fprintf(stderr, "skipping host tool installs; the final check below lists what is still missing.\n");
+        }
+      } else {
+        fprintf(stderr, "note: run `ccb setup` in a terminal or pass --yes to install the missing host tools.\n");
+      }
+      if (go) {
+        for (int i = 0; i < 3; i++) {
+          if (!tools[i].needed) {
+            continue;
+          }
+          fprintf(stderr, "Installing %s via %s...\n", tools[i].tool, inst.display);
+          if (ccb_setup_install_system_tool(&inst, tools[i].pkg, tools[i].needs_repo) != 0) {
+            fprintf(stderr, "error: failed to install %s via %s.\n", tools[i].tool, inst.display);
+            free(inst.path);
+            free(inst.sudo_path);
+            ccb_str_free(&platform);
+            ccb_str_free(&bt);
+            free(sdkmanager);
+            free(default_home);
+            ccb_config_free(cfg);
+            return 3;
+          }
+          if (!ccb_path_tool_runs(tools[i].tool, tools[i].arg)) {
+            fprintf(stderr, "error: installed %s via %s but no runnable %s found on PATH.\n", tools[i].tool, inst.display, tools[i].tool);
+            free(inst.path);
+            free(inst.sudo_path);
+            ccb_str_free(&platform);
+            ccb_str_free(&bt);
+            free(sdkmanager);
+            free(default_home);
+            ccb_config_free(cfg);
+            return 3;
+          }
+        }
+      }
+    }
+    free(inst.path);
+    free(inst.sudo_path);
+  }
+  ccb_setup_final_pass(cfg, compile_sdk, build_tools);
+  if (a->print_env) {
+    printf("export ANDROID_HOME=\"%s\"\n", sdk_home);
+    const char *jh = getenv("JAVA_HOME");
+    if (jh != NULL) {
+      printf("export JAVA_HOME=\"%s\"\n", jh);
+    } else {
+      char *java = NULL;
+      int major = 0;
+      if (ccb_sdk_find_java(&java, &major) == CCB_OK) {
+        char *derived = ccb_derive_java_home(java);
+        if (derived != NULL) {
+          printf("export JAVA_HOME=\"%s\"\n", derived);
+          free(derived);
+        }
+        free(java);
+      }
+    }
+    char *kbin = ccb_path_join3(sdk_home, "kotlinc", "bin");
+    if (ccb_path_is_dir(kbin)) {
+      printf("export PATH=\"%s:$PATH\"\n", kbin);
+    }
+    free(kbin);
+    fprintf(stderr, "SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
+  } else {
+    printf("SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
+  }
   ccb_str_free(&platform);
   ccb_str_free(&bt);
   free(sdkmanager);
@@ -1445,7 +2139,39 @@ static int ccb_cmd_doctor(ccb_args *a) {
 
 // adb lives under the SDK's platform-tools; no full toolchain resolve is
 // needed just to find it (that would waste a kotlinc -version probe).
-static char *ccb_find_adb(ccb_config *cfg) {
+// Precedence: [sdk] adb, then CCB_ADB, then the SDK's platform-tools
+// adb, then adb on PATH. An explicit override that is missing or
+// cannot run pushes a diagnostic (when diags is given) and returns
+// NULL instead of silently falling back. SDK and PATH candidates must
+// actually run: an SDK adb can exist yet be unrunnable (x86-64 binary
+// on Termux aarch64), in which case the PATH copy wins.
+static char *ccb_find_adb(ccb_config *cfg, ccb_diag_list *diags) {
+  const char *ov = cfg != NULL ? cfg->adb_override : NULL;
+  const char *label = "[sdk] adb";
+  if (ov == NULL) {
+    const char *env = getenv("CCB_ADB");
+    if (env != NULL && env[0] != '\0') {
+      ov = env;
+      label = "CCB_ADB";
+    }
+  }
+  if (ov != NULL) {
+    if (access(ov, X_OK) == 0 && ccb_sdk_tool_runnable(ov, "version")) {
+      return ccb_xstrdup(ov);
+    }
+    if (diags != NULL) {
+      ccb_str m;
+      ccb_str_init(&m);
+      ccb_str_append(&m, label);
+      ccb_str_append(&m, " points at ");
+      ccb_str_append(&m, ov);
+      ccb_str_append(&m, " but it is missing, not executable, or cannot run on this machine");
+      ccb_diag d = ccb_diag_make("CCB-E2009", "device", m.buf);
+      ccb_str_free(&m);
+      ccb_diag_list_push(diags, &d);
+    }
+    return NULL;
+  }
   const char *sdk_home = NULL;
   if (cfg != NULL) {
     sdk_home = cfg->sdk_home;
@@ -1458,12 +2184,17 @@ static char *ccb_find_adb(ccb_config *cfg) {
   }
   if (sdk_home != NULL) {
     char *adb = ccb_path_join(sdk_home, "platform-tools/adb");
-    if (access(adb, X_OK) == 0) {
+    if (access(adb, X_OK) == 0 && ccb_sdk_tool_runnable(adb, "version")) {
       return adb;
     }
     free(adb);
   }
-  return ccb_sdk_find_on_path("adb");
+  char *on_path = ccb_sdk_find_on_path("adb");
+  if (on_path != NULL && ccb_sdk_tool_runnable(on_path, "version")) {
+    return on_path;
+  }
+  free(on_path);
+  return NULL;
 }
 
 static void ccb_device_diag(ccb_diag_list *diags, const char *code, const char *msg) {
@@ -1490,7 +2221,8 @@ static int ccb_cmd_install(ccb_args *a) {
   char *out = ccb_path_join3(cfg->build_dir, "outputs", cfg->variant);
   char *apk_path = ccb_path_join(out, "app.apk");
   free(out);
-  char *adb = ccb_find_adb(cfg);
+  size_t ndiags_before = diags.count;
+  char *adb = ccb_find_adb(cfg, &diags);
   if (a->dry_run) {
     printf("%s install -r %s\n", adb == NULL ? "adb" : adb, apk_path);
     free(adb);
@@ -1510,9 +2242,11 @@ static int ccb_cmd_install(ccb_args *a) {
     return 1;
   }
   if (adb == NULL) {
-    ccb_diag d = ccb_diag_make("CCB-E2009", "install", "adb not found");
-    d.suggestion = ccb_xstrdup("run `ccb setup` to install platform-tools, or put adb on PATH");
-    ccb_diag_list_push(&diags, &d);
+    if (diags.count == ndiags_before) {
+      ccb_diag d = ccb_diag_make("CCB-E2009", "install", "adb not found");
+      d.suggestion = ccb_xstrdup("run `ccb setup` to install platform-tools, or put adb on PATH");
+      ccb_diag_list_push(&diags, &d);
+    }
     ccb_print_diags(a, &diags);
     free(apk_path);
     ccb_config_free(cfg);
@@ -1614,7 +2348,8 @@ static int ccb_cmd_run(ccb_args *a) {
   char *out = ccb_path_join3(cfg->build_dir, "outputs", cfg->variant);
   char *apk_path = ccb_path_join(out, "app.apk");
   free(out);
-  char *adb = ccb_find_adb(cfg);
+  size_t ndiags_before = diags.count;
+  char *adb = ccb_find_adb(cfg, &diags);
   if (a->dry_run || a->explain) {
     printf("%s install -r %s\n", adb == NULL ? "adb" : adb, apk_path);
     char *mtext = NULL;
@@ -1647,9 +2382,11 @@ static int ccb_cmd_run(ccb_args *a) {
     return 0;
   }
   if (adb == NULL) {
-    ccb_diag d = ccb_diag_make("CCB-E2009", "install", "adb not found");
-    d.suggestion = ccb_xstrdup("run `ccb setup` to install platform-tools, or put adb on PATH");
-    ccb_diag_list_push(&diags, &d);
+    if (diags.count == ndiags_before) {
+      ccb_diag d = ccb_diag_make("CCB-E2009", "install", "adb not found");
+      d.suggestion = ccb_xstrdup("run `ccb setup` to install platform-tools, or put adb on PATH");
+      ccb_diag_list_push(&diags, &d);
+    }
     ccb_print_diags(a, &diags);
     free(apk_path);
     ccb_config_free(cfg);
@@ -1734,14 +2471,22 @@ static int ccb_cmd_logcat(ccb_args *a) {
   ccb_config *cfg = ccb_load_config_or_die(a, &diags);
   // logcat works without a project too; only the config load may fail.
   ccb_diag_list_free(&diags);
-  char *adb = ccb_find_adb(cfg);
+  ccb_diag_list adiags;
+  ccb_diag_list_init(&adiags);
+  char *adb = ccb_find_adb(cfg, &adiags);
   if (cfg != NULL) {
     ccb_config_free(cfg);
   }
   if (adb == NULL) {
-    fprintf(stderr, "error: adb not found (install platform-tools or put adb on PATH)\n");
+    if (adiags.count > 0) {
+      ccb_print_diags(a, &adiags);
+    } else {
+      fprintf(stderr, "error: adb not found (install platform-tools or put adb on PATH)\n");
+    }
+    ccb_diag_list_free(&adiags);
     return 3;
   }
+  ccb_diag_list_free(&adiags);
   // adb logcat blocks forever on "- waiting for device -" when nothing
   // is attached, so check first and fail fast with a real diagnostic.
   int have_device = 0;
@@ -2711,6 +3456,10 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
         a->explain = 1;
       } else if (strcmp(flag, "--yes") == 0) {
         a->yes = 1;
+      } else if (strcmp(flag, "--upgrade") == 0) {
+        a->upgrade = 1;
+      } else if (strcmp(flag, "--print-env") == 0) {
+        a->print_env = 1;
       } else if (strcmp(flag, "--config") == 0) {
         if (value == NULL) {
           if (i + 1 >= argc) {

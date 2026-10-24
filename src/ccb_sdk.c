@@ -115,6 +115,8 @@ void ccb_sdk_free(ccb_sdk *sdk) {
   free(sdk->apksigner);
   free(sdk->zipalign);
   free(sdk->zipalign_source);
+  free(sdk->r8_jar);
+  free(sdk->r8_source);
   free(sdk->android_jar);
   free(sdk->java);
   free(sdk->javac);
@@ -198,6 +200,21 @@ char *ccb_sdk_parse_kotlin_version(const char *text) {
     return NULL;
   }
   return ccb_xstrndup(v, n);
+}
+
+// 1 when the tool at path spawns: any exit code except 127 (the
+// child's exec-failure exit) and no fatal signal. arg may be NULL
+// for no arguments. The argument must be harmless (a version query
+// or no arguments at all): it only proves the binary runs.
+int ccb_sdk_tool_runnable(const char *path, const char *arg) {
+  char *argv[] = { (char *)path, (char *)arg, NULL };
+  ccb_proc_result r;
+  int ok = 0;
+  if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
+    ok = r.exit_code != 127 && !r.signaled;
+  }
+  ccb_proc_result_free(&r);
+  return ok;
 }
 
 ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *diags) {
@@ -286,12 +303,40 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
         continue;
       }
       char *p = ccb_path_join(s->build_tools_dir, tools[i]);
-      if (access(p, X_OK) != 0) {
-        ccb_sdk_diagf(diags, "CCB-E2009", "tool missing or not executable", p);
-        free(p);
-      } else {
+      // Native tools only: aapt2 and zipalign are host binaries, so
+      // an SDK copy can exist yet not run (x86-64 binary on Termux
+      // aarch64). d8 and apksigner are Java and always run.
+      int is_native = strcmp(tools[i], "aapt2") == 0 || strcmp(tools[i], "zipalign") == 0;
+      const char *probe = strcmp(tools[i], "aapt2") == 0 ? "version" : NULL;
+      if (access(p, X_OK) == 0 && (!is_native || ccb_sdk_tool_runnable(p, probe))) {
         *slots[i] = p;
+        continue;
       }
+      if (is_native) {
+        // Fall back to a runnable copy on PATH (e.g. a Termux
+        // package). Overrides never fall back: an explicit choice
+        // that is broken fails instead.
+        char *on_path = ccb_sdk_find_on_path(tools[i]);
+        if (on_path != NULL && ccb_sdk_tool_runnable(on_path, probe)) {
+          *slots[i] = on_path;
+          if (strcmp(tools[i], "aapt2") == 0) {
+            free(s->aapt2_source);
+            s->aapt2_source = ccb_xstrdup("path");
+          } else {
+            free(s->zipalign_source);
+            s->zipalign_source = ccb_xstrdup("path");
+          }
+          free(p);
+          continue;
+        }
+        free(on_path);
+      }
+      if (access(p, X_OK) == 0) {
+        ccb_sdk_diagf(diags, "CCB-E2009", "tool present but cannot run (wrong architecture?)", p);
+      } else {
+        ccb_sdk_diagf(diags, "CCB-E2009", "tool missing or not executable", p);
+      }
+      free(p);
     }
   }
 
@@ -415,6 +460,21 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
     }
   }
 
+  // r8: explicit [sdk] r8_jar wins; else the setup-managed copy at
+  // <sdk-home>/r8/r8.jar. Absent r8 is not a resolve failure: only
+  // release+minify builds need it, and the build reports that.
+  if (cfg->r8_jar != NULL) {
+    s->r8_jar = ccb_xstrdup(cfg->r8_jar);
+    s->r8_source = ccb_xstrdup("config");
+  } else {
+    char *cand = ccb_path_join3(s->sdk_home, "r8", "r8.jar");
+    if (ccb_path_exists(cand)) {
+      s->r8_jar = cand;
+      s->r8_source = ccb_xstrdup("sdk-home");
+    } else {
+      free(cand);
+    }
+  }
   // NDK (only when the project declares one).
   if (cfg->has_ndk) {
     if (cfg->ndk_version == NULL) {

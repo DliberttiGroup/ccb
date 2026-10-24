@@ -213,6 +213,7 @@ void ccb_config_free(ccb_config *c) {
   free(c->r8_jar);
   free(c->aapt2_override);
   free(c->zipalign_override);
+  free(c->adb_override);
   free(c->debug_store);
   free(c->debug_alias);
   free(c->release_store);
@@ -288,7 +289,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     static const char *root_keys[] = { "ccb_version" };
     static const char *project_keys[] = { "name", "package", "version", "version_code", "min_sdk", "target_sdk", "compile_sdk" };
     static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "libs" };
-    static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign" };
+    static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign", "adb" };
     static const char *debug_keys[] = { "store", "alias" };
     static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
     static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules" };
@@ -453,6 +454,10 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
     p = NULL;
     if (ccb_get_str(&v, "sdk", "zipalign", &p)) {
       c->zipalign_override = p;
+    }
+    p = NULL;
+    if (ccb_get_str(&v, "sdk", "adb", &p)) {
+      c->adb_override = p;
     }
   }
 

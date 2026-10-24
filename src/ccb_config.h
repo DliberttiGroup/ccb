@@ -37,6 +37,7 @@ typedef struct {
   // is cwd-relative at invocation time, never rebased). NULL when unset.
   char *aapt2_override;
   char *zipalign_override;
+  char *adb_override;
   // [signing.debug]
   char *debug_store;
   char *debug_alias;

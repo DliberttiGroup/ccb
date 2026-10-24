@@ -22,6 +22,11 @@ typedef struct {
   char *apksigner;
   char *zipalign;
   char *zipalign_source;
+  char *r8_jar;
+  // Where the effective r8 jar came from: "config" or "sdk-home"
+  // (the setup-managed copy). NULL when neither exists; only
+  // release+minify builds need r8, so that is not a resolve error.
+  char *r8_source;
   char *android_jar;
   char *java;
   char *javac;
@@ -33,6 +38,10 @@ typedef struct {
   char *ndk_clang;
 } ccb_sdk;
 
+// 1 when the tool at path spawns: any exit code except 127 (the
+// child's exec-failure exit) and no fatal signal. arg may be NULL
+// for no arguments.
+int ccb_sdk_tool_runnable(const char *path, const char *arg);
 // On failure returns CCB_ERR_TOOLCHAIN, fills diags, leaves *out NULL.
 ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *diags);
 void ccb_sdk_free(ccb_sdk *sdk);
