@@ -76,8 +76,9 @@ Gradle is the wrong tool for small, agent-driven Android work:
   codegen are out of scope for v1; CCB must fail with a clear message if it
   detects them, not a cryptic compiler error.
 - No Jetpack Compose compiler plugin in v1 (listed as a v2 candidate).
-- No AAB (Android App Bundle) output in v1. APK only. AAB via `bundletool`
-  is a v2 candidate.
+- AAB output: `ccb build --aab` produces a base-module-only bundle (see
+  §5.10). Split APK generation, asset packs, and dynamic feature
+  modules remain out of scope.
 - No iOS, no Windows support in v1 (Linux first, macOS second).
 - No plugin ecosystem, no build scripting language. TOML is the whole
   configuration surface.
@@ -146,7 +147,7 @@ minify = false      # true = run r8 instead of d8 (release only)
 shrink_resources = false
 jvm_target = "17"
 
-[dependencies]
+[deps]
 jars = []   # paths to .jar files, relative to the project root
 aars = []   # paths to .aar files, relative to the project root
 
@@ -301,6 +302,50 @@ Print the result: output path, size, variant, package, version, signing
 status, per-stage timings, and cache hits/misses. In `--json` mode this is
 a structured summary event, not prose.
 
+### 5.10 AAB output (`ccb build --aab`)
+
+`ccb build --aab` produces an Android App Bundle alongside the APK
+pipeline; APK stays the default. The bundle reuses every stage it can:
+
+- **Link** runs `aapt2 link --proto-format` into a separate
+  intermediate (`build/intermediates/linked-aab.ap_`) under its own
+  cache key (`link-aab`), so APK and AAB builds never poison each
+  other's cached link output. R.java output is identical in both
+  formats and stays shared.
+- **Package** assembles the base module: the manifest at
+  `base/manifest/AndroidManifest.xml`, the protobuf resource table at
+  `base/resources.pb`, compiled resources at `base/res/...`, dex at
+  `base/dex/`, assets at `base/assets/`, native libs at
+  `base/lib/<abi>/`, plus `BundleConfig.pb` at the root. The config
+  is hand-encoded on the protobuf wire format (no protobuf
+  dependency): `BundleConfig { BundleTool bundletool = 1 }` with
+  `BundleTool { string version = 2 }` = `"1.0.0"`. Field numbers are
+  ground truth from bundletool 1.18.1's own output — version is
+  field 2, and encoding it as field 1 makes `bundletool validate`
+  fail with an empty version.
+- **Align is skipped**: bundles are not zipaligned, and Play rejects
+  aligned bundles.
+- **Sign** reuses the APK sign step verbatim (same keystore, alias,
+  and password rules, including debug keystore generation), with one
+  addition: apksigner gets `--min-sdk-version` because it cannot read
+  the manifest from `base/manifest/`. The signature covers the
+  bundle as a v1 JAR signature (META-INF entries) plus the v2 block.
+- **Verify** is `jarsigner -verify` plus a structural check
+  (`base/manifest/AndroidManifest.xml`, `BundleConfig.pb`, and at
+  least one META-INF entry present). `apksigner verify` cannot verify
+  a bundle: it hard-requires `AndroidManifest.xml` at the ZIP root.
+  `bundletool validate` passes on CCB-built bundles (verified against
+  bundletool 1.18.1).
+- Output is `build/outputs/<variant>/app.aab`; the `--json` build
+  event reports it under the `"aab"` key instead of `"apk"`. Cache
+  keys for the bundle path (`link-aab`, `package-aab`, `sign-aab`,
+  `verify-aab`) are separate from the APK keys, so building one
+  format never invalidates or alters the other — the APK build is
+  byte-identical before and after an AAB build.
+- Out of scope: split APK generation (use `bundletool build-apks`),
+  asset packs, dynamic feature modules, Play signing key upload.
+  `ccb install` / `ccb run` remain APK-only.
+
 ## 6. Agent-oriented interface (the distinctive part)
 
 This section is normative. A build system that is merely "scriptable" is
@@ -313,7 +358,7 @@ not agent-oriented. CCB must satisfy all of the following:
 | `ccb init [dir]` | Scaffold a minimal project: `ccb.toml`, manifest, one Kotlin Activity, `res/`, `.gitignore`. Must work offline. |
 | `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), the official kotlinc 2.4.21 compiler into the SDK home when missing, the NDK revision for `[ndk]` projects, r8 9.5.28 into the SDK home for minify projects without an explicit jar, and missing host tools from the platform package manager (Termux: aapt2/android-tools from the official repos, zipalign from the rendiix repo only when the official repos have no candidate; Linux: adb from the distro manager). Ends with a final verification pass (toolchain resolve + adb) reported as warnings. `--upgrade` reinstalls setup-managed kotlinc/r8 to pinned versions and implies `--yes`; `--print-env` prints shell exports instead of the ready line. Pinned downloads are cached under `~/.cache/ccb/downloads` with resume. This is the only command allowed network access; builds stay hermetic. |
 | `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. |
-| `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`. |
+| `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`, `--aab` (build `app.aab` instead of `app.apk`, see §5.10). |
 | `ccb clean` | Remove the build directory only. Never touches sources. |
 | `ccb doctor` | Check every tool CCB needs (SDK, build-tools, platform, kotlinc, d8, apksigner, zipalign, adb, NDK if configured). For each missing item print what it is, where CCB looked, and the exact install command. |
 | `ccb install` | `adb install` the built APK (device selection via `--device`, error if 0 or 2+ devices and no selection). |
@@ -799,8 +844,9 @@ crashes on input it does not understand, and never silently guesses.
 
 ## 13. Open questions (for the user to decide)
 
-1. **AAB support?** Bundletool-based `.aab` output in v2, or APK-only
-   forever? (Play Store prefers AAB for new apps.)
+1. **AAB support?** Implemented: `ccb build --aab` produces a
+   base-module-only `.aab` (see §5.10); bundletool-based split APK
+   generation stays out of scope.
 2. **Remote dependencies?** Stay local-files-only, or add a minimal
    Maven resolver (with a lockfile) in v2?
 3. **Compose?** Add the Compose compiler plugin path in v2, or declare

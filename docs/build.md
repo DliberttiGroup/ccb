@@ -35,6 +35,20 @@
 12. **verify** — `apksigner verify` and `aapt2 dump badging`. An APK
     counts as built only when both pass.
 
+## AAB output (`--aab`)
+
+`ccb build --aab` reuses the stages above with bundle differences
+(see requirement.md §5.10): link runs with `--proto-format` into
+`linked-aab.ap_` (own cache key), package lays out the base module
+(`base/manifest/`, `base/resources.pb`, `base/res/`, `base/dex/`,
+`base/assets/`, `base/lib/<abi>/`) plus a hand-encoded
+`BundleConfig.pb`, align is skipped, sign is the same apksigner step
+with `--min-sdk-version` added, and verify is `jarsigner -verify`
+plus a structural entry check (apksigner verify cannot verify a
+bundle — it requires a root manifest). Output:
+`build/outputs/<variant>/app.aab`. `bundletool validate` passes on
+CCB-built bundles.
+
 ## Manifest merging
 
 At `merge-manifest` time, each AAR's `AndroidManifest.xml` (read from

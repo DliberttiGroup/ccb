@@ -11,6 +11,7 @@
 #include "ccb_cache.h"
 #include "ccb_manifest.h"
 #include "ccb_zip.h"
+#include "ccb_bundle.h"
 #include "ccb_pipeline.h"
 #include <unistd.h>
 
@@ -32,6 +33,8 @@ typedef struct {
   char *unsigned_apk;
   char *aligned_apk;
   char *linked_apk;
+  char *linked_aab;
+  char *unsigned_aab;
   // AAR-derived inputs.
   char **aar_res_dirs;
   size_t aar_res_dirs_count;
@@ -325,7 +328,9 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
   p->aar_dir = ccb_path_join(p->intermediates, "aar");
   p->out_dir = ccb_path_join3(p->cfg->build_dir, "outputs", p->cfg->variant);
   p->linked_apk = ccb_path_join(p->intermediates, "linked.ap_");
+  p->linked_aab = ccb_path_join(p->intermediates, "linked-aab.ap_");
   p->unsigned_apk = ccb_path_join(p->intermediates, "app-unsigned.apk");
+  p->unsigned_aab = ccb_path_join(p->intermediates, "app-unsigned.aab");
   p->aligned_apk = ccb_path_join(p->intermediates, "app-aligned.apk");
   if (!p->opts->dry_run && !p->opts->explain) {
     if (ccb_mkdir_p(p->intermediates) != CCB_OK || ccb_mkdir_p(p->out_dir) != CCB_OK) {
@@ -902,6 +907,13 @@ compile_fail:
 // ---------- aapt2 link ----------
 
 static ccb_status ccb_step_link(ccb_pipe *p) {
+  // AAB builds link with --proto-format into a separate intermediate
+  // (linked-aab.ap_) under its own cache key, so APK and AAB builds
+  // never poison each other's cached link output. R.java output is
+  // identical in both formats and stays shared.
+  int is_aab = p->opts->aab;
+  const char *link_key = is_aab ? "link-aab" : "link";
+  const char *link_out = is_aab ? p->linked_aab : p->linked_apk;
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
   ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
@@ -932,14 +944,14 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
   const char *old = NULL;
   if (!failed) {
     fp = ccb_cache_fingerprint((const char **)b.keys, (const char **)b.vals, b.count);
-    old = ccb_cache_step_fp(p->cache, "link");
+    old = ccb_cache_step_fp(p->cache, link_key);
   }
   ccb_fp_free(&b);
   if (failed) {
     ccb_pipe_diag(p, "CCB-E3003", "aapt2-link", "cannot read link inputs");
     return CCB_ERR_BUILD;
   }
-  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(p->linked_apk) &&
+  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(link_out) &&
       !(p->opts->explain && p->compile_will_run)) {
     free(fp);
     p->steps_skipped++;
@@ -975,8 +987,11 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
   av.ar = ar;
   ccb_argv_push(&av, p->sdk->aapt2);
   ccb_argv_push(&av, "link");
+  if (is_aab) {
+    ccb_argv_push(&av, "--proto-format");
+  }
   ccb_argv_push(&av, "-o");
-  ccb_argv_push(&av, p->linked_apk);
+  ccb_argv_push(&av, link_out);
   ccb_argv_push(&av, "--manifest");
   ccb_argv_push(&av, p->merged_manifest != NULL ? p->merged_manifest : p->cfg->manifest);
   ccb_argv_push(&av, "-I");
@@ -1006,7 +1021,7 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
     free(fp);
     return CCB_ERR_BUILD;
   }
-  ccb_cache_set_step(p->cache, "link", fp);
+  ccb_cache_set_step(p->cache, link_key, fp);
   free(fp);
   p->cache_dirty = 1;
   p->steps_run++;
@@ -1732,7 +1747,35 @@ static int ccb_name_seen(char **names, size_t count, const char *name) {
   return 0;
 }
 
+// Map a link-output entry name to its AAB archive name. APK builds keep
+// names verbatim and never call this.
+static char *ccb_aab_entry_name(const char *name) {
+  if (strcmp(name, "AndroidManifest.xml") == 0) {
+    return ccb_xstrdup("base/manifest/AndroidManifest.xml");
+  }
+  if (strcmp(name, "resources.pb") == 0) {
+    return ccb_xstrdup("base/resources.pb");
+  }
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "base/");
+  ccb_str_append(&s, name);
+  return ccb_str_steal(&s);
+}
+
 static ccb_status ccb_step_package(ccb_pipe *p) {
+  // AAB layout: link output goes under base/ (manifest at
+  // base/manifest/AndroidManifest.xml, resources.pb at base/resources.pb,
+  // res/* at base/res/*), dex at base/dex/, assets at base/assets/,
+  // native libs at base/lib/<abi>/, plus BundleConfig.pb at the root.
+  // Cache key and intermediates are separate from the APK path.
+  int is_aab = p->opts->aab;
+  const char *pkg_key = is_aab ? "package-aab" : "package";
+  const char *link_src = is_aab ? p->linked_aab : p->linked_apk;
+  const char *pkg_out = is_aab ? p->unsigned_aab : p->unsigned_apk;
+  const char *fmt_label = is_aab ? "AAB" : "APK";
+  const char *asset_prefix = is_aab ? "base/assets/" : "assets/";
+  const char *so_prefix = is_aab ? "base/lib/" : "lib/";
   char **dex_files = NULL;
   size_t ndex = 0;
   if (ccb_path_is_dir(p->dex_dir)) {
@@ -1742,7 +1785,7 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
   int failed = 0;
-  if (ccb_fp_add_file(p, &b, p->linked_apk) != 0) {
+  if (ccb_fp_add_file(p, &b, link_src) != 0) {
     failed = 1;
   }
   for (size_t i = 0; i < ndex && !failed; i++) {
@@ -1766,7 +1809,7 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
       const char *rel = files[i] + strlen(p->cfg->assets) + 1;
       ccb_str an;
       ccb_str_init(&an);
-      ccb_str_append(&an, "assets/");
+      ccb_str_append(&an, asset_prefix);
       ccb_str_append(&an, rel);
       char *aname = ccb_str_steal(&an);
       if (nassets == assets_cap) {
@@ -1789,7 +1832,7 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
       const char *rel = files[i] + strlen(p->aar_assets_dirs[ai]) + 1;
       ccb_str an;
       ccb_str_init(&an);
-      ccb_str_append(&an, "assets/");
+      ccb_str_append(&an, asset_prefix);
       ccb_str_append(&an, rel);
       char *aname = ccb_str_steal(&an);
       if (!ccb_name_seen(asset_names, nassets, aname)) {
@@ -1831,7 +1874,7 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
       char *base = ccb_basename(files[i]);
       ccb_str sn;
       ccb_str_init(&sn);
-      ccb_str_append(&sn, "lib/");
+      ccb_str_append(&sn, so_prefix);
       ccb_str_append(&sn, p->cfg->ndk_abis[ai]);
       ccb_str_append_c(&sn, '/');
       ccb_str_append(&sn, base);
@@ -1871,7 +1914,7 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
         free(parent);
         ccb_str sn;
         ccb_str_init(&sn);
-        ccb_str_append(&sn, "lib/");
+        ccb_str_append(&sn, so_prefix);
         ccb_str_append(&sn, abi);
         ccb_str_append_c(&sn, '/');
         char *base = ccb_basename(all[i]);
@@ -1910,13 +1953,15 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
   const char *old = NULL;
   if (!failed) {
     fp = ccb_cache_fingerprint((const char **)b.keys, (const char **)b.vals, b.count);
-    old = ccb_cache_step_fp(p->cache, "package");
+    old = ccb_cache_step_fp(p->cache, pkg_key);
   }
   ccb_fp_free(&b);
   if (so_conflict) {
     ccb_str msg;
     ccb_str_init(&msg);
-    ccb_str_append(&msg, "duplicate native library in APK: ");
+    ccb_str_append(&msg, "duplicate native library in ");
+    ccb_str_append(&msg, fmt_label);
+    ccb_str_append(&msg, ": ");
     ccb_str_append(&msg, so_conflict_name);
     ccb_pipe_diag(p, "CCB-E3007", "package", msg.buf);
     ccb_str_free(&msg);
@@ -1943,7 +1988,7 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
     free(fp);
     goto package_done;
   }
-  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(p->unsigned_apk)) {
+  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(pkg_out)) {
     free(fp);
     p->package_will_run = 0;
     p->steps_skipped++;
@@ -1953,14 +1998,19 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
   p->package_will_run = 1;
   if (!p->opts->dry_run) {
     ccb_zip_writer w;
-    if (ccb_zip_writer_init(&w, p->unsigned_apk) != CCB_OK) {
-      ccb_pipe_diag(p, "CCB-E3016", "package", "cannot create unsigned APK");
+    if (ccb_zip_writer_init(&w, pkg_out) != CCB_OK) {
+      ccb_str msg;
+      ccb_str_init(&msg);
+      ccb_str_append(&msg, "cannot create unsigned ");
+      ccb_str_append(&msg, fmt_label);
+      ccb_pipe_diag(p, "CCB-E3016", "package", msg.buf);
+      ccb_str_free(&msg);
       free(fp);
       goto package_fail;
     }
     ccb_status wrc = CCB_OK;
     ccb_zip_archive *linked = NULL;
-    if (ccb_zip_open(p->linked_apk, &linked) != CCB_OK) {
+    if (ccb_zip_open(link_src, &linked) != CCB_OK) {
       ccb_pipe_diag(p, "CCB-E3007", "package", "cannot open linked resources");
       ccb_zip_writer_abort(&w);
       free(fp);
@@ -1978,9 +2028,11 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
         wrc = CCB_ERR_BUILD;
         break;
       }
-      if (ccb_zip_writer_add_data(&w, e->name, data, len) != CCB_OK) {
+      char *arc_name = is_aab ? ccb_aab_entry_name(e->name) : ccb_xstrdup(e->name);
+      if (ccb_zip_writer_add_data(&w, arc_name, data, len) != CCB_OK) {
         wrc = CCB_ERR_BUILD;
       }
+      free(arc_name);
       free(data);
     }
     ccb_zip_close(linked);
@@ -1993,8 +2045,19 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
         wrc = CCB_ERR_BUILD;
         break;
       }
-      if (ccb_zip_writer_add_data(&w, base, text, tlen) != CCB_OK) {
+      char *arc_name = base;
+      ccb_str dex_name;
+      if (is_aab) {
+        ccb_str_init(&dex_name);
+        ccb_str_append(&dex_name, "base/dex/");
+        ccb_str_append(&dex_name, base);
+        arc_name = dex_name.buf;
+      }
+      if (ccb_zip_writer_add_data(&w, arc_name, text, tlen) != CCB_OK) {
         wrc = CCB_ERR_BUILD;
+      }
+      if (is_aab) {
+        ccb_str_free(&dex_name);
       }
       free(base);
       free(text);
@@ -2023,18 +2086,38 @@ static ccb_status ccb_step_package(ccb_pipe *p) {
       }
       free(text);
     }
+    if (is_aab && wrc == CCB_OK) {
+      uint8_t *bc = NULL;
+      size_t bc_len = 0;
+      if (ccb_bundle_config_encode("1.0.0", &bc, &bc_len) != CCB_OK ||
+          ccb_zip_writer_add_data(&w, "BundleConfig.pb", bc, bc_len) != CCB_OK) {
+        wrc = CCB_ERR_BUILD;
+      }
+      free(bc);
+    }
     if (wrc != CCB_OK) {
-      ccb_pipe_diag(p, "CCB-E3007", "package", "cannot write APK entries");
+      ccb_str msg;
+      ccb_str_init(&msg);
+      ccb_str_append(&msg, "cannot write ");
+      ccb_str_append(&msg, fmt_label);
+      ccb_str_append(&msg, " entries");
+      ccb_pipe_diag(p, "CCB-E3007", "package", msg.buf);
+      ccb_str_free(&msg);
       ccb_zip_writer_abort(&w);
       free(fp);
       goto package_fail;
     }
     if (ccb_zip_writer_finish(&w) != CCB_OK) {
-      ccb_pipe_diag(p, "CCB-E3007", "package", "cannot finish APK");
+      ccb_str msg;
+      ccb_str_init(&msg);
+      ccb_str_append(&msg, "cannot finish ");
+      ccb_str_append(&msg, fmt_label);
+      ccb_pipe_diag(p, "CCB-E3007", "package", msg.buf);
+      ccb_str_free(&msg);
       free(fp);
       goto package_fail;
     }
-    ccb_cache_set_step(p->cache, "package", fp);
+    ccb_cache_set_step(p->cache, pkg_key, fp);
     free(fp);
     p->cache_dirty = 1;
     p->steps_run++;
@@ -2142,7 +2225,15 @@ static char *ccb_keytool_path(ccb_pipe *p) {
 }
 
 static ccb_status ccb_step_sign(ccb_pipe *p) {
-  char *apk_path = ccb_path_join(p->out_dir, "app.apk");
+  // AAB signing reuses the APK sign step verbatim (same keystore,
+  // alias, and password rules, including debug keystore generation)
+  // with two bundle differences: the input is the unaligned bundle
+  // (bundles are not zipaligned) and apksigner gets --min-sdk-version
+  // because it cannot read the manifest from base/manifest/.
+  int is_aab = p->opts->aab;
+  const char *sign_key = is_aab ? "sign-aab" : "sign";
+  const char *sign_in = is_aab ? p->unsigned_aab : p->aligned_apk;
+  char *apk_path = ccb_path_join(p->out_dir, is_aab ? "app.aab" : "app.apk");
   int is_debug = strcmp(p->cfg->variant, "debug") == 0;
   char *keystore = NULL;
   if (is_debug) {
@@ -2157,9 +2248,11 @@ static ccb_status ccb_step_sign(ccb_pipe *p) {
     keystore = ccb_xstrdup(p->cfg->release_store);
   }
   const char *alias = is_debug ? p->cfg->debug_alias : p->cfg->release_alias;
-  char *hash = ccb_cache_hash_file(p->aligned_apk);
+  char *hash = ccb_cache_hash_file(sign_in);
   if (hash == NULL && !p->opts->dry_run && !p->opts->explain) {
-    ccb_pipe_diag(p, "CCB-E3009", "sign", "aligned APK is missing (alignment must run first)");
+    ccb_pipe_diag(p, "CCB-E3009", "sign", is_aab
+      ? "unsigned AAB is missing (packaging must run first)"
+      : "aligned APK is missing (alignment must run first)");
     free(apk_path);
     free(keystore);
     return CCB_ERR_SIGNING;
@@ -2178,10 +2271,10 @@ static ccb_status ccb_step_sign(ccb_pipe *p) {
     free(keystore_hash);
   }
   char *fp = ccb_str_steal(&fpbuf);
-  const char *old = ccb_cache_step_fp(p->cache, "sign");
+  const char *old = ccb_cache_step_fp(p->cache, sign_key);
   if (p->opts->explain) {
-    if (p->align_will_run) {
-      printf("sign: run (aligned APK will change)\n");
+    if (p->align_will_run || (is_aab && p->package_will_run)) {
+      printf("sign: run (%s will change)\n", is_aab ? "unsigned AAB" : "aligned APK");
       p->sign_will_run = 1;
     } else if (old != NULL && strcmp(old, fp) == 0) {
       printf("sign: skip (inputs unchanged)\n");
@@ -2271,6 +2364,10 @@ static ccb_status ccb_step_sign(ccb_pipe *p) {
     av.ar = ar;
     ccb_argv_push(&av, p->sdk->apksigner);
     ccb_argv_push(&av, "sign");
+    if (is_aab) {
+      ccb_argv_push(&av, "--min-sdk-version");
+      ccb_argv_pushf(&av, "%ld", p->cfg->min_sdk);
+    }
     ccb_argv_push(&av, "--ks");
     ccb_argv_push(&av, keystore);
     ccb_argv_push(&av, "--ks-key-alias");
@@ -2299,7 +2396,7 @@ static ccb_status ccb_step_sign(ccb_pipe *p) {
     }
     ccb_argv_push(&av, "--out");
     ccb_argv_push(&av, apk_path);
-    ccb_argv_push(&av, p->aligned_apk);
+    ccb_argv_push(&av, sign_in);
     char **senv = ccb_jvm_env(p, ar);
     ccb_status rc = ccb_run_tool(p, "sign", "CCB-E3009", av.v, senv,
       "check the keystore, alias, and passwords");
@@ -2313,7 +2410,7 @@ static ccb_status ccb_step_sign(ccb_pipe *p) {
     }
   }
   if (!p->opts->dry_run) {
-    ccb_cache_set_step(p->cache, "sign", fp);
+    ccb_cache_set_step(p->cache, sign_key, fp);
     p->cache_dirty = 1;
   }
   free(fp);
@@ -2326,22 +2423,49 @@ static ccb_status ccb_step_sign(ccb_pipe *p) {
 
 // ---------- verify ----------
 
+// jarsigner lives next to keytool in the JDK; fall back to PATH like
+// the keytool helper does.
+static char *ccb_jarsigner_path(ccb_pipe *p) {
+  char *home = ccb_java_home(p);
+  char *js = ccb_path_join(home, "bin/jarsigner");
+  free(home);
+  if (access(js, X_OK) == 0) {
+    return js;
+  }
+  free(js);
+  return ccb_sdk_find_on_path("jarsigner");
+}
+
 static ccb_status ccb_step_verify(ccb_pipe *p) {
-  char *apk_path = ccb_path_join(p->out_dir, "app.apk");
+  // apksigner verify hard-requires AndroidManifest.xml at the ZIP
+  // root, so it cannot verify a bundle (manifest lives at
+  // base/manifest/). AAB verification is therefore jarsigner -verify
+  // over the v1 JAR signature apksigner wrote, plus a structural
+  // check that the required bundle entries are present.
+  int is_aab = p->opts->aab;
+  const char *verify_key = is_aab ? "verify-aab" : "verify";
+  const char *fmt_label = is_aab ? "AAB" : "APK";
+  char *apk_path = ccb_path_join(p->out_dir, is_aab ? "app.aab" : "app.apk");
   char *hash = ccb_cache_hash_file(apk_path);
   if (hash == NULL && !p->opts->dry_run && !p->opts->explain) {
-    ccb_pipe_diag(p, "CCB-E3010", "verify", "signed APK is missing (signing must run first)");
+    ccb_str msg;
+    ccb_str_init(&msg);
+    ccb_str_append(&msg, "signed ");
+    ccb_str_append(&msg, fmt_label);
+    ccb_str_append(&msg, " is missing (signing must run first)");
+    ccb_pipe_diag(p, "CCB-E3010", "verify", msg.buf);
+    ccb_str_free(&msg);
     free(apk_path);
     return CCB_ERR_BUILD;
   }
-  const char *old = ccb_cache_step_fp(p->cache, "verify");
+  const char *old = ccb_cache_step_fp(p->cache, verify_key);
   if (p->opts->explain) {
     if (p->sign_will_run) {
-      printf("verify: run (signed APK will change)\n");
+      printf("verify: run (signed %s will change)\n", fmt_label);
     } else if (old != NULL && hash != NULL && strcmp(old, hash) == 0) {
-      printf("verify: skip (APK unchanged)\n");
+      printf("verify: skip (%s unchanged)\n", fmt_label);
     } else {
-      printf("verify: run (APK changed)\n");
+      printf("verify: run (%s changed)\n", fmt_label);
     }
     free(hash);
     free(apk_path);
@@ -2351,7 +2475,65 @@ static ccb_status ccb_step_verify(ccb_pipe *p) {
     free(hash);
     free(apk_path);
     p->steps_skipped++;
-    ccb_log_cache(&p->log, "verify", 1, "APK unchanged");
+    ccb_log_cache(&p->log, "verify", 1, "signed output unchanged");
+    return CCB_OK;
+  }
+  if (is_aab) {
+    char *jarsigner = ccb_jarsigner_path(p);
+    if (jarsigner == NULL) {
+      ccb_pipe_diag(p, "CCB-E3010", "verify", "jarsigner not found, cannot verify AAB");
+      free(hash);
+      free(apk_path);
+      return CCB_ERR_BUILD;
+    }
+    CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
+    ccb_argv av;
+    memset(&av, 0, sizeof(av));
+    av.ar = ar;
+    ccb_argv_push(&av, jarsigner);
+    ccb_argv_push(&av, "-verify");
+    ccb_argv_push(&av, apk_path);
+    char **venv = ccb_jvm_env(p, ar);
+    ccb_status rc = ccb_run_tool(p, "verify", "CCB-E3010", av.v, venv,
+      "the AAB failed JAR signature verification; rebuild from clean");
+    free(av.v);
+    free(jarsigner);
+    if (rc != CCB_OK) {
+      free(hash);
+      free(apk_path);
+      return CCB_ERR_BUILD;
+    }
+    // Structural check: the entries bundletool and Play require.
+    ccb_zip_archive *aab = NULL;
+    int entries_ok = 0;
+    if (ccb_zip_open(apk_path, &aab) == CCB_OK) {
+      int has_manifest = ccb_zip_find(aab, "base/manifest/AndroidManifest.xml") != NULL;
+      int has_config = ccb_zip_find(aab, "BundleConfig.pb") != NULL;
+      int has_sig = 0;
+      for (size_t i = 0; i < aab->count; i++) {
+        if (strncmp(aab->entries[i].name, "META-INF/", 9) == 0) {
+          has_sig = 1;
+          break;
+        }
+      }
+      entries_ok = has_manifest && has_config && has_sig;
+      ccb_zip_close(aab);
+    }
+    if (!entries_ok) {
+      ccb_pipe_diag(p, "CCB-E3010", "verify",
+        "AAB is missing required entries (base/manifest/AndroidManifest.xml, "
+        "BundleConfig.pb, or META-INF signatures)");
+      free(hash);
+      free(apk_path);
+      return CCB_ERR_BUILD;
+    }
+    if (!p->opts->dry_run && hash != NULL) {
+      ccb_cache_set_step(p->cache, verify_key, hash);
+      p->cache_dirty = 1;
+    }
+    free(hash);
+    free(apk_path);
+    p->steps_run++;
     return CCB_OK;
   }
   CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
@@ -2387,7 +2569,7 @@ static ccb_status ccb_step_verify(ccb_pipe *p) {
     return CCB_ERR_BUILD;
   }
   if (!p->opts->dry_run && hash != NULL) {
-    ccb_cache_set_step(p->cache, "verify", hash);
+    ccb_cache_set_step(p->cache, verify_key, hash);
     p->cache_dirty = 1;
   }
   free(hash);
@@ -2411,6 +2593,8 @@ static void ccb_pipe_free(ccb_pipe *p) {
   free(p->unsigned_apk);
   free(p->aligned_apk);
   free(p->linked_apk);
+  free(p->linked_aab);
+  free(p->unsigned_aab);
   free(p->classes_fp);
   free(p->tool_fingerprint);
   free(p->merged_manifest);
@@ -2464,7 +2648,10 @@ ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *resu
   if (rc == CCB_OK) {
     rc = ccb_step_package(&p);
   }
-  if (rc == CCB_OK) {
+  // Bundles are not zipaligned: alignment is an APK-install concern,
+  // and Play rejects aligned bundles. Sign consumes the unaligned
+  // bundle directly.
+  if (rc == CCB_OK && !p.opts->aab) {
     rc = ccb_step_align(&p);
   }
   if (rc == CCB_OK) {
@@ -2478,7 +2665,8 @@ ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *resu
     result->steps_run = p.steps_run;
     result->steps_skipped = p.steps_skipped;
     result->up_to_date = (p.steps_run == 0 && !opts->dry_run && !opts->explain) ? 1 : 0;
-    result->apk_path = ccb_path_join(p.out_dir, "app.apk");
+    result->aab = p.opts->aab;
+    result->apk_path = ccb_path_join(p.out_dir, p.opts->aab ? "app.aab" : "app.apk");
   } else {
     // Save progress: completed steps stay cached so a retry resumes.
     ccb_save_cache(&p);

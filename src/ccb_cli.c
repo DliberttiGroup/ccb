@@ -42,7 +42,8 @@ static const char *CCB_USAGE =
   "  setup [--yes] [--upgrade] [--print-env]  install missing SDK components\n"
   "  check [--preview-gate] [--no-preview-gate]\n"
   "                                            validate config + toolchain\n"
-  "  build [--preview-gate] [--no-preview-gate]  build the APK\n"
+  "  build [--preview-gate] [--no-preview-gate] [--aab]\n"
+  "                                            build the APK (or .aab with --aab)\n"
   "  clean                                     remove the build directory\n"
   "  doctor                                    report toolchain status\n"
   "  install                                   adb install the built APK\n"
@@ -62,6 +63,7 @@ typedef struct {
   int yes;
   int upgrade;
   int print_env;
+  int aab;
   const char *config_path;
   const char *variant;
   const char *command;
@@ -1880,6 +1882,7 @@ static int ccb_cmd_build(ccb_args *a) {
   opts.verbose = a->verbose;
   opts.dry_run = a->dry_run;
   opts.explain = a->explain;
+  opts.aab = a->aab;
   opts.variant_override = a->variant;
   opts.config_path = a->config_path;
   ccb_diag_list diags;
@@ -1916,7 +1919,9 @@ static int ccb_cmd_build(ccb_args *a) {
     if (a->json) {
       ccb_str s;
       ccb_str_init(&s);
-      ccb_str_append(&s, "{\"event\":\"build_done\",\"apk\":");
+      ccb_str_append(&s, "{\"event\":\"build_done\",\"");
+      ccb_str_append(&s, result.aab ? "aab" : "apk");
+      ccb_str_append(&s, "\":");
       ccb_json_escape(&s, result.apk_path);
       ccb_str_appendf(&s, ",\"steps_run\":%d,\"steps_skipped\":%d,\"up_to_date\":%s}",
         result.steps_run, result.steps_skipped, result.up_to_date ? "true" : "false");
@@ -3460,6 +3465,8 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
         a->upgrade = 1;
       } else if (strcmp(flag, "--print-env") == 0) {
         a->print_env = 1;
+      } else if (strcmp(flag, "--aab") == 0) {
+        a->aab = 1;
       } else if (strcmp(flag, "--config") == 0) {
         if (value == NULL) {
           if (i + 1 >= argc) {

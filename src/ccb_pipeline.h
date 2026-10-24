@@ -17,6 +17,7 @@ typedef struct {
   int dry_run;
   int verbose;
   int explain;
+  int aab;
   const char *variant_override;
   const char *config_path;
   const char *workdir;
@@ -26,6 +27,7 @@ typedef struct {
   int steps_run;
   int steps_skipped;
   int up_to_date;
+  int aab;
   char *apk_path;
 } ccb_build_result;
 
