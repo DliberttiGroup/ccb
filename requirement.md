@@ -395,6 +395,10 @@ not agent-oriented. CCB must satisfy all of the following:
 Targets are measured on a mid-range Linux laptop. If a target is missed,
 the miss is a bug, not a footnote.
 
+Measured 2026-10-24 on this VM: warm no-op rebuild ~0.2 s (probe cache;
+was ~3.4 s before caching), cold hello-world ~19 s (still above the
+<10 s target — JVM startup in kotlinc/d8/apksigner dominates).
+
 ## 9. Implementation requirements (C)
 
 - Language: C17, single codebase, no C++.

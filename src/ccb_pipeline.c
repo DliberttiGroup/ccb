@@ -327,6 +327,17 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
       ccb_pipe_diag(p, "CCB-E3016", "build", "cannot create build directories");
       return CCB_ERR_BUILD;
     }
+    // Probe cache: record the versions resolve just probed (or hit)
+    // so the next build skips the JVM probes. Resolve runs before
+    // this mkdir, so it only reads the cache; the write happens here.
+    if (p->sdk->java != NULL && p->sdk->java_major > 0) {
+      char ver[32];
+      snprintf(ver, sizeof(ver), "%d", p->sdk->java_major);
+      ccb_sdk_probe_cache_store(p->cfg->build_dir, "java", p->sdk->java, ver);
+    }
+    if (p->sdk->kotlinc != NULL && p->sdk->kotlin_version != NULL) {
+      ccb_sdk_probe_cache_store(p->cfg->build_dir, "kotlinc", p->sdk->kotlinc, p->sdk->kotlin_version);
+    }
   }
   // Tool fingerprint.
   {

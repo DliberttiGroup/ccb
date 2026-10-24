@@ -4,8 +4,10 @@
 #include "ccb_str.h"
 #include "ccb_fs.h"
 #include "ccb_proc.h"
+#include "ccb_json.h"
 #include "ccb_sdk.h"
 #include <ctype.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 char *ccb_sdk_find_on_path(const char *name) {
@@ -217,6 +219,247 @@ int ccb_sdk_tool_runnable(const char *path, const char *arg) {
   return ok;
 }
 
+// --- Tool probe cache -------------------------------------------------
+// File: <build_dir>/intermediates/tool-probes.json, version 1:
+// {"version":1,"probes":[{"tool":"kotlinc","path":"...",
+//   "mtime_sec":123,"mtime_nsec":456,"size":789,"version":"2.4.21"}]}
+// A lookup stats the tool and compares path + mtime + size; anything
+// else is a miss. Stores never create directories and never fail the
+// caller: when intermediates/ does not exist yet (resolve runs before
+// the pipeline creates it) the store silently skips, and the pipeline
+// records the probes after mkdir instead.
+
+static char *probe_cache_path(const char *build_dir) {
+  if (build_dir == NULL) {
+    return NULL;
+  }
+  char *inter = ccb_path_join(build_dir, "intermediates");
+  char *p = ccb_path_join(inter, "tool-probes.json");
+  free(inter);
+  return p;
+}
+
+static int probe_stat(const char *path, long long *sec, long *nsec, long long *size) {
+  struct stat st;
+  if (stat(path, &st) != 0) {
+    return 0;
+  }
+  *sec = (long long)st.st_mtime;
+#if defined(__APPLE__)
+  *nsec = (long)st.st_mtimespec.tv_nsec;
+#else
+  *nsec = (long)st.st_mtim.tv_nsec;
+#endif
+  *size = (long long)st.st_size;
+  return 1;
+}
+
+char *ccb_sdk_probe_cache_lookup(const char *build_dir, const char *tool, const char *path) {
+  if (build_dir == NULL || tool == NULL || path == NULL) {
+    return NULL;
+  }
+  long long sec = 0;
+  long nsec = 0;
+  long long size = 0;
+  if (!probe_stat(path, &sec, &nsec, &size)) {
+    return NULL;
+  }
+  char *cpath = probe_cache_path(build_dir);
+  char *text = NULL;
+  size_t len = 0;
+  if (ccb_read_file(cpath, &text, &len) != CCB_OK) {
+    free(cpath);
+    return NULL;
+  }
+  free(cpath);
+  char *err = NULL;
+  ccb_json_value *doc = ccb_json_parse(ccb_slice_from(text), &err);
+  free(err);
+  free(text);
+  if (doc == NULL || doc->type != CCB_JSON_OBJ) {
+    ccb_json_free(doc);
+    return NULL;
+  }
+  char *found = NULL;
+  const ccb_json_value *ver = ccb_json_obj_get(doc, "version");
+  const ccb_json_value *probes = ccb_json_obj_get(doc, "probes");
+  if (ver != NULL && ver->type == CCB_JSON_NUM && ver->num == 1 &&
+      probes != NULL && probes->type == CCB_JSON_ARR) {
+    for (size_t i = 0; i < probes->count; i++) {
+      const ccb_json_value *e = probes->items[i];
+      if (e == NULL || e->type != CCB_JSON_OBJ) {
+        continue;
+      }
+      const ccb_json_value *t = ccb_json_obj_get(e, "tool");
+      const ccb_json_value *p = ccb_json_obj_get(e, "path");
+      const ccb_json_value *ms = ccb_json_obj_get(e, "mtime_sec");
+      const ccb_json_value *mn = ccb_json_obj_get(e, "mtime_nsec");
+      const ccb_json_value *sz = ccb_json_obj_get(e, "size");
+      const ccb_json_value *v = ccb_json_obj_get(e, "version");
+      if (t == NULL || t->type != CCB_JSON_STR || strcmp(t->str, tool) != 0) {
+        continue;
+      }
+      if (p == NULL || p->type != CCB_JSON_STR || strcmp(p->str, path) != 0) {
+        continue;
+      }
+      if (ms == NULL || ms->type != CCB_JSON_NUM || (long long)ms->num != sec) {
+        continue;
+      }
+      if (mn == NULL || mn->type != CCB_JSON_NUM || (long long)mn->num != nsec) {
+        continue;
+      }
+      if (sz == NULL || sz->type != CCB_JSON_NUM || (long long)sz->num != size) {
+        continue;
+      }
+      if (v == NULL || v->type != CCB_JSON_STR || v->str[0] == '\0') {
+        continue;
+      }
+      // A java version is digits-only ("17"); anything else is a
+      // corrupt entry, not a version worth trusting.
+      if (strcmp(tool, "java") == 0) {
+        int digits = 1;
+        for (const char *c = v->str; *c != '\0'; c++) {
+          if (!isdigit((unsigned char)*c)) {
+            digits = 0;
+            break;
+          }
+        }
+        if (!digits) {
+          continue;
+        }
+      }
+      found = ccb_xstrdup(v->str);
+      break;
+    }
+  }
+  ccb_json_free(doc);
+  return found;
+}
+
+typedef struct {
+  char *tool;
+  char *path;
+  long long sec;
+  long nsec;
+  long long size;
+  char *version;
+} probe_entry;
+
+void ccb_sdk_probe_cache_store(const char *build_dir, const char *tool, const char *path, const char *version) {
+  if (build_dir == NULL || tool == NULL || path == NULL || version == NULL) {
+    return;
+  }
+  long long sec = 0;
+  long nsec = 0;
+  long long size = 0;
+  if (!probe_stat(path, &sec, &nsec, &size)) {
+    return;
+  }
+  // Load existing entries; a missing or corrupt file starts fresh.
+  probe_entry *entries = NULL;
+  size_t count = 0;
+  size_t cap = 0;
+  char *cpath = probe_cache_path(build_dir);
+  char *text = NULL;
+  size_t len = 0;
+  if (ccb_read_file(cpath, &text, &len) == CCB_OK) {
+    char *err = NULL;
+    ccb_json_value *doc = ccb_json_parse(ccb_slice_from(text), &err);
+    free(err);
+    free(text);
+    if (doc != NULL && doc->type == CCB_JSON_OBJ) {
+      const ccb_json_value *ver = ccb_json_obj_get(doc, "version");
+      const ccb_json_value *probes = ccb_json_obj_get(doc, "probes");
+      if (ver != NULL && ver->type == CCB_JSON_NUM && ver->num == 1 &&
+          probes != NULL && probes->type == CCB_JSON_ARR) {
+        for (size_t i = 0; i < probes->count; i++) {
+          const ccb_json_value *e = probes->items[i];
+          if (e == NULL || e->type != CCB_JSON_OBJ) {
+            continue;
+          }
+          const ccb_json_value *t = ccb_json_obj_get(e, "tool");
+          const ccb_json_value *p = ccb_json_obj_get(e, "path");
+          const ccb_json_value *ms = ccb_json_obj_get(e, "mtime_sec");
+          const ccb_json_value *mn = ccb_json_obj_get(e, "mtime_nsec");
+          const ccb_json_value *sz = ccb_json_obj_get(e, "size");
+          const ccb_json_value *v = ccb_json_obj_get(e, "version");
+          if (t == NULL || t->type != CCB_JSON_STR ||
+              p == NULL || p->type != CCB_JSON_STR ||
+              ms == NULL || ms->type != CCB_JSON_NUM ||
+              mn == NULL || mn->type != CCB_JSON_NUM ||
+              sz == NULL || sz->type != CCB_JSON_NUM ||
+              v == NULL || v->type != CCB_JSON_STR) {
+            continue;
+          }
+          if (count == cap) {
+            cap = cap == 0 ? 4 : cap * 2;
+            entries = ccb_xrealloc(entries, cap * sizeof(*entries));
+          }
+          entries[count].tool = ccb_xstrdup(t->str);
+          entries[count].path = ccb_xstrdup(p->str);
+          entries[count].sec = (long long)ms->num;
+          entries[count].nsec = (long)mn->num;
+          entries[count].size = (long long)sz->num;
+          entries[count].version = ccb_xstrdup(v->str);
+          count++;
+        }
+      }
+    }
+    ccb_json_free(doc);
+  }
+  // Upsert by (tool, path).
+  size_t at = count;
+  for (size_t i = 0; i < count; i++) {
+    if (strcmp(entries[i].tool, tool) == 0 && strcmp(entries[i].path, path) == 0) {
+      at = i;
+      break;
+    }
+  }
+  if (at == count) {
+    if (count == cap) {
+      cap = cap == 0 ? 4 : cap * 2;
+      entries = ccb_xrealloc(entries, cap * sizeof(*entries));
+    }
+    entries[count].tool = ccb_xstrdup(tool);
+    entries[count].path = ccb_xstrdup(path);
+    count++;
+    at = count - 1;
+  } else {
+    free(entries[at].version);
+  }
+  entries[at].sec = sec;
+  entries[at].nsec = nsec;
+  entries[at].size = size;
+  entries[at].version = ccb_xstrdup(version);
+  // Serialize. A failed write is silent: the next build just probes.
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "{\"version\":1,\"probes\":[");
+  for (size_t i = 0; i < count; i++) {
+    if (i != 0) {
+      ccb_str_append(&s, ",");
+    }
+    ccb_str_append(&s, "{\"tool\":");
+    ccb_json_escape(&s, entries[i].tool);
+    ccb_str_append(&s, ",\"path\":");
+    ccb_json_escape(&s, entries[i].path);
+    ccb_str_appendf(&s, ",\"mtime_sec\":%lld,\"mtime_nsec\":%ld,\"size\":%lld,\"version\":",
+      entries[i].sec, entries[i].nsec, entries[i].size);
+    ccb_json_escape(&s, entries[i].version);
+    ccb_str_append(&s, "}");
+  }
+  ccb_str_append(&s, "]}");
+  ccb_write_file(cpath, s.buf, s.len);
+  ccb_str_free(&s);
+  for (size_t i = 0; i < count; i++) {
+    free(entries[i].tool);
+    free(entries[i].path);
+    free(entries[i].version);
+  }
+  free(entries);
+  free(cpath);
+}
+
 ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *diags) {
   *out = NULL;
   size_t diag_before = diags->count;
@@ -372,16 +615,26 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
     if (s->java == NULL) {
       ccb_sdk_diag(diags, "CCB-E2005", "java not found: set JAVA_HOME or put java 17+ on PATH");
     } else {
-      char *argv[] = { s->java, "-version", NULL };
-      ccb_proc_result r;
-      if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
-        s->java_major = ccb_parse_java_major(r.err);
+      // A cached probe for the unchanged binary skips the JVM spawn.
+      char *cached = ccb_sdk_probe_cache_lookup(cfg->build_dir, "java", s->java);
+      if (cached != NULL) {
+        s->java_major = atoi(cached);
+        free(cached);
         if (s->java_major < 17) {
           ccb_sdk_diag(diags, "CCB-E2005", "java must be 17 or newer");
         }
-        ccb_proc_result_free(&r);
       } else {
-        ccb_sdk_diag(diags, "CCB-E2005", "could not run java -version");
+        char *argv[] = { s->java, "-version", NULL };
+        ccb_proc_result r;
+        if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
+          s->java_major = ccb_parse_java_major(r.err);
+          if (s->java_major < 17) {
+            ccb_sdk_diag(diags, "CCB-E2005", "java must be 17 or newer");
+          }
+          ccb_proc_result_free(&r);
+        } else {
+          ccb_sdk_diag(diags, "CCB-E2005", "could not run java -version");
+        }
       }
     }
     if (java_home != NULL) {
@@ -446,16 +699,25 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
     if (s->kotlinc == NULL) {
       ccb_sdk_diag(diags, "CCB-E2004", "kotlinc not found: set [sdk] kotlin_home in ccb.toml or KOTLIN_HOME");
     } else {
-      char *argv[] = { s->kotlinc, "-version", NULL };
-      ccb_proc_result r;
-      if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
-        s->kotlin_version = ccb_sdk_parse_kotlin_version(r.err);
-        if (s->kotlin_version == NULL || s->kotlin_version[0] != '2') {
+      // A cached probe for the unchanged binary skips the JVM spawn.
+      char *cached = ccb_sdk_probe_cache_lookup(cfg->build_dir, "kotlinc", s->kotlinc);
+      if (cached != NULL) {
+        s->kotlin_version = cached;
+        if (s->kotlin_version[0] != '2') {
           ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
         }
-        ccb_proc_result_free(&r);
       } else {
-        ccb_sdk_diag(diags, "CCB-E2004", "could not run kotlinc -version");
+        char *argv[] = { s->kotlinc, "-version", NULL };
+        ccb_proc_result r;
+        if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
+          s->kotlin_version = ccb_sdk_parse_kotlin_version(r.err);
+          if (s->kotlin_version == NULL || s->kotlin_version[0] != '2') {
+            ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
+          }
+          ccb_proc_result_free(&r);
+        } else {
+          ccb_sdk_diag(diags, "CCB-E2004", "could not run kotlinc -version");
+        }
       }
     }
   }

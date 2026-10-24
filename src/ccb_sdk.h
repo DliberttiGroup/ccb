@@ -50,6 +50,15 @@ char *ccb_sdk_find_on_path(const char *name);
 // Parse kotlinc -version stderr ("info: kotlinc-jvm 2.4.21 (JRE ...)").
 // Returns a malloc'd version string ("2.4.21") or NULL when unparseable.
 char *ccb_sdk_parse_kotlin_version(const char *text);
+// Tool probe cache (build/intermediates/tool-probes.json): caches the
+// parsed version of a tool binary so repeat builds skip re-spawning
+// slow probes (kotlinc -version costs seconds of JVM startup). Keyed
+// by tool path + mtime + size; any mismatch, missing entry, or corrupt
+// file is a miss and the caller re-probes. Best-effort and never
+// fatal: lookups only read, stores silently skip when the directory
+// does not exist yet. build_dir NULL means "no cache" for both.
+char *ccb_sdk_probe_cache_lookup(const char *build_dir, const char *tool, const char *path);
+void ccb_sdk_probe_cache_store(const char *build_dir, const char *tool, const char *path, const char *version);
 // Resolve a usable java exactly the way ccb_sdk_resolve does:
 // $JAVA_HOME/bin/java, else java on PATH, with major version >= 17.
 // On success *out holds a malloc'd path and *major_out the major

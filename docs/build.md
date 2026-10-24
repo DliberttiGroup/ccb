@@ -71,10 +71,19 @@ APK; the APK bytes themselves are what is compared.
   boot a JVM (several seconds on a slow VM). CCB's own work — hashing,
   decisions, packaging — is well under a second. The §8 targets
   (<10 s cold, <2 s incremental Kotlin) are therefore not met on this
-  VM: a cold hello-world build takes ~23 s, a no-op rebuild ~6 s (of
-  which ~5 s is the `kotlinc -version` probe in toolchain resolution),
-  and a one-file Kotlin rebuild ~17 s. A kotlinc/d8 daemon would fix
-  this; it is out of v1 scope.
+  VM: a cold hello-world build takes ~19 s and a one-file Kotlin
+  rebuild ~17 s. A kotlinc/d8 daemon would fix this; it is out of
+  v1 scope.
+- **Tool probe cache.** The `kotlinc -version` / `java -version`
+  probes in toolchain resolution used to dominate no-op rebuilds
+  (~3 s of a ~3.4 s no-op on this VM). They are now cached in
+  `build/intermediates/tool-probes.json`, keyed by tool path + mtime
+  + size: a repeat build with unchanged tools skips both probes
+  (warm no-op ~0.2 s on this VM). Any mismatch, missing entry, or
+  corrupt file re-probes; `ccb clean` removes the cache with the
+  rest of `build/`. The cache never changes build outputs: it only
+  feeds the tool fingerprint, and a cached version for an unchanged
+  binary is identical to a fresh probe.
 - **d8 input size.** `.class` files are passed as individual arguments;
   extremely large projects could approach the OS argument limit. d8
   argfiles are the future fix if that ever bites.
