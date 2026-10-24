@@ -1,0 +1,24 @@
+// ccb_log: quiet-by-default logging. In JSON mode, phase/warning/cache
+// events go to stdout as JSONL; in human mode they go to stderr as short
+// lines. Human prose never appears on stdout in JSON mode.
+#ifndef CCB_LOG_H
+#define CCB_LOG_H
+
+#include "ccb_common.h"
+
+typedef struct {
+  int json;
+  int verbose;
+  int explain;
+} ccb_log;
+
+void ccb_log_init(ccb_log *log, int json, int verbose);
+void ccb_log_phase_start(ccb_log *log, const char *phase);
+void ccb_log_phase_done(ccb_log *log, const char *phase, long duration_ms);
+void ccb_log_warning(ccb_log *log, const char *fmt, ...);
+void ccb_log_info(ccb_log *log, const char *fmt, ...);
+void ccb_log_cache(ccb_log *log, const char *stage, int hit, const char *reason);
+// Pass tool output through in verbose mode, delimited per stage.
+void ccb_log_tool_output(ccb_log *log, const char *phase, const char *out, const char *err);
+
+#endif
