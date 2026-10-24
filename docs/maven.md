@@ -80,11 +80,20 @@ Direct and transitive dependencies resolve from POM
   `<properties>` plus `project.groupId` / `project.artifactId` /
   `project.version`. A dependency version may also come from the
   same POM's `<dependencyManagement>` entry.
-- Parent POMs: when a POM omits `groupId` or `version`, the values
-  from its embedded `<parent>` block are used. The parent POM itself
-  is never fetched: a POM whose coordinates depend on a fetched
-  parent (or on `dependencyManagement` from a parent) fails with
-  `CCB-E3019`.
+- Parent POMs: when a POM has a `<parent>` block, the parent POM is
+  fetched from the same repositories (same cache and checksum rules
+  as any other POM: `ccb setup` prefetches it, and a cache-only
+  build fails with `CCB-E3021` when it is missing) and applied to
+  the child, recursively up the chain. The parent's `<properties>`
+  and `<dependencyManagement>` merge into the child's: the child's
+  own entries win, and the nearest ancestor wins among parents;
+  `${...}` expansion uses the merged set. A POM that omits
+  `groupId` or `version` still inherits those values from its
+  `<parent>` block. Chains are capped at 10 ancestors; a longer
+  chain, or a cycle (a parent coordinate repeating an earlier
+  coordinate in the chain), fails with `CCB-E3024` naming the chain.
+  Not inherited: the parent's own `<dependencies>` list, profiles,
+  and parent-declared exclusions (ignored).
 - Exclusions (`[deps] maven_exclude`) are checked before
   nearest-wins: an excluded artifact never enters the seen set, so
   an excluded version can never win, and another version of the same
@@ -181,13 +190,20 @@ project root after a successful prefetch, and `ccb check` and
   beyond nearest-wins.
 - Google Maven + opt-in Maven Central only; no authenticated or
   private repositories (no credential handling exists).
-- Parent POMs are not fetched.
+- Parent POMs contribute properties and dependencyManagement only:
+  the parent's own `<dependencies>`, profiles, and parent-declared
+  exclusions are not inherited.
 - No signature (PGP) verification: checksums only.
 
 ## Troubleshooting
 
 - `CCB-E3021 ... run `ccb setup``: the artifact is not in the local
-  cache yet. Run `ccb setup` in the project, then build again.
+  cache yet. Run `ccb setup` in the project, then build again. The
+  same applies to a parent POM evicted from the cache: setup
+  re-prefetches the whole chain.
+- `CCB-E3024 ... parent POM cycle / chain exceeds 10 ancestors`: a
+  parent chain loops back on itself, or is deeper than 10 ancestors.
+  Fix the chain in the POMs.
 - `CCB-E3020 ... checksum mismatch`: the downloaded file does not
   match the repo's published checksum. Delete the cache entry (or
   the whole `<cache>/<group-path>/<artifact>/<version>/` dir) and

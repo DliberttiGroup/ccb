@@ -1355,6 +1355,190 @@ static int mv_lock_enforce(ccb_arena *a, const char *lock_path,
   return 0;
 }
 
+// ---------- parent POMs ----------
+//
+// A POM's <parent> block names a POM that is fetched from the same
+// repositories (same cache and checksum rules as any other POM) and
+// applied to the child: the parent's <properties> and
+// <dependencyManagement> merge into the child's, with the child's own
+// entries winning and the nearest ancestor winning among parents.
+// The merged set is what ${...} expansion sees, so a managed version
+// like ${lib.version} resolves from whichever ancestor defined the
+// property. The parent's own <dependencies> are NOT inherited, nor
+// are profiles or parent-declared exclusions; group/version
+// inheritance from the <parent> block keeps working as before.
+//
+// Chain rules: at most MV_PARENT_MAX_DEPTH ancestors are followed;
+// a longer chain, or a cycle (a parent coordinate repeating any
+// earlier coordinate in the chain), fails with CCB-E3024 naming the
+// chain. A parent POM missing from the cache in cache-only mode
+// fails with CCB-E3021 like any other miss (through mv_fetch_fail).
+
+#define MV_PARENT_MAX_DEPTH 10
+
+// Append a parent's properties into the child's set, skipping keys
+// already present: the child's own entries are in place first, and
+// nearer ancestors are merged before farther ones, so first
+// occurrence wins and precedence falls out of insertion order.
+static void mv_merge_parent_props(ccb_arena *a, mv_pom *pom, mv_pom *parent) {
+  for (size_t i = 0; i < parent->props_count; i++) {
+    int seen = 0;
+    for (size_t j = 0; j < pom->props_count; j++) {
+      if (strcmp(pom->props[j].key, parent->props[i].key) == 0) {
+        seen = 1;
+        break;
+      }
+    }
+    if (!seen) {
+      MV_GROW(a, pom->props, pom->props_count, pom->props_cap, mv_prop);
+      pom->props[pom->props_count++] = parent->props[i];
+    }
+  }
+}
+
+// Same rule for dependencyManagement, keyed on raw group:artifact.
+// Even when two entries' raw keys differ but resolve equal (a
+// property reference in groupId/artifactId), lookup order keeps
+// precedence: the child's entries come first, then nearer ancestors.
+static void mv_merge_parent_mgmt(ccb_arena *a, mv_pom *pom, mv_pom *parent) {
+  for (size_t i = 0; i < parent->mgmt_count; i++) {
+    mv_dep *mg = &parent->mgmt[i];
+    if (mg->group == NULL || mg->artifact == NULL) {
+      continue;
+    }
+    int seen = 0;
+    for (size_t j = 0; j < pom->mgmt_count; j++) {
+      if (pom->mgmt[j].group != NULL && pom->mgmt[j].artifact != NULL &&
+          strcmp(pom->mgmt[j].group, mg->group) == 0 &&
+          strcmp(pom->mgmt[j].artifact, mg->artifact) == 0) {
+        seen = 1;
+        break;
+      }
+    }
+    if (!seen) {
+      MV_GROW(a, pom->mgmt, pom->mgmt_count, pom->mgmt_cap, mv_dep);
+      pom->mgmt[pom->mgmt_count++] = *mg;
+    }
+  }
+}
+
+// Join the chain coordinates with " -> " for cycle/depth diagnostics.
+static char *mv_chain_str(ccb_arena *a, char **chain, size_t count,
+    const char *extra) {
+  ccb_str s;
+  ccb_str_init(&s);
+  for (size_t i = 0; i < count; i++) {
+    if (i > 0) {
+      ccb_str_append(&s, " -> ");
+    }
+    ccb_str_append(&s, chain[i]);
+  }
+  if (extra != NULL) {
+    ccb_str_append(&s, " -> ");
+    ccb_str_append(&s, extra);
+  }
+  char *out = ccb_arena_strdup(a, s.buf);
+  ccb_str_free(&s);
+  return out;
+}
+
+// Fetch the parent chain of `pom` and merge each ancestor's
+// properties and dependencyManagement into it. child_coord names the
+// artifact being resolved (for diagnostics). Returns 0 on success
+// (pom now carries the merged sets), -1 with a diagnostic pushed.
+static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
+    size_t repos_count, mv_pom *pom, const char *child_coord, int prefetch,
+    int readonly, ccb_diag_list *diags) {
+  char **chain = NULL;
+  size_t chain_count = 0;
+  size_t chain_cap = 0;
+  MV_GROW(a, chain, chain_count, chain_cap, char *);
+  chain[chain_count++] = ccb_arena_strdup(a, child_coord);
+  mv_pom *cur = pom;
+  int depth = 0;
+  while (cur->parent_group != NULL || cur->parent_artifact != NULL ||
+      cur->parent_version != NULL) {
+    if (cur->parent_group == NULL || cur->parent_artifact == NULL ||
+        cur->parent_version == NULL) {
+      mv_diag(diags, "CCB-E3019", child_coord,
+        "incomplete <parent> block: groupId, artifactId, and version are all required");
+      return -1;
+    }
+    if (depth >= MV_PARENT_MAX_DEPTH) {
+      ccb_str m;
+      ccb_str_init(&m);
+      ccb_str_appendf(&m, "parent POM chain exceeds %d ancestors: ",
+        MV_PARENT_MAX_DEPTH);
+      ccb_str_append(&m, mv_chain_str(a, chain, chain_count, NULL));
+      mv_diag(diags, "CCB-E3024", child_coord, m.buf);
+      ccb_str_free(&m);
+      return -1;
+    }
+    // Substitute the parent coordinates against the merged-so-far
+    // set (child properties first). The project.* fallbacks use the
+    // child's raw coordinates: the parent's own group/version cannot
+    // be known before it is fetched.
+    const char *raw_group = pom->group != NULL ? pom->group : pom->parent_group;
+    const char *raw_version = pom->version != NULL ? pom->version :
+      pom->parent_version;
+    int bad_g = 0;
+    int bad_a = 0;
+    int bad_v = 0;
+    char *pg = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+      cur->parent_group, &bad_g);
+    char *pa = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+      cur->parent_artifact, &bad_a);
+    char *pv = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+      cur->parent_version, &bad_v);
+    if (bad_g || bad_a || bad_v || pg == NULL || pa == NULL || pv == NULL ||
+        !mv_part_ok(pg, strlen(pg)) || !mv_part_ok(pa, strlen(pa)) ||
+        !mv_part_ok(pv, strlen(pv))) {
+      mv_diag(diags, "CCB-E3019", child_coord,
+        "parent coordinates cannot be resolved");
+      return -1;
+    }
+    char *pcoord = mv_coord_str(a, pg, pa, pv);
+    for (size_t i = 0; i < chain_count; i++) {
+      if (strcmp(chain[i], pcoord) == 0) {
+        ccb_str m;
+        ccb_str_init(&m);
+        ccb_str_append(&m, "parent POM cycle: ");
+        ccb_str_append(&m, mv_chain_str(a, chain, chain_count, pcoord));
+        mv_diag(diags, "CCB-E3024", child_coord, m.buf);
+        ccb_str_free(&m);
+        return -1;
+      }
+    }
+    char *parent_pom_path = NULL;
+    int rc = mv_fetch(a, cache, repos, repos_count, pg, pa, pv, "pom",
+      prefetch, readonly, &parent_pom_path);
+    if (rc != 0) {
+      mv_fetch_fail(diags, rc, pcoord, "parent POM");
+      return -1;
+    }
+    char *text = NULL;
+    size_t len = 0;
+    if (ccb_read_file(parent_pom_path, &text, &len) != CCB_OK) {
+      mv_diag(diags, "CCB-E3019", pcoord, "cached parent POM cannot be read");
+      return -1;
+    }
+    mv_pom *pp = ccb_arena_alloc(a, sizeof(*pp));
+    if (mv_parse_pom(a, text, len, pp) != 0) {
+      free(text);
+      mv_diag(diags, "CCB-E3019", pcoord, "malformed parent POM");
+      return -1;
+    }
+    free(text);
+    mv_merge_parent_props(a, pom, pp);
+    mv_merge_parent_mgmt(a, pom, pp);
+    MV_GROW(a, chain, chain_count, chain_cap, char *);
+    chain[chain_count++] = pcoord;
+    depth++;
+    cur = pp;
+  }
+  return 0;
+}
+
 ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
     int readonly, ccb_maven_result *out, ccb_diag_list *diags) {
   memset(out, 0, sizeof(*out));
@@ -1453,8 +1637,14 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
       goto fail;
     }
     free(pom_text);
+    // Fetch the parent chain and merge its properties and
+    // dependencyManagement into this POM (child entries win).
+    if (mv_merge_parents(arena, cache, repos, repos_count, &pom, coord,
+        prefetch, readonly, diags) != 0) {
+      goto fail;
+    }
     // Effective coordinates: own values, else the embedded parent
-    // block (the parent POM itself is never fetched in v1).
+    // block (whose POM was fetched and merged above).
     int bad = 0;
     const char *raw_group = pom.group != NULL ? pom.group : pom.parent_group;
     const char *raw_version = pom.version != NULL ? pom.version : pom.parent_version;

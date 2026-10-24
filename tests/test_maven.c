@@ -341,6 +341,13 @@ static void build_repo(void) {
     "<artifactId>standalone</artifactId><version>${project.version}</version>"
     "</dependency></dependencies></project>",
     CHK_NONE);
+  // The child's parent POM is fetched during resolution. It carries
+  // no properties or management, so inheritance behaves as before.
+  put_artifact("com.example", "parent", "9.9", "pom",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>parent</artifactId>"
+    "<version>9.9</version><packaging>pom</packaging></project>",
+    CHK_NONE);
   // Packaging pom: no artifact of its own, but its dependency resolves.
   put_artifact("com.example", "bom", "1.0", "pom",
     "<project><modelVersion>4.0.0</modelVersion>"
@@ -545,6 +552,341 @@ static void test_cache_only(void) {
     unsetenv("CCB_MAVEN_CACHE");
   }
   free(cache2);
+}
+
+// ---------- parent POMs ----------
+
+#define REPO_P BASE "/repo_parents"
+#define CACHE_P BASE "/cache_parents"
+
+// put_artifact rooted at REPO_P (same layout, no published checksums:
+// the parents tests never need them).
+static void put_p(const char *group, const char *artifact,
+    const char *version, const char *ext, const char *pom) {
+  ccb_str dir;
+  ccb_str_init(&dir);
+  ccb_str_append(&dir, REPO_P);
+  ccb_str_append_c(&dir, '/');
+  for (const char *p = group; *p != '\0'; p++) {
+    ccb_str_append_c(&dir, *p == '.' ? '/' : *p);
+  }
+  ccb_str_append_c(&dir, '/');
+  ccb_str_append(&dir, artifact);
+  ccb_str_append_c(&dir, '/');
+  ccb_str_append(&dir, version);
+  char *d = ccb_str_steal(&dir);
+  CHECK(ccb_mkdir_p(d) == CCB_OK);
+  ccb_str pom_path;
+  ccb_str_init(&pom_path);
+  ccb_str_append(&pom_path, d);
+  ccb_str_append_c(&pom_path, '/');
+  ccb_str_append(&pom_path, artifact);
+  ccb_str_append_c(&pom_path, '-');
+  ccb_str_append(&pom_path, version);
+  ccb_str_append(&pom_path, ".pom");
+  char *pp = ccb_str_steal(&pom_path);
+  write_text(pp, pom);
+  free(pp);
+  if (strcmp(ext, "pom") != 0) {
+    ccb_str art;
+    ccb_str_init(&art);
+    ccb_str_append(&art, d);
+    ccb_str_append_c(&art, '/');
+    ccb_str_append(&art, artifact);
+    ccb_str_append_c(&art, '-');
+    ccb_str_append(&art, version);
+    ccb_str_append_c(&art, '.');
+    ccb_str_append(&art, ext);
+    char *ap = ccb_str_steal(&art);
+    write_text(ap, "fake-artifact-bytes");
+    free(ap);
+  }
+  free(d);
+}
+
+// Build a POM document from optional sections (NULL = absent) and
+// publish it into the parents repo. The caller frees nothing: the
+// built document is written and freed here.
+static void put_built(const char *group, const char *artifact,
+    const char *version, const char *packaging, const char *parent_xml,
+    const char *props_xml, const char *mgmt_xml, const char *deps_xml) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "<project><modelVersion>4.0.0</modelVersion>");
+  if (parent_xml != NULL) {
+    ccb_str_append(&s, parent_xml);
+  }
+  ccb_str_append(&s, "<groupId>");
+  ccb_str_append(&s, group);
+  ccb_str_append(&s, "</groupId><artifactId>");
+  ccb_str_append(&s, artifact);
+  ccb_str_append(&s, "</artifactId><version>");
+  ccb_str_append(&s, version);
+  ccb_str_append(&s, "</version><packaging>");
+  ccb_str_append(&s, packaging);
+  ccb_str_append(&s, "</packaging>");
+  if (props_xml != NULL) {
+    ccb_str_append(&s, "<properties>");
+    ccb_str_append(&s, props_xml);
+    ccb_str_append(&s, "</properties>");
+  }
+  if (mgmt_xml != NULL) {
+    ccb_str_append(&s, "<dependencyManagement><dependencies>");
+    ccb_str_append(&s, mgmt_xml);
+    ccb_str_append(&s, "</dependencies></dependencyManagement>");
+  }
+  if (deps_xml != NULL) {
+    ccb_str_append(&s, "<dependencies>");
+    ccb_str_append(&s, deps_xml);
+    ccb_str_append(&s, "</dependencies>");
+  }
+  ccb_str_append(&s, "</project>");
+  char *pom = ccb_str_steal(&s);
+  put_p(group, artifact, version, packaging, pom);
+  free(pom);
+}
+
+static char *parent_xml_p(const char *group, const char *artifact,
+    const char *version) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "<parent><groupId>");
+  ccb_str_append(&s, group);
+  ccb_str_append(&s, "</groupId><artifactId>");
+  ccb_str_append(&s, artifact);
+  ccb_str_append(&s, "</artifactId><version>");
+  ccb_str_append(&s, version);
+  ccb_str_append(&s, "</version></parent>");
+  return ccb_str_steal(&s);
+}
+
+static int diag_msg_has(ccb_diag_list *diags, const char *substr) {
+  for (size_t i = 0; i < diags->count; i++) {
+    if (diags->items[i].message != NULL &&
+        strstr(diags->items[i].message, substr) != NULL) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void build_repo_parents(void) {
+  // A: two-level chain, grandparent properties + management.
+  put_built("com.example", "gp", "1.0", "pom", NULL,
+    "<libver>2.0</libver>",
+    "<dependency><groupId>com.example</groupId><artifactId>standalone</artifactId>"
+    "<version>${libver}</version></dependency>",
+    NULL);
+  {
+    char *par = parent_xml_p("com.example", "gp", "1.0");
+    put_built("com.example", "mid", "1.0", "pom", par, NULL, NULL, NULL);
+    free(par);
+  }
+  {
+    char *par = parent_xml_p("com.example", "mid", "1.0");
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "standalone", NULL);
+    put_built("com.example", "app", "1.0", "jar", par, NULL, NULL, deps.buf);
+    ccb_str_free(&deps);
+    free(par);
+  }
+  // B: child property overrides the parent's property.
+  put_built("com.example", "parb", "1.0", "pom", NULL,
+    "<v>1.0</v>",
+    "<dependency><groupId>com.example</groupId><artifactId>standalone</artifactId>"
+    "<version>${v}</version></dependency>",
+    NULL);
+  {
+    char *par = parent_xml_p("com.example", "parb", "1.0");
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "standalone", NULL);
+    put_built("com.example", "appb", "1.0", "jar", par, "<v>9.9</v>", NULL,
+      deps.buf);
+    ccb_str_free(&deps);
+    free(par);
+  }
+  // C: child dependencyManagement overrides the parent's.
+  put_built("com.example", "parc", "1.0", "pom", NULL, NULL,
+    "<dependency><groupId>com.example</groupId><artifactId>standalone</artifactId>"
+    "<version>1.0</version></dependency>",
+    NULL);
+  {
+    char *par = parent_xml_p("com.example", "parc", "1.0");
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "standalone", NULL);
+    put_built("com.example", "appc", "1.0", "jar", par, NULL,
+      "<dependency><groupId>com.example</groupId><artifactId>standalone</artifactId>"
+      "<version>2.0</version></dependency>",
+      deps.buf);
+    ccb_str_free(&deps);
+    free(par);
+  }
+  // D: parent cycle.
+  {
+    char *par = parent_xml_p("com.example", "cyb", "1.0");
+    put_built("com.example", "cya", "1.0", "pom", par, NULL, NULL, NULL);
+    free(par);
+  }
+  {
+    char *par = parent_xml_p("com.example", "cya", "1.0");
+    put_built("com.example", "cyb", "1.0", "pom", par, NULL, NULL, NULL);
+    free(par);
+  }
+  // E: missing parent (prefetch) and cached-parent eviction
+  // (cache-only). pare exists in the repo; missing does not.
+  {
+    char *par = parent_xml_p("com.example", "pare", "1.0");
+    put_built("com.example", "appe", "1.0", "jar", par, NULL, NULL, NULL);
+    free(par);
+  }
+  put_built("com.example", "pare", "1.0", "pom", NULL, NULL, NULL, NULL);
+  {
+    char *par = parent_xml_p("com.example", "missing", "1.0");
+    put_built("com.example", "appf", "1.0", "jar", par, NULL, NULL, NULL);
+    free(par);
+  }
+  // F: depth chains, generated: d0 -> ... -> d11 (11 parents, over
+  // the cap) and e0 -> ... -> e10 (exactly 10 parents, allowed).
+  for (int i = 0; i <= 11; i++) {
+    char art[16];
+    snprintf(art, sizeof(art), "d%d", i);
+    char *par = NULL;
+    if (i < 11) {
+      char next[16];
+      snprintf(next, sizeof(next), "d%d", i + 1);
+      par = parent_xml_p("com.example", next, "1.0");
+    }
+    put_built("com.example", art, "1.0", "pom", par, NULL, NULL, NULL);
+    free(par);
+  }
+  for (int i = 0; i <= 10; i++) {
+    char art[16];
+    snprintf(art, sizeof(art), "e%d", i);
+    char *par = NULL;
+    if (i < 10) {
+      char next[16];
+      snprintf(next, sizeof(next), "e%d", i + 1);
+      par = parent_xml_p("com.example", next, "1.0");
+    }
+    put_built("com.example", art, "1.0", "pom", par, NULL, NULL, NULL);
+    free(par);
+  }
+  // Standalone versions the scenarios resolve to.
+  put_built("com.example", "standalone", "1.0", "jar", NULL, NULL, NULL,
+    NULL);
+  put_built("com.example", "standalone", "2.0", "jar", NULL, NULL, NULL,
+    NULL);
+  put_built("com.example", "standalone", "9.9", "jar", NULL, NULL, NULL,
+    NULL);
+}
+
+static void test_parents(void) {
+  const char *old_repos = getenv("CCB_MAVEN_REPOS");
+  const char *old_cache = getenv("CCB_MAVEN_CACHE");
+  char *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
+  char *saved_cache = old_cache != NULL ? ccb_xstrdup(old_cache) : NULL;
+  {
+    ccb_str r;
+    ccb_str_init(&r);
+    ccb_str_append(&r, "file://");
+    ccb_str_append(&r, REPO_P);
+    char *repos_env = ccb_str_steal(&r);
+    setenv("CCB_MAVEN_REPOS", repos_env, 1);
+    free(repos_env);
+    setenv("CCB_MAVEN_CACHE", CACHE_P, 1);
+  }
+  build_repo_parents();
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  // A: grandparent management + property through two levels.
+  ccb_diag_list_init(&diags);
+  const char *a[] = { "com.example:app:1.0" };
+  CHECK(resolve_here(a, 1, 1, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "standalone-2.0.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  // B: child property wins over the parent's.
+  ccb_diag_list_init(&diags);
+  const char *b[] = { "com.example:appb:1.0" };
+  CHECK(resolve_here(b, 1, 1, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "standalone-9.9.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  // C: child management wins over the parent's.
+  ccb_diag_list_init(&diags);
+  const char *c[] = { "com.example:appc:1.0" };
+  CHECK(resolve_here(c, 1, 1, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "standalone-2.0.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  // D: parent cycle names the chain.
+  ccb_diag_list_init(&diags);
+  const char *d[] = { "com.example:cya:1.0" };
+  CHECK(resolve_here(d, 1, 1, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3024"));
+  CHECK(diag_msg_has(&diags, "com.example:cya:1.0"));
+  CHECK(diag_msg_has(&diags, "com.example:cyb:1.0"));
+  ccb_diag_list_free(&diags);
+  // E1: prefetch with a missing parent POM fails unresolvable.
+  ccb_diag_list_init(&diags);
+  const char *e1[] = { "com.example:appf:1.0" };
+  CHECK(resolve_here(e1, 1, 1, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3019"));
+  ccb_diag_list_free(&diags);
+  // E2: cache-only with the parent POM evicted from the cache fails
+  // E3021, naming the parent.
+  ccb_diag_list_init(&diags);
+  const char *e2[] = { "com.example:appe:1.0" };
+  CHECK(resolve_here(e2, 1, 1, &out, &diags) == CCB_OK);
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  {
+    ccb_str p;
+    ccb_str_init(&p);
+    ccb_str_append(&p, CACHE_P);
+    ccb_str_append(&p, "/com/example/pare/1.0/pare-1.0.pom");
+    char *pom_path = ccb_str_steal(&p);
+    CHECK(remove(pom_path) == 0);
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, pom_path);
+    ccb_str_append(&s, ".ccb-sha256");
+    char *side = ccb_str_steal(&s);
+    remove(side);
+    free(side);
+    free(pom_path);
+  }
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_here(e2, 1, 0, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3021"));
+  CHECK(diag_msg_has(&diags, "com.example:pare:1.0"));
+  ccb_diag_list_free(&diags);
+  // F: 11 parents exceed the cap; exactly 10 resolve.
+  ccb_diag_list_init(&diags);
+  const char *f[] = { "com.example:d0:1.0" };
+  CHECK(resolve_here(f, 1, 1, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3024"));
+  ccb_diag_list_free(&diags);
+  ccb_diag_list_init(&diags);
+  const char *g[] = { "com.example:e0:1.0" };
+  CHECK(resolve_here(g, 1, 1, &out, &diags) == CCB_OK);
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  if (saved_repos != NULL) {
+    setenv("CCB_MAVEN_REPOS", saved_repos, 1);
+    free(saved_repos);
+  } else {
+    unsetenv("CCB_MAVEN_REPOS");
+  }
+  if (saved_cache != NULL) {
+    setenv("CCB_MAVEN_CACHE", saved_cache, 1);
+    free(saved_cache);
+  } else {
+    unsetenv("CCB_MAVEN_CACHE");
+  }
 }
 
 // ---------- config-load validation ----------
@@ -1106,6 +1448,9 @@ static void test_lockfile(void) {
 #define CACHE_E2E BASE "/cache_e2e"
 #define PROJ_E2E BASE "/proj_e2e"
 #define APK_E2E PROJ_E2E "/build/outputs/debug/app.apk"
+#define CACHE_E2E_P BASE "/cache_e2e_parents"
+#define PROJ_E2E_P BASE "/proj_e2e_parents"
+#define APK_E2E_P PROJ_E2E_P "/build/outputs/debug/app.apk"
 
 static char *find_binary(int argc, char **argv) {
   if (argc > 1 && argv[1] != NULL && access(argv[1], X_OK) == 0) {
@@ -1252,6 +1597,256 @@ static void write_e2e_project(void) {
     "  android:layout_width=\"match_parent\"\n"
     "  android:layout_height=\"match_parent\">\n"
     "</LinearLayout>\n");
+}
+
+static void build_e2e_repo_parents(void) {
+  // Parent POM: manages lib at 1.0 for its children.
+  ccb_str pd;
+  ccb_str_init(&pd);
+  ccb_str_append(&pd, REPO_E2E);
+  ccb_str_append(&pd, "/com/example/par/1.0");
+  char *pardir = ccb_str_steal(&pd);
+  CHECK(ccb_mkdir_p(pardir) == CCB_OK);
+  ccb_str pp;
+  ccb_str_init(&pp);
+  ccb_str_append(&pp, pardir);
+  ccb_str_append(&pp, "/par-1.0.pom");
+  char *par_pom = ccb_str_steal(&pp);
+  write_text(par_pom,
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>par</artifactId>"
+    "<version>1.0</version><packaging>pom</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>lib</artifactId>"
+    "<version>1.0</version></dependency></dependencies>"
+    "</dependencyManagement></project>");
+  free(par_pom);
+  free(pardir);
+  // Res-only AAR whose dependency version comes from the parent.
+  // Its groupId is inherited from the parent block, too.
+  ccb_str d;
+  ccb_str_init(&d);
+  ccb_str_append(&d, REPO_E2E);
+  ccb_str_append(&d, "/com/example/plib/1.0");
+  char *libdir = ccb_str_steal(&d);
+  CHECK(ccb_mkdir_p(libdir) == CCB_OK);
+  ccb_str aar;
+  ccb_str_init(&aar);
+  ccb_str_append(&aar, libdir);
+  ccb_str_append(&aar, "/plib-1.0.aar");
+  char *aar_path = ccb_str_steal(&aar);
+  ccb_zip_writer w;
+  CHECK(ccb_zip_writer_init(&w, aar_path) == CCB_OK);
+  const char *plib_manifest =
+    "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
+    "    package=\"com.example.plib\">\n"
+    "    <application />\n"
+    "</manifest>\n";
+  const char *plib_strings =
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<resources>\n"
+    "  <string name=\"plib_hello\">Hello from plib!</string>\n"
+    "</resources>\n";
+  CHECK(ccb_zip_writer_add_data(&w, "AndroidManifest.xml", plib_manifest,
+    strlen(plib_manifest)) == CCB_OK);
+  CHECK(ccb_zip_writer_add_data(&w, "res/values/strings.xml", plib_strings,
+    strlen(plib_strings)) == CCB_OK);
+  CHECK(ccb_zip_writer_finish(&w) == CCB_OK);
+  ccb_str pom;
+  ccb_str_init(&pom);
+  ccb_str_append(&pom, libdir);
+  ccb_str_append(&pom, "/plib-1.0.pom");
+  char *pom_path = ccb_str_steal(&pom);
+  write_text(pom_path,
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<parent><groupId>com.example</groupId><artifactId>par</artifactId>"
+    "<version>1.0</version></parent>"
+    "<artifactId>plib</artifactId>"
+    "<version>1.0</version><packaging>aar</packaging>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>lib</artifactId></dependency></dependencies></project>");
+  free(pom_path);
+  free(aar_path);
+  free(libdir);
+}
+
+static void write_e2e_project_parents(void) {
+  mkdir_or_fail(PROJ_E2E_P "/src/main/kotlin/com/example/hello");
+  mkdir_or_fail(PROJ_E2E_P "/src/main/res/values");
+  mkdir_or_fail(PROJ_E2E_P "/src/main/res/layout");
+  write_text(PROJ_E2E_P "/ccb.toml",
+    "ccb_version = 1\n"
+    "\n"
+    "[project]\n"
+    "name = \"hello\"\n"
+    "package = \"com.example.hello\"\n"
+    "version = \"1.0\"\n"
+    "version_code = 1\n"
+    "min_sdk = 26\n"
+    "target_sdk = 35\n"
+    "compile_sdk = 35\n"
+    "\n"
+    "[paths]\n"
+    "manifest = \"src/main/AndroidManifest.xml\"\n"
+    "res = \"src/main/res\"\n"
+    "kotlin = \"src/main/kotlin\"\n"
+    "\n"
+    "[deps]\n"
+    "maven = [\"com.example:plib:1.0\"]\n");
+  write_text(PROJ_E2E_P "/src/main/AndroidManifest.xml",
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
+    "  package=\"com.example.hello\">\n"
+    "  <application android:label=\"@string/app_name\" android:theme=\"@style/AppTheme\">\n"
+    "    <activity android:name=\".MainActivity\" android:exported=\"true\">\n"
+    "      <intent-filter>\n"
+    "        <action android:name=\"android.intent.action.MAIN\" />\n"
+    "        <category android:name=\"android.intent.category.LAUNCHER\" />\n"
+    "      </intent-filter>\n"
+    "    </activity>\n"
+    "  </application>\n"
+    "</manifest>\n");
+  write_text(PROJ_E2E_P "/src/main/kotlin/com/example/hello/MainActivity.kt",
+    "package com.example.hello\n"
+    "\n"
+    "import android.app.Activity\n"
+    "import android.os.Bundle\n"
+    "\n"
+    "class MainActivity : Activity() {\n"
+    "  override fun onCreate(savedInstanceState: Bundle?) {\n"
+    "    super.onCreate(savedInstanceState)\n"
+    "    setContentView(R.layout.activity_main)\n"
+    "  }\n"
+    "}\n");
+  write_text(PROJ_E2E_P "/src/main/res/values/strings.xml",
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<resources>\n"
+    "  <string name=\"app_name\">hello</string>\n"
+    "</resources>\n");
+  write_text(PROJ_E2E_P "/src/main/res/values/themes.xml",
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<resources>\n"
+    "  <style name=\"AppTheme\" parent=\"android:Theme.Material\" />\n"
+    "</resources>\n");
+  write_text(PROJ_E2E_P "/src/main/res/layout/activity_main.xml",
+    "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
+    "  android:layout_width=\"match_parent\"\n"
+    "  android:layout_height=\"match_parent\">\n"
+    "</LinearLayout>\n");
+}
+
+static void test_e2e_parents(int argc, char **argv) {
+  char *bin = find_binary(argc, argv);
+  char *sdk_home = tool_home("ANDROID_HOME", "android-sdk");
+  char *java_home = tool_home("JAVA_HOME", "jdk17");
+  char *kotlin_home = tool_home("KOTLIN_HOME", "kotlin-2.4.21");
+  char *aapt2 = sdk_home == NULL ? NULL
+    : ccb_path_join3(sdk_home, "build-tools/35.0.0", "aapt2");
+  char *jarsigner = java_home == NULL ? NULL : ccb_path_join(java_home, "bin/jarsigner");
+  if (bin == NULL || aapt2 == NULL || access(aapt2, X_OK) != 0 ||
+      jarsigner == NULL || access(jarsigner, X_OK) != 0) {
+    fprintf(stderr, "note: no runnable SDK toolchain, skipping parents e2e build checks\n");
+    free(bin);
+    free(sdk_home);
+    free(java_home);
+    free(kotlin_home);
+    free(aapt2);
+    free(jarsigner);
+    return;
+  }
+  build_e2e_repo();
+  build_e2e_repo_parents();
+  write_e2e_project_parents();
+  // Prefetch in-process (setup itself cannot run on this VM: its
+  // sdkmanager step has no direct repository access).
+  const char *old_repos = getenv("CCB_MAVEN_REPOS");
+  const char *old_cache = getenv("CCB_MAVEN_CACHE");
+  char *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
+  char *saved_cache = old_cache != NULL ? ccb_xstrdup(old_cache) : NULL;
+  {
+    ccb_str r;
+    ccb_str_init(&r);
+    ccb_str_append(&r, "file://");
+    ccb_str_append(&r, REPO_E2E);
+    char *repos_env = ccb_str_steal(&r);
+    setenv("CCB_MAVEN_REPOS", repos_env, 1);
+    free(repos_env);
+    setenv("CCB_MAVEN_CACHE", CACHE_E2E_P, 1);
+  }
+  {
+    const char *coords[] = { "com.example:plib:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "plib-1.0.aar"));
+    CHECK(result_has(&out, "lib-1.0.aar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Child environment for build/check runs.
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "ANDROID_HOME=");
+  ccb_str_append(&s, sdk_home);
+  char *sdk_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "JAVA_HOME=");
+  ccb_str_append(&s, java_home);
+  char *java_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "KOTLIN_HOME=");
+  ccb_str_append(&s, kotlin_home);
+  char *kotlin_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "CCB_MAVEN_CACHE=");
+  ccb_str_append(&s, CACHE_E2E_P);
+  char *cache_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "HOME=");
+  ccb_str_append(&s, BASE "/home");
+  char *home_env = ccb_str_steal(&s);
+  char *const env_extra[] = { sdk_env, java_env, kotlin_env, cache_env,
+    home_env, NULL };
+  {
+    char *args[] = { bin, "check", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, PROJ_E2E_P, env_extra, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "maven:") != NULL);
+    ccb_proc_result_free(&r);
+  }
+  {
+    char *args[] = { bin, "build", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, PROJ_E2E_P, env_extra, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(ccb_path_exists(APK_E2E_P));
+    ccb_proc_result_free(&r);
+  }
+  if (saved_repos != NULL) {
+    setenv("CCB_MAVEN_REPOS", saved_repos, 1);
+    free(saved_repos);
+  } else {
+    unsetenv("CCB_MAVEN_REPOS");
+  }
+  if (saved_cache != NULL) {
+    setenv("CCB_MAVEN_CACHE", saved_cache, 1);
+    free(saved_cache);
+  } else {
+    unsetenv("CCB_MAVEN_CACHE");
+  }
+  free(sdk_env);
+  free(java_env);
+  free(kotlin_env);
+  free(cache_env);
+  free(home_env);
+  free(bin);
+  free(sdk_home);
+  free(java_home);
+  free(kotlin_home);
+  free(aapt2);
+  free(jarsigner);
 }
 
 static void test_e2e(int argc, char **argv) {
@@ -1412,11 +2007,13 @@ int main(int argc, char **argv) {
   test_cycle_props_mgmt_parent_bom();
   test_failures();
   test_cache_only();
+  test_parents();
   test_config_validation();
   test_exclusions();
   test_exclusion_config();
   test_lockfile();
   test_e2e(argc, argv);
+  test_e2e_parents(argc, argv);
   if (saved_repos != NULL) {
     setenv("CCB_MAVEN_REPOS", saved_repos, 1);
     free(saved_repos);

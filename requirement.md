@@ -300,7 +300,11 @@ version.
   (`~/.cache/ccb/maven2`), and the resolved AARs/JARs feed this stage
   exactly like local files. Exact versions only; packaging comes from
   the POM; transitive resolution is breadth-first nearest-wins over
-  compile + runtime scopes. `[deps] maven_exclude` suppresses
+  compile + runtime scopes. Parent POMs are fetched from the same
+  repositories and contribute properties and dependencyManagement
+  (child entries win, nearest ancestor wins among parents; chains
+  capped at 10 ancestors, cycles fail with `CCB-E3024`).
+  `[deps] maven_exclude` suppresses
   artifacts (`group:artifact` for every version, or
   `group:artifact:version` for one version), checked before
   nearest-wins; excluding a direct dependency is a config error.
