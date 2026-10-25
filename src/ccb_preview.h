@@ -357,6 +357,13 @@ typedef struct pv_fun_index pv_fun_index;
 pv_fun_index *pv_fun_index_build(ccb_arena *arena, char **labels,
   char **texts, size_t nfiles);
 void pv_fun_index_free(pv_fun_index *index);
+// Chunk C: warn CCB-P1025 for every nav call in the index files
+// that no parse attributed to an edge (nested block, skipped
+// statement, or helper never scanned from a button). Runs after all
+// files are parsed, before the index is freed; a NULL index or diag
+// list is a no-op.
+void pv_sweep_unattributed_navs(pv_fun_index *index,
+  ccb_diag_list *diags);
 ccb_status pv_flow_parse_indexed(ccb_arena *arena, const char *text,
   const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
   size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind,
@@ -552,8 +559,8 @@ void pv_manifest_activities(ccb_arena *arena, const char *manifest_path,
 // gate. This is the single definition of the rule that
 // pv_project_diagnose counts with and that the preview gate
 // (ccb_preview_gate) collects with; keep the three in sync.
-// CCB-P1023 and CCB-P1024 fall through to the default (warning
-// always), like CCB-P1022, so they need no case here.
+// CCB-P1023, CCB-P1024, and CCB-P1025 fall through to the default
+// (warning always), like CCB-P1022, so they need no case here.
 int pv_diag_is_error(const char *code, int strict);
 // Run the diagnostics pass: overlap/off-screen/clip are emitted during
 // layout; this pass adds missing-target (error), duplicate-screen

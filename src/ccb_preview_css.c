@@ -1756,11 +1756,16 @@ static void lint_diag(pv_project *p, const char *code, const char *message) {
 // Lint pass, after layout for one screen (see docs/preview.md):
 // CCB-P1017 tap target too small (button/textfield under 8 columns
 // or 2 rows, in wireframe cells; the message also reports the size
-// in dp, but the thresholds stay in cells), CCB-P1018 text contrast below
-// threshold (text/button/textfield; foreground = the leaf rule's
-// color, background = the leaf rule's background-color else the
-// screen rule's; either side missing or unresolvable to RGB skips
-// silently; threshold 4.5:1, or 3.0:1 at font-size >= 24px).
+// in dp, but the thresholds stay in cells). Chunk C precision: a
+// dimension counts as too small only when it is known. Width is
+// always layout-computed, so w < 8 always counts; height without a
+// font-size rule is the 1-row default, not a measurement, so h < 2
+// counts only when the effective rule sets font-size. Report what
+// is known, stay quiet about what is not. CCB-P1018 text contrast
+// below threshold (text/button/textfield; foreground = the leaf
+// rule's color, background = the leaf rule's background-color else
+// the screen rule's; either side missing or unresolvable to RGB
+// skips silently; threshold 4.5:1, or 3.0:1 at font-size >= 24px).
 static void layout_lint(pv_project *p, pv_box *root, box_list *all) {
   const char *screen_bg = NULL;
   size_t i = 0;
@@ -1776,7 +1781,10 @@ static void layout_lint(pv_project *p, pv_box *root, box_list *all) {
     }
     rule = b->rule;
     if (box_type_eq(b, "button") || box_type_eq(b, "textfield")) {
-      if (b->w < 8 || b->h < 2) {
+      // Chunk C: height without font-size is the 1-row default,
+      // not a known measurement, so it never triggers on its own.
+      if (b->w < 8 ||
+          (b->h < 2 && rule != NULL && rule->has_font_size)) {
         ccb_str_init(&msg);
         ccb_str_append(&msg, "tap target too small: ");
         ccb_str_append(&msg, b->type);

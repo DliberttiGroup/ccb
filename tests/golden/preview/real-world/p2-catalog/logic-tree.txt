@@ -1,0 +1,18 @@
+Cart
+  -> Checkout via "Checkout"
+  -> Home via "Continue shopping"
+Checkout
+  -> Home via "Place order"
+  -> Cart via "Back"
+Detail
+  branches: when state [is Loading, is Loaded, else]
+  -> Cart via "Add to cart"
+  -> Home via "Back"
+Home (entry)
+  -> Detail("p1") via "Product 1"
+  -> Detail("p2") via "Product 2"
+  -> Detail("p3") via "Product 3"
+  -> Detail("p4") via "Product 4"
+  -> Detail("p5") via "Product 5"
+  -> Detail("p6") via "Product 6"
+  -> Cart via "Cart"

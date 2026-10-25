@@ -1,0 +1,15 @@
+Detail
+  -> Home via "Go"
+  -> Home via "Back"
+  -> Settings via "Share"
+Form
+  -> Home via "Back"
+Home (entry)
+  -> unknown via "Dynamic"
+  -> Detail via "Go"
+  -> Detail via "Helper nav"
+  -> Form via "Cross file"
+  -> Form via "Var ref"
+  -> Settings via "Share"
+Settings
+  -> Home via "Back"

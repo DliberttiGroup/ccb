@@ -174,6 +174,79 @@ index of every top-level fun across all flow files, then:
   (resolved/unknown/missing) from P3 are the metric to watch;
   they must not regress.
 
+### Chunk C as built (2026-10-25)
+
+- No-silence is a single post-parse sweep, not drop-site
+  warnings: every nav call consumed as an edge is marked
+  attributed (file label + token start offset, stored on the
+  index), and `pv_sweep_unattributed_navs` warns CCB-P1025
+  once per remaining site. The sweep exists because candidacy
+  plus the depth-1 helper cap would otherwise create NEW
+  silence for depth-2+ helpers and never-scanned handler
+  bodies; the plan's "never silently drop a real nav call"
+  invariant rules that out. Navs already reported by another
+  diagnostic are marked accounted-for, not re-warned: unbound
+  handlers (P1019, same- and cross-file) and ambiguous
+  references (P1024, all defining files). P1025 is
+  warning-always like P1022-P1024, so no gate change.
+  Marking is index-less-parse-safe (NULL index no-ops), and
+  the tokenizer skips comments and treats strings as single
+  tokens, so the sweep has no comment/string false positives.
+- Screen candidacy runs through the index after the per-file
+  pruning: a fun is disqualified when referenced via `::`
+  anywhere in a fun body, from a setOnClickListener/onClick
+  lambda block, or from a handler fun's body (iterated to a
+  fixed point, so helper chains count). A bare call directly
+  in a screen's UI body does NOT disqualify (screen
+  composition, e.g. `Detail()` as a component); a self-
+  reference alone does not disqualify; an ambiguous name
+  disqualifies every definition. The pre-pass comment claiming
+  per-file pruning "until Chunk C" was updated with this.
+- P1017 precision: warn iff `w < 8` (width is always
+  layout-computed) OR (`h < 2` AND the effective rule sets
+  `font-size`); height without a font-size rule is the 1-row
+  default, not a measurement. Explicit-small-width and
+  small-font-size cases still warn; the no-rule 38x1 case
+  goes quiet. `docs/preview.md` (unknown-cases table,
+  scope-limits paragraph, P1017 section) and
+  `docs/diagnostics.md` (P1017 row, new P1025 row) updated.
+- Goldens: all four real-world projects pinned
+  (`tests/golden/preview/real-world/<proj>/{preview.json,
+  logic-tree.txt}`, scratch path normalized to PROJ). The
+  sample preview.json + scenario-loaded + trace-walk goldens
+  were regenerated: the ONLY change in each is the
+  diagnostics array (P1017 entries removed; scenario-loaded
+  keeps its 2 P1009s). P3 coverage did not regress: Home
+  edges Dynamic unknown, Go -> Detail, Helper nav ->
+  Detail, Cross file -> Form, Var ref -> Form, Share ->
+  Settings; Nested warns P1025 (was silent); Mystery stays
+  the single P1019 (its fix is a bindings line in the
+  project config, not tool work — the project was not
+  changed).
+- Test fallout, all deliberate consequences of the above:
+  `test_preview_handlers.c` (i)/(j) flipped to assert the
+  helper/val-held funs are NOT screens (Chunk B's note said
+  Chunk C would revisit these); P1017 counts in
+  `test_preview.c` (10 -> 0), `test_preview_scenario.c`
+  (10 -> 0, total 12 -> 2), `test_preview_lint.c` (no-rule
+  38x1 case now quiet), and `test_preview_lsp.c`
+  (diagnostics endpoint now returns an empty array for the
+  sample) updated. One latent harness bug surfaced and was
+  fixed at root cause: `test_preview_correctness_b.c`'s
+  `run_cli` never flushed stdout before restoring the fd,
+  so the P3 CLI JSON leaked to the terminal and the capture
+  file came up empty once Chunk C shrank the output below
+  the stdio buffer; the gate-diff test's harness already
+  flushed. No src change was needed for that failure.
+- Tests: `tests/test_preview_correctness_c.c` (89 checks),
+  covering Nested -> P1025, depth-2 helper chain -> P1025,
+  handler-referencing-handler -> P1025, candidacy
+  (helper/val/cross-file not screens, composition preserved,
+  ambiguous -> P1024 with no P1025), P1017 precision
+  (four hand-built layouts), and the four real-world
+  goldens. Chunk A's follow-ups still untouched, per the
+  task; Phase 2 not started.
+
 ## Phase 2 (NOT this round)
 
 A real-code front end: parse the app's own Kotlin + XML

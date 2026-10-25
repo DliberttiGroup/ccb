@@ -86,7 +86,7 @@ error).
 | CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
 | CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
 | CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
-| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells; message also reports the size in dp (warning, always) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells; message also reports the size in dp. Precision rule (Chunk C): width is always layout-computed so `w < 8` always counts, but height without a `font-size` rule is the 1-row default, not a measurement, so `h < 2` counts only when the effective rule sets `font-size` (warning, always) |
 | CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always) |
 | CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
 | CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
@@ -94,9 +94,10 @@ error).
 | CCB-P1022 | Scenario entry does not match the project: a scenario names an unknown screen, branch entry, list, or field; a list that already has static rows; a button label matching no edge; or a button whose edges have no unknown argument to fill. The entry is skipped, rendering continues (warning, always; a scenario never fails the build gate) |
 | CCB-P1023 | Trace step does not match the project: a trace names an unknown screen; an edge label matching no edge in the screen; a branch entry that does not exist in the screen; a step naming neither an edge nor a branch; or a branch entry that contains no component with the step's button label (the edge is still marked taken). The step (or its unmatched part) is skipped, rendering continues (warning, always; a trace never fails the build gate) |
 | CCB-P1024 | Ambiguous function reference: a click-handler method reference or a helper call names a top-level fun defined in more than one flow file, so no edge is recorded for it — the reference is never guessed. Warns once per (file, name) (warning, always; never fails the build gate) |
+| CCB-P1025 | Unattributed navigation: a nav call in a flow file that no parse recorded as an edge — inside a nested block, a skipped statement, or a helper never scanned from a button. Reported with file:line so it is never silently dropped; never invents an edge. Navs already reported by CCB-P1019 (unbound handler) or CCB-P1024 (ambiguous reference) are not repeated here (warning, always; never fails the build gate) |
 
 Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under
-`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021/P1022/P1023/P1024 are
+`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021/P1022/P1023/P1024/P1025 are
 warnings even under `--strict`, so they never fail the build gate.
 A project with no usable
 `[preview]` section is not a diagnostic at all: `ccb preview` prints

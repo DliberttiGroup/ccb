@@ -658,6 +658,13 @@ static size_t pv_nav_parse(pv_parser *p, size_t idx, char **target_out,
   return close + 1;
 }
 
+// Chunk C: record one attributed nav call site (file label + token
+// start offset) in the whole-project index, so the post-parse sweep
+// can tell attributed navs apart from dropped ones. Defined with the
+// index, below; the forward declaration lets the nav consumers mark.
+static void pv_index_mark_nav(pv_fun_index *index, const char *file,
+  size_t start);
+
 // Record the nav call at token idx (ident + '(') as a flow-declared
 // edge from the enclosing component, and return the index just past
 // its closing ')', or ntoks on breakage.
@@ -672,6 +679,7 @@ static size_t pv_nav_at(pv_parser *p, size_t idx) {
   if (next == (size_t)-1) {
     return p->ntoks;
   }
+  pv_index_mark_nav(p->index, p->file, p->toks[idx].start);
   pv_edge_add(p, pv_edge_from(p), target, unknown, args, nargs,
     args_named, 0, NULL);
   return next;
@@ -748,9 +756,11 @@ static void pv_scan_navs(pv_parser *p, size_t start, size_t end) {
 // names (pruned to references from non-handler funs, so two handlers
 // referencing each other do not keep each other alive) and the main
 // loop skips their bodies instead of creating screens for them.
-// (The pre-pass is still per-file; cross-file handler funs still
-// appear as screens until Chunk C's reference counting. Chunk B
-// only resolves their edges.)
+// Chunk C extends this with the whole-project index
+// (pv_collect_index_handlers): a fun referenced via ::, from a
+// listener lambda, or from a handler body is a handler in every
+// file that defines it, so cross-file handlers and helpers no
+// longer appear as phantom screens.
 
 static const char *pv_binding_label(pv_parser *p, const char *receiver) {
   size_t i = 0;
@@ -981,6 +991,12 @@ struct pv_fun_index {
   // warned about, arena-grown.
   char **warned_files, **warned_names;
   size_t nwarned, capwarned;
+  // Chunk C: attributed nav call sites, (file index, token start
+  // offset) pairs, xmalloc'd. A parse marks a site when it consumes
+  // a nav call as an edge; the post-parse sweep warns for every
+  // other nav call in the index files, so no nav stays silent.
+  size_t *nav_files, *nav_starts;
+  size_t nnav, capnav;
 };
 
 pv_fun_index *pv_fun_index_build(ccb_arena *arena, char **labels,
@@ -1036,7 +1052,468 @@ void pv_fun_index_free(pv_fun_index *index) {
   }
   free(index->fun_files);
   free(index->fun_names);
+  free(index->nav_files);
+  free(index->nav_starts);
   free(index);
+}
+
+// Chunk C: record one attributed nav call site. The file label
+// resolves to an index file by string equality (labels are borrowed
+// paths, shared with the parses); an unknown label or a NULL index
+// records nothing, never crashes. Duplicate sites are stored once:
+// a handler scanned from two buttons attributes the same call twice.
+static void pv_index_mark_nav(pv_fun_index *index, const char *file,
+    size_t start) {
+  size_t f = 0;
+  size_t i = 0;
+  if (index == NULL || file == NULL) {
+    return;
+  }
+  for (f = 0; f < index->nfiles; f++) {
+    if (index->labels[f] != NULL && strcmp(index->labels[f], file) == 0) {
+      break;
+    }
+  }
+  if (f >= index->nfiles) {
+    return;
+  }
+  for (i = 0; i < index->nnav; i++) {
+    if (index->nav_files[i] == f && index->nav_starts[i] == start) {
+      return;
+    }
+  }
+  if (index->nnav == index->capnav) {
+    size_t ncap = index->capnav == 0 ? 16 : index->capnav * 2;
+    index->nav_files = ccb_xrealloc(index->nav_files,
+      ncap * sizeof(*index->nav_files));
+    index->nav_starts = ccb_xrealloc(index->nav_starts,
+      ncap * sizeof(*index->nav_starts));
+    index->capnav = ncap;
+  }
+  index->nav_files[index->nnav] = f;
+  index->nav_starts[index->nnav] = start;
+  index->nnav++;
+}
+
+// True when the token at i starts a nav-ish call: nav/navigateTo,
+// startActivity, or NavController navigate(), each followed by '('.
+// The same shape the handler scanner consumes; the sweep uses it to
+// find every nav call, attributed or not.
+static int pv_is_nav_call(pv_token *toks, size_t ntoks, size_t i) {
+  pv_token *t = NULL;
+  if (i + 1 >= ntoks || toks[i].kind != PV_TK_IDENT) {
+    return 0;
+  }
+  t = &toks[i];
+  if (t->text == NULL) {
+    return 0;
+  }
+  if (strcmp(t->text, "nav") != 0 && strcmp(t->text, "navigateTo") != 0 &&
+      strcmp(t->text, "startActivity") != 0 &&
+      strcmp(t->text, "navigate") != 0) {
+    return 0;
+  }
+  return toks[i + 1].kind == PV_TK_SYM && toks[i + 1].sym == '(';
+}
+
+// Chunk C: mark every nav call in a token range of the current
+// parser as accounted for, so the sweep stays quiet for it. Used
+// when a handler body is deliberately not scanned: an unbound or
+// ambiguous handler's navs are already reported by CCB-P1019 or
+// CCB-P1024, so repeating them as CCB-P1025 would be noise, not
+// news. The navs are reported, just not as edges.
+static void pv_mark_range_navs(pv_parser *p, size_t start, size_t end) {
+  size_t k = 0;
+  for (k = start; k < end; k++) {
+    if (pv_is_nav_call(p->toks, p->ntoks, k)) {
+      pv_index_mark_nav(p->index, p->file, p->toks[k].start);
+    }
+  }
+}
+
+// Same, for a foreign fun body: tokenize the index file's text,
+// find the fun, mark its body's nav calls with the foreign label.
+static void pv_mark_foreign_navs(pv_parser *p, size_t file_idx,
+    const char *name) {
+  pv_parser q;
+  size_t i = 0;
+  if (p->index == NULL || file_idx >= p->index->nfiles ||
+      p->index->texts[file_idx] == NULL) {
+    return;
+  }
+  memset(&q, 0, sizeof(q));
+  q.arena = p->arena;
+  q.text = p->index->texts[file_idx];
+  q.text_len = strlen(q.text);
+  q.file = p->index->labels[file_idx];
+  pv_tokenize(&q);
+  pv_collect_funs(&q);
+  for (i = 0; i < q.nfuns; i++) {
+    size_t k = 0;
+    if (strcmp(q.fun_names[i], name) != 0) {
+      continue;
+    }
+    for (k = q.fun_braces[i] + 1; k < q.fun_closes[i]; k++) {
+      if (pv_is_nav_call(q.toks, q.ntoks, k)) {
+        pv_index_mark_nav(p->index, q.file, q.toks[k].start);
+      }
+    }
+    break;
+  }
+  free(q.toks);
+  free(q.fun_names);
+  free(q.fun_braces);
+  free(q.fun_closes);
+}
+
+// Chunk C: warn CCB-P1025 for every nav call in the index files
+// that no parse attributed to an edge. The tokenizer skips comments
+// and strings, so only real calls are considered; each unattributed
+// site warns exactly once, whatever the scan count, because the
+// sweep is a single pass over the files and attribution is a set.
+// Runs after all files are parsed and before the index is freed;
+// a NULL index or diag list is a no-op, so index-less parses keep
+// the exact old behavior.
+void pv_sweep_unattributed_navs(pv_fun_index *index,
+    ccb_diag_list *diags) {
+  size_t f = 0;
+  if (index == NULL || diags == NULL) {
+    return;
+  }
+  for (f = 0; f < index->nfiles; f++) {
+    pv_parser q;
+    size_t i = 0;
+    if (index->texts[f] == NULL) {
+      continue;
+    }
+    memset(&q, 0, sizeof(q));
+    q.arena = index->arena;
+    q.text = index->texts[f];
+    q.text_len = strlen(q.text);
+    q.file = index->labels[f];
+    pv_tokenize(&q);
+    for (i = 0; i < q.ntoks; i++) {
+      size_t k = 0;
+      int found = 0;
+      if (!pv_is_nav_call(q.toks, q.ntoks, i)) {
+        continue;
+      }
+      for (k = 0; k < index->nnav; k++) {
+        if (index->nav_files[k] == f &&
+            index->nav_starts[k] == q.toks[i].start) {
+          found = 1;
+          break;
+        }
+      }
+      if (!found) {
+        ccb_diag d;
+        ccb_diag_init(&d);
+        ccb_diag_set_full(&d, "CCB-P1025", "preview",
+          "unattributed navigation: this nav call is not recorded "
+          "as an edge from any button (nested block, skipped "
+          "statement, or helper never scanned from a button); it is "
+          "reported here so it is not silently dropped",
+          q.file, q.toks[i].line, 1, NULL, NULL, NULL);
+        ccb_diag_list_push(diags, &d);
+      }
+    }
+    free(q.toks);
+  }
+}
+
+// ---------- Chunk C: index-wide screen candidacy ----------
+//
+// A top-level fun referenced as a handler or helper is not a screen
+// candidate. The per-file pre-pass above only sees
+// setOnClickListener(::name) in the same file; this pass looks
+// through the whole-project index, so cross-file handlers, helper
+// calls from listener lambdas, variable-held references, and
+// helpers called from handler bodies all disqualify their funs.
+// Three reference shapes count, all conservative:
+//   (a) any `::name` anywhere in a fun body (direct attachment,
+//       property assignment, val-held reference);
+//   (b) a bare `name(` call inside a setOnClickListener/onClick
+//       lambda block in any fun body (the P3 helper shape);
+//   (c) a bare `name(` call anywhere in a handler fun's body
+//       (helper chains), iterated to a fixed point.
+// A bare call directly in a screen's UI body does NOT count: that
+// is screen composition (`Detail()` as a component), and the
+// composed screen must stay a screen. A reference from a body to
+// its own (file, name) never qualifies on its own, so
+// self-recursion cannot make a fun its own handler. An ambiguous
+// name (defined in several files) disqualifies every definition:
+// the reference is never guessed, and the sweep warns for the
+// funs' navs instead of leaving them silent.
+
+// One index file's token stream + collected funs, for the candidacy
+// pass. The parser struct is scratch: only its token and fun arrays
+// are kept, and the caller frees them.
+typedef struct {
+  pv_parser q;
+} pv_cand_file;
+
+// (file index, fun name) pairs: the global handler set. Names point
+// at arena token text and are never freed here; the arrays are
+// xmalloc'd and freed by the caller.
+typedef struct {
+  size_t *files;
+  char **names;
+  size_t n, cap;
+} pv_cand_pairs;
+
+static int pv_cand_has(pv_cand_pairs *set, size_t file,
+    const char *name) {
+  size_t i = 0;
+  for (i = 0; i < set->n; i++) {
+    if (set->files[i] == file && strcmp(set->names[i], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Add one pair; returns 1 when the pair is new.
+static int pv_cand_add(pv_cand_pairs *set, size_t file, char *name) {
+  if (pv_cand_has(set, file, name)) {
+    return 0;
+  }
+  if (set->n == set->cap) {
+    size_t ncap = set->cap == 0 ? 16 : set->cap * 2;
+    set->files = ccb_xrealloc(set->files, ncap * sizeof(*set->files));
+    set->names = ccb_xrealloc(set->names, ncap * sizeof(*set->names));
+    set->cap = ncap;
+  }
+  set->files[set->n] = file;
+  set->names[set->n] = name;
+  set->n++;
+  return 1;
+}
+
+// True when token k starts a bare call `name(`: an identifier
+// followed by '(', not dotted (not a method call) and not a `fun`
+// declaration.
+static int pv_cand_is_bare_call(pv_token *toks, size_t ntoks, size_t k) {
+  if (k + 1 >= ntoks || toks[k].kind != PV_TK_IDENT ||
+      toks[k].text == NULL) {
+    return 0;
+  }
+  if (toks[k + 1].kind != PV_TK_SYM || toks[k + 1].sym != '(') {
+    return 0;
+  }
+  if (k > 0 && toks[k - 1].kind == PV_TK_SYM &&
+      toks[k - 1].sym == '.') {
+    return 0;
+  }
+  if (k > 0 && toks[k - 1].kind == PV_TK_IDENT &&
+      toks[k - 1].text != NULL && strcmp(toks[k - 1].text, "fun") == 0) {
+    return 0;
+  }
+  return 1;
+}
+
+// Block range (brace, close) of the lambda attached to the listener
+// at token k: trailing `setOnClickListener { ... }`, parenthesized
+// `setOnClickListener({ ... })`, or `onClick = { ... }` (receiver
+// optional). A direct :: reference or a variable argument has no
+// block. Returns 1 and sets the range, else 0.
+static int pv_cand_lambda_block(pv_parser *q, size_t k, size_t end,
+    size_t *brace_out, size_t *close_out) {
+  size_t close = 0;
+  if (pv_is_ident(&q->toks[k], "setOnClickListener")) {
+    if (k + 1 < end && pv_is_sym(&q->toks[k + 1], '{')) {
+      close = pv_match_brace(q, k + 1);
+      if (close == (size_t)-1) {
+        return 0;
+      }
+      *brace_out = k + 1;
+      *close_out = close;
+      return 1;
+    }
+    if (k + 1 < end && pv_is_sym(&q->toks[k + 1], '(')) {
+      size_t pc = pv_match_paren(q, k + 1);
+      if (pc == (size_t)-1 || pc + 1 >= end ||
+          !pv_is_sym(&q->toks[pc + 1], '{')) {
+        return 0;
+      }
+      close = pv_match_brace(q, pc + 1);
+      if (close == (size_t)-1) {
+        return 0;
+      }
+      *brace_out = pc + 1;
+      *close_out = close;
+      return 1;
+    }
+    return 0;
+  }
+  if (pv_is_ident(&q->toks[k], "onClick")) {
+    if (k + 1 < end && pv_is_sym(&q->toks[k + 1], '=') &&
+        k + 2 < end && pv_is_sym(&q->toks[k + 2], '{')) {
+      close = pv_match_brace(q, k + 2);
+      if (close == (size_t)-1) {
+        return 0;
+      }
+      *brace_out = k + 2;
+      *close_out = close;
+      return 1;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+// Add handler pairs for every file defining `name`, except the
+// referencing body's own (file, name): a body never qualifies
+// itself. Returns 1 when a pair was added.
+static int pv_cand_add_name(pv_fun_index *index, pv_cand_pairs *set,
+    char *name, size_t ref_file, const char *ref_fun) {
+  size_t f = 0;
+  size_t i = 0;
+  int added = 0;
+  for (f = 0; f < index->nfiles; f++) {
+    int defines = 0;
+    if (f == ref_file && strcmp(name, ref_fun) == 0) {
+      continue;
+    }
+    for (i = 0; i < index->nfuns; i++) {
+      if (index->fun_files[i] == f &&
+          strcmp(index->fun_names[i], name) == 0) {
+        defines = 1;
+        break;
+      }
+    }
+    if (defines && pv_cand_add(set, f, name)) {
+      added = 1;
+    }
+  }
+  return added;
+}
+
+// Scan one fun body for references, adding handler pairs. Mode 0 is
+// the seed scan: :: refs anywhere plus bare calls inside listener
+// lambda blocks. Mode 1 is the handler-body scan: bare calls
+// anywhere (plus :: refs, as in mode 0). Returns 1 when a pair was
+// added.
+static int pv_cand_scan_body(pv_parser *q, size_t file, char *fun,
+    size_t start, size_t end, pv_fun_index *index, pv_cand_pairs *set,
+    int mode) {
+  size_t k = 0;
+  int added = 0;
+  for (k = start; k < end; k++) {
+    if (k + 2 < end && pv_is_sym(&q->toks[k], ':') &&
+        pv_is_sym(&q->toks[k + 1], ':') &&
+        q->toks[k + 2].kind == PV_TK_IDENT &&
+        q->toks[k + 2].text != NULL) {
+      if (pv_cand_add_name(index, set, q->toks[k + 2].text, file,
+          fun)) {
+        added = 1;
+      }
+      continue;
+    }
+    if (mode == 1) {
+      if (pv_cand_is_bare_call(q->toks, q->ntoks, k)) {
+        if (pv_cand_add_name(index, set, q->toks[k].text, file, fun)) {
+          added = 1;
+        }
+      }
+      continue;
+    }
+    if (pv_is_ident(&q->toks[k], "setOnClickListener") ||
+        pv_is_ident(&q->toks[k], "onClick")) {
+      size_t brace = 0;
+      size_t close = 0;
+      size_t j = 0;
+      if (!pv_cand_lambda_block(q, k, end, &brace, &close)) {
+        continue;
+      }
+      for (j = brace + 1; j < close; j++) {
+        if (pv_cand_is_bare_call(q->toks, q->ntoks, j)) {
+          if (pv_cand_add_name(index, set, q->toks[j].text, file,
+              fun)) {
+            added = 1;
+          }
+        }
+      }
+    }
+  }
+  return added;
+}
+
+// Extend this file's handler set with funs referenced through the
+// whole-project index (see above). The global handler set is built
+// from scratch views of every index file, seeded from every fun
+// body, then closed under handler-body bare calls; finally, this
+// file's funs in the set join the parser's handler names, so the
+// main loop skips their bodies instead of creating screens. A NULL
+// index keeps the exact per-file behavior.
+static void pv_collect_index_handlers(pv_parser *p) {
+  pv_fun_index *index = p->index;
+  pv_cand_file *files = NULL;
+  pv_cand_pairs set;
+  size_t f = 0;
+  size_t i = 0;
+  size_t self = (size_t)-1;
+  int changed = 0;
+  if (index == NULL) {
+    return;
+  }
+  memset(&set, 0, sizeof(set));
+  files = ccb_xcalloc(index->nfiles == 0 ? 1 : index->nfiles,
+    sizeof(*files));
+  for (f = 0; f < index->nfiles; f++) {
+    pv_parser *q = &files[f].q;
+    memset(q, 0, sizeof(*q));
+    q->arena = p->arena;
+    q->text = index->texts[f] != NULL ? index->texts[f] : "";
+    q->text_len = strlen(q->text);
+    q->file = index->labels[f];
+    pv_tokenize(q);
+    pv_collect_funs(q);
+    if (index->labels[f] != NULL && p->file != NULL &&
+        strcmp(index->labels[f], p->file) == 0) {
+      self = f;
+    }
+  }
+  for (f = 0; f < index->nfiles; f++) {
+    pv_parser *q = &files[f].q;
+    for (i = 0; i < q->nfuns; i++) {
+      (void)pv_cand_scan_body(q, f, q->fun_names[i],
+        q->fun_braces[i] + 1, q->fun_closes[i], index, &set, 0);
+    }
+  }
+  changed = 1;
+  while (changed) {
+    size_t s = 0;
+    changed = 0;
+    for (s = 0; s < set.n; s++) {
+      pv_parser *q = &files[set.files[s]].q;
+      size_t g = 0;
+      for (g = 0; g < q->nfuns; g++) {
+        if (strcmp(q->fun_names[g], set.names[s]) != 0) {
+          continue;
+        }
+        if (pv_cand_scan_body(q, set.files[s], q->fun_names[g],
+            q->fun_braces[g] + 1, q->fun_closes[g], index, &set, 1)) {
+          changed = 1;
+        }
+      }
+    }
+  }
+  if (self != (size_t)-1) {
+    for (i = 0; i < p->nfuns; i++) {
+      if (pv_cand_has(&set, self, p->fun_names[i])) {
+        pv_handler_add(p, p->fun_names[i]);
+      }
+    }
+  }
+  for (f = 0; f < index->nfiles; f++) {
+    free(files[f].q.toks);
+    free(files[f].q.fun_names);
+    free(files[f].q.fun_braces);
+    free(files[f].q.fun_closes);
+  }
+  free(files);
+  free(set.files);
+  free(set.names);
 }
 
 // Count distinct files defining name; return the first file index
@@ -1378,6 +1855,7 @@ static size_t pv_handler_nav_call(pv_parser *p, size_t i, size_t end,
     if (next == (size_t)-1 || next <= i) {
       return (size_t)-1;
     }
+    pv_index_mark_nav(p->index, p->file, p->toks[i].start);
     pv_edge_add(p, from_label, target, unknown, args, nargs,
       args_named, 1, branch);
     return next > end ? end : next;
@@ -1391,6 +1869,7 @@ static size_t pv_handler_nav_call(pv_parser *p, size_t i, size_t end,
     if (close == (size_t)-1) {
       return (size_t)-1;
     }
+    pv_index_mark_nav(p->index, p->file, p->toks[i].start);
     // `Name::class.java`: ':' ':' are two single-char tokens.
     for (j = i + 2; j + 5 < close; j++) {
       if (p->toks[j].kind == PV_TK_IDENT &&
@@ -1414,6 +1893,7 @@ static size_t pv_handler_nav_call(pv_parser *p, size_t i, size_t end,
     if (next == (size_t)-1) {
       return (size_t)-1;
     }
+    pv_index_mark_nav(p->index, p->file, p->toks[i].start);
     return next > end ? end : next;
   }
   return 0;
@@ -1644,7 +2124,20 @@ static size_t pv_try_helper_call(pv_parser *p, size_t i, size_t end,
       return close + 1;
     }
     if (count > 1) {
+      size_t f = 0;
+      size_t g = 0;
       pv_warn_ambiguous(p, name, count, p->toks[i].line);
+      // Chunk C: every definition's navs are reported by P1024,
+      // so none of them is sweep territory either.
+      for (f = 0; f < p->index->nfiles; f++) {
+        for (g = 0; g < p->index->nfuns; g++) {
+          if (p->index->fun_files[g] == f &&
+              strcmp(p->index->fun_names[g], name) == 0) {
+            pv_mark_foreign_navs(p, f, name);
+            break;
+          }
+        }
+      }
       return close + 1;
     }
   }
@@ -1797,6 +2290,9 @@ static void pv_handle_named(pv_parser *p, const char *receiver,
       const char *label = pv_binding_label(p, receiver);
       if (label == NULL) {
         pv_warn_unbound(p, receiver);
+        // Chunk C: the body's navs are reported by P1019, not
+        // silent, so the sweep must not repeat them as P1025.
+        pv_mark_foreign_navs(p, file, hname);
         return;
       }
       pv_scan_foreign_body(p, file, hname,
@@ -1804,7 +2300,20 @@ static void pv_handle_named(pv_parser *p, const char *receiver,
       return;
     }
     if (count > 1) {
+      size_t f = 0;
+      size_t i = 0;
       pv_warn_ambiguous(p, hname, count, line);
+      // Chunk C: every definition's navs are reported by P1024,
+      // so none of them is sweep territory either.
+      for (f = 0; f < p->index->nfiles; f++) {
+        for (i = 0; i < p->index->nfuns; i++) {
+          if (p->index->fun_files[i] == f &&
+              strcmp(p->index->fun_names[i], hname) == 0) {
+            pv_mark_foreign_navs(p, f, hname);
+            break;
+          }
+        }
+      }
       return;
     }
   }
@@ -1818,6 +2327,9 @@ static void pv_handle_body(pv_parser *p, const char *receiver, size_t start,
   const char *label = pv_binding_label(p, receiver);
   if (label == NULL) {
     pv_warn_unbound(p, receiver);
+    // Chunk C: the body's navs are reported by P1019, not silent,
+    // so the sweep must not repeat them as P1025.
+    pv_mark_range_navs(p, start, end);
     return;
   }
   pv_scan_handler_body(p, start, end, ccb_arena_strdup(p->arena, label));
@@ -2480,6 +2992,11 @@ static ccb_status pv_flow_parse_full_inner(ccb_arena *arena,
       pv_handler_add(&p, p.onclick_methods[k]);
     }
   }
+  // Chunk C: a top-level fun referenced through the whole-project
+  // index — via ::, from a listener lambda, or from a handler body
+  // — is a handler, not a screen, in every file that defines it.
+  // Added after the per-file pruning, so it is never pruned.
+  pv_collect_index_handlers(&p);
   long top_depth = 0;
   while (p.pos < p.ntoks) {
     if (pv_is_sym(&p.toks[p.pos], '{')) {

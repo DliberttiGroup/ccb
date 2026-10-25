@@ -1,0 +1,18 @@
+Detail
+  branches: when state [is Loading, is Loaded, else]
+  -> Form("note-42") via "Edit"
+  -> Detail(unknown) via "Open related"
+  -> Home via "Back"
+Form
+  -> Home via "Save"
+  -> Home via "Cancel"
+Home (entry)
+  -> Detail("note-42") via "Open note"
+  -> Form via "New note"
+  -> Form("note-42") via "Edit note"
+  -> Detail via "Quick open"
+  -> Settings via "Settings"
+Settings
+  branches: if darkMode [then, else]
+  -> Home via "Back"
+  -> Settings via "Settings"

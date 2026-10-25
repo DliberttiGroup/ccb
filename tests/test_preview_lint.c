@@ -108,8 +108,10 @@ int main(void) {
     CHECK(pv_color_rgb(NULL, &r, &g, &b) == 0);
     CHECK(pv_color_rgb("#12", &r, &g, &b) == 0);
   }
-  // --- P1017: small width (4x1), small height (38x1), and the
-  // message names the component, label, and size.
+  // --- P1017: small width (4x1) warns, and the message names the
+  // component, label, and size. A no-rule 38x1 button stays quiet
+  // since Chunk C: its 1-row height is the unknown default, not a
+  // measurement (precision rule).
   {
     CCB_AUTO_ARENA ccb_arena *a = ccb_arena_create();
     pv_project p;
@@ -127,8 +129,7 @@ int main(void) {
     pv_project p;
     pv_box *child = layout_one(a, "", "button", "Save", &p);
     CHECK(child->w == 38 && child->h == 1);
-    CHECK(diag_count(&p.diags, "CCB-P1017") == 1);
-    CHECK(diag_message_contains(&p, "CCB-P1017", "38x1 cells"));
+    CHECK(diag_count(&p.diags, "CCB-P1017") == 0);
     ccb_diag_list_free(&p.diags);
   }
   {

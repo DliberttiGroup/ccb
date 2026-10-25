@@ -1686,6 +1686,9 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
             onclick_methods, onclick_labels, nonclick,
             graph_keys, graph_vals, ngraph, &pending, &npending, index);
         }
+        // Chunk C: warn for every nav call no parse attributed to
+        // an edge, before the index texts are freed.
+        pv_sweep_unattributed_navs(index, dl);
         for (i = 0; i < nkept; i++) {
           free(kept_texts[i]);
         }

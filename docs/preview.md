@@ -292,7 +292,7 @@ edges against declared edges for the same button (same `from`):
 | Receiver has no `[preview.bindings]` entry | CCB-P1019 ("handler found, button not bound", naming the receiver), no edge — even with a literal nav call inside |
 | Nav with a non-literal/computed destination (`nav(target)`, a template) directly in the handler body | Unknown edge (`from` = bound label, `target: null, unknown: true`), exactly like a dynamic flow-declared nav |
 | Nav inside an `if`/`when` branch body of the handler body (braced or a single braceless statement) | Branch-annotated edge (Slice 2): `-> Detail via "Open note" [if ready: then]`, condition labeled, never evaluated |
-| Nav inside any other nested brace block of the handler body (a nested lambda/callback, a coroutine, any inner block) | NO edge at all, not even an unknown edge — this is async territory, never guessed |
+| Nav inside any other nested brace block of the handler body (a nested lambda/callback, a coroutine, any inner block) | NO edge at all, not even an unknown edge — this is async territory, never guessed — but CCB-P1025 warns with file:line (Chunk C), so the nav is visible instead of silently dropped |
 | Nav with literal arguments in the handler body (`nav("Detail", "note-42")`, `nav("Detail", id = 7)`) | Edge with args, exactly like a flow-declared nav with args (Slice 2) |
 | Nav with a non-literal argument in the handler body (`nav("Detail", noteId)`) | Edge with an `unknown` arg entry, like a flow-declared nav with a non-literal argument |
 | `navigate(R.id.x)` in the handler body, `x` in the nav graph | Edge to the graph's screen name for `x` (Slice 3); the name is normalized (package prefix and leading dot stripped), and a destination with no flow screen becomes a `[graph]` node, not an error |
@@ -305,14 +305,15 @@ edges against declared edges for the same button (same `from`):
 | XML `android:onClick` button with no `[preview.bindings]` entry for its view id | CCB-P1019, no edge (same code as an unbound listener receiver) |
 | XML `android:onClick` button, bound, but its label in no screen | CCB-P1021, no edge |
 | XML `android:onClick` method with no matching fun, or handler with no nav | NO edge, no warning |
-| Handler that merely calls a shared helper (`openDetail()`), with the nav inside the helper | Edge attributed to the button: the helper body is scanned one level deep (Chunk B), with the current branch annotation; calls inside the helper body are not followed, so a second-level helper's nav yields no edge |
+| Handler that merely calls a shared helper (`openDetail()`), with the nav inside the helper | Edge attributed to the button: the helper body is scanned one level deep (Chunk B), with the current branch annotation; calls inside the helper body are not followed, so a second-level helper's nav yields no edge — but CCB-P1025 warns for it (Chunk C) instead of silence |
 | `startActivity` without a class literal (`startActivity(intent)`) | Unknown edge, never a guessed destination |
 | Method reference to a fun in another file | Resolved through the whole-project function index when the name is unique across files (Chunk B); same-file definitions shadow cross-file ones |
 | Method reference or helper call naming a fun defined in two or more flow files | NO edge, CCB-P1024 (once per file and name) — never a guess |
 | Method reference to no fun at all | NO edge, no warning |
 
-CCB-P1019, CCB-P1020, CCB-P1021, and CCB-P1024 are warnings always
-— even under `--strict` — so they never fail the build gate.
+CCB-P1019, CCB-P1020, CCB-P1021, CCB-P1024, and CCB-P1025 are
+warnings always — even under `--strict` — so they never fail the
+build gate.
 
 ### Scope limits (Slices 1–3, by design)
 
@@ -324,13 +325,16 @@ CCB-P1019, CCB-P1020, CCB-P1021, and CCB-P1024 are warnings always
   otherwise the whole-project function index resolves a `::` name
   (or a bare helper call) when it is unique across flow files. An
   ambiguous name warns CCB-P1024 and resolves nothing. A top-level
-  fun whose name is referenced via `::` from a screen body is
-  treated as a handler, NOT as a screen: it does not appear in the
-  screen list, and its nav targets become resolvable only through
-  the referencing button. That pruning is still per-file: a handler
-  fun defined in another file, a fun referenced only from another
-  handler, or a fun referenced only via a variable still appears
-  as a screen until Chunk C's reference counting lands.
+  fun referenced as a handler or helper is NOT a screen: Chunk C's
+  reference counting through the index disqualifies any fun
+  referenced via `::` anywhere in a fun body, from a
+  setOnClickListener/onClick lambda block, or from a handler fun's
+  body (iterated to a fixed point, so helper chains count). It does
+  not appear in the screen list, and its nav targets become
+  resolvable only through the referencing button. A bare call
+  directly in a screen's UI body does NOT disqualify: that is
+  screen composition (`Detail()` as a component), and the composed
+  screen stays a screen.
 - Attachments inside an ignored-call lambda block (e.g. inside a
   `foo { ... }` argument block, which the parser scans for navs
   only) fall back to the existing generic scan instead of Slice 1
@@ -640,7 +644,14 @@ button { background-color: #6200ee; color: #ffffff; margin: 8px; }
 
 - CCB-P1017 — tap target too small (warning). Applies to `button`
   and `textfield` boxes only, after layout. Warns when `w < 8`
-  columns OR `h < 2` rows, in wireframe cells. The thresholds
+  columns OR (`h < 2` rows with a known height), in wireframe
+  cells. Known-height rule (Chunk C): width is always
+  layout-computed, so `w < 8` always counts, but height without a
+  `font-size` rule is the 1-row default, not a measurement, so
+  `h < 2` counts only when the effective rule sets `font-size`.
+  Report what is known, stay quiet about what is not: a button
+  with no sizing rules at all is 38x1 by default and no longer
+  warns. The thresholds
   deliberately stay in cells even though F2 reports dp: a 48dp
   height rule would flag nearly every button — F1 line heights
   are 20–30dp for typical text (16px → 2 rows, 24px → 3), so

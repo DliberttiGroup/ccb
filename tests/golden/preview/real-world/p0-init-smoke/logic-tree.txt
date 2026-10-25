@@ -1,0 +1,4 @@
+Home (entry)
+  -> Second via "Open second"
+Second
+  -> Home via "Back"

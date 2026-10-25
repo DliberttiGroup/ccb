@@ -361,11 +361,11 @@ int main(void) {
     if (p != NULL) {
       errors = pv_project_diagnose(p);
       CHECK(errors == 0);
-      // The sample's buttons/textfields are all 1 row tall, so the
-      // P1017 tap-target lint fires on exactly 10 of them (the two
-      // bordered Form textfields are 3 rows tall and pass); no
-      // other diagnostic fires on the sample.
-      CHECK(diag_count(p, "CCB-P1017") == 10);
+      // Since Chunk C, no P1017 fires on the sample: its
+      // buttons/textfields carry no font-size rules, so their
+      // 1-row heights are the unknown default, not a measurement,
+      // and every width is >= 8. No other diagnostic fires either.
+      CHECK(diag_count(p, "CCB-P1017") == 0);
       CHECK((long)p->diags.count == diag_count(p, "CCB-P1017"));
       CHECK(p->nscreens == 5);
       for (i = 0; i < p->nscreens; i++) {

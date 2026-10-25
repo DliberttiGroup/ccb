@@ -160,6 +160,7 @@ static int run_cli(const char *workdir, const char *cap_path,
   (void)dup2(fd, STDOUT_FILENO);
   close(fd);
   rc = ccb_cli_main(argc, argv);
+  fflush(stdout);
   (void)dup2(saved, STDOUT_FILENO);
   close(saved);
   { int rc2 = chdir(cwd); (void)rc2; }

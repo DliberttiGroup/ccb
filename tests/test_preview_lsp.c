@@ -940,7 +940,9 @@ static void test_socket_session(void) {
   }
   free(m);
   m = NULL;
-  // diagnostics: at least one P-code.
+  // diagnostics: the sample has none since Chunk C (its buttons
+  // carry no font-size rules, so P1017 stays quiet); the endpoint
+  // must still answer with an empty diagnostics array.
   m = json_msg_id(4, "\"ccb/diagnostics\"", "{}");
   send_frame(fd, m);
   free(m);
@@ -948,7 +950,7 @@ static void test_socket_session(void) {
   CHECK(m != NULL);
   if (m != NULL) {
     CHECK(contains(m, "\"id\":4"));
-    CHECK(contains(m, "\"code\":\"CCB-"));
+    CHECK(contains(m, "\"diagnostics\":[]"));
   }
   free(m);
   m = NULL;

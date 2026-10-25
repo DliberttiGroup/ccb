@@ -505,15 +505,16 @@ int main(void) {
     if (p != NULL) {
       errors = pv_project_diagnose(p);
       CHECK(errors == 0);
-      // All scenario entries matched, so no P1022 fires. The 10
-      // P1017 tap-target warnings are the baseline's; the 2 P1009
+      // All scenario entries matched, so no P1022 fires. Since
+      // Chunk C, no P1017 fires: the sample's buttons carry no
+      // font-size rules, so their heights are unknown. The 2 P1009
       // clip warnings are the pre-existing static-list-children
       // behavior (a flow-declared list with children warns the same
       // way) — scenario row boxes are laid out like static rows.
-      CHECK(diag_count(p, "CCB-P1017") == 10);
+      CHECK(diag_count(p, "CCB-P1017") == 0);
       CHECK(diag_count(p, "CCB-P1009") == 2);
       CHECK(diag_count(p, "CCB-P1022") == 0);
-      CHECK((long)p->diags.count == 12);
+      CHECK((long)p->diags.count == 2);
       CHECK(p->nscreens == 5);
       CHECK(p->scenario_name != NULL &&
         strcmp(p->scenario_name, "loaded") == 0);
