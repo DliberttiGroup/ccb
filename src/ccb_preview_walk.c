@@ -15,19 +15,15 @@
 
 // ---------- state machine helpers ----------
 
-// Find a screen by name, or NULL.
+// Find a screen by name, or NULL. Chunk A: delegates to
+// pv_screen_find, so walk follows suffix-matched edges (an edge to
+// DetailActivity lands on the Detail screen) instead of showing
+// unknown for an edge the diagnostics pass accepts.
 static pv_screen *walk_find(pv_project *p, const char *name) {
-  size_t i = 0;
   if (p == NULL || name == NULL) {
     return NULL;
   }
-  for (i = 0; i < p->nscreens; i++) {
-    if (p->screens[i]->name != NULL &&
-        strcmp(p->screens[i]->name, name) == 0) {
-      return p->screens[i];
-    }
-  }
-  return NULL;
+  return pv_screen_find(p, name);
 }
 
 // The entry screen: "Home" when present, else the first screen.

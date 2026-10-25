@@ -21,14 +21,20 @@ strict = false      # true: subset warnings become errors
 gate = false        # true: preview errors fail ccb check / ccb build
 ```
 
-`layout` and `nav_graph` are optional and default by fallback, in
-order: the explicit `[preview]` key, then `<resources>/layout` /
-`<resources>/navigation` when `resources` is set, then
-`<paths res>/layout` / `<paths res>/navigation` when `[paths] res`
-is set. A configured path that does not exist is a config error
-(CCB-E1006); a fallback directory that does not exist is simply an
-empty input set (no graph file, or no layout file, is not an error —
-see the unknown cases below). A `layout`/`nav_graph` value may be a
+`layout` and `nav_graph` are overrides, not requirements. When a key
+is absent, preview falls back, in order: `<paths res>/layout` /
+`<paths res>/navigation` when `[paths] res` is set, then
+`<resources>/layout` / `<resources>/navigation` when `resources`
+is set. Each fallback candidate is existence-checked: a candidate
+that does not exist falls through to the next, and only when no
+candidate exists is the input set empty (no graph file, or no
+layout file, is not an error — see the unknown cases below). This
+matters because `resources` normally points at a values directory
+(`src/main/res/values`), not at the res root, so
+`<resources>/layout` would not exist and must not shadow the
+correct `<paths res>` fallback. An explicit key stays strict: a
+configured path that does not exist is a config error (CCB-E1006).
+A `layout`/`nav_graph` value may be a
 single file or a directory (a directory contributes every `*.xml`
 under it, in sorted order).
 
@@ -216,15 +222,26 @@ navigation-graph file into edges:
 
 The nav-graph table comes from the `nav_graph` setting/fallbacks
 above: any element carrying both `android:id` and `android:name`
-is a destination, mapping the id entry name to `android:name`'s
-simple name exactly as written (no suffix stripped, no mapping
-guessed); the first entry wins for a duplicate id. `<action>`
-elements have no `android:name` and are not destinations, so
-navigating to an action id is unknown. A destination id with no
-graph entry, or a `navigate()` call with no graph file at all, is
-an unknown edge — never a guessed destination. A non-literal
-`navigate()` destination (a variable, an expression) is likewise an
-unknown edge.
+is a destination, mapping the id entry name to the normalized
+class name. Normalization strips the `[project] package` prefix
+and any leading dot, then takes the simple name, so
+`.DetailActivity`, `com.example.DetailActivity`, and
+`DetailActivity` are the same destination. A destination with no
+matching flow screen becomes a node in its own right, marked
+`[graph]` in the logic tree and `"graph_only":true` in JSON: a
+node with unknown layout, not an error, and it never triggers the
+empty-screen warning. Destination matching is suffix-aware in both
+directions: `DetailActivity` matches a `Detail` screen and vice
+versa, but `DetailActivity` does not match `DetailFragment`. The
+first entry wins for a duplicate id. `<action>` elements have no
+`android:name` and are not destinations, so navigating to an
+action id is unknown. A destination id with no graph entry, or a
+`navigate()` call with no graph file at all, is an unknown edge —
+never a guessed destination. A non-literal `navigate()`
+destination (a variable, an expression) is likewise an unknown
+edge. A nav target is unknown (CCB-P1005) only when it matches
+nothing: no screen, no graph destination, and no activity declared
+in the configured manifest.
 
 ### Binding handlers to buttons: `[preview.bindings]`
 
@@ -266,7 +283,9 @@ edges against declared edges for the same button (same `from`):
 | Nav inside any other nested brace block of the handler body (a nested lambda/callback, a coroutine, any inner block) | NO edge at all, not even an unknown edge — this is async territory, never guessed |
 | Nav with literal arguments in the handler body (`nav("Detail", "note-42")`, `nav("Detail", id = 7)`) | Edge with args, exactly like a flow-declared nav with args (Slice 2) |
 | Nav with a non-literal argument in the handler body (`nav("Detail", noteId)`) | Edge with an `unknown` arg entry, like a flow-declared nav with a non-literal argument |
-| `navigate(R.id.x)` in the handler body, `x` in the nav graph | Edge to the graph's screen name for `x` (Slice 3) |
+| `navigate(R.id.x)` in the handler body, `x` in the nav graph | Edge to the graph's screen name for `x` (Slice 3); the name is normalized (package prefix and leading dot stripped), and a destination with no flow screen becomes a `[graph]` node, not an error |
+| Nav-graph destination with no flow screen, in any edge's target position | The destination is a node (`[graph]`, `"graph_only":true` in JSON), reachable like any screen; no CCB-P1005, no CCB-P1007 for the node |
+| Nav target matching a manifest activity but no screen or graph destination | No CCB-P1005 (the manifest activity exempts the edge); no node is created for it |
 | `navigate(R.id.x)` in the handler body, `x` not in the graph, or no graph file at all | Unknown edge (`from` = bound label, `target: null, unknown: true`), never a guessed destination |
 | `navigate("Detail")` in the handler body | Edge to `Detail`, like `nav("Detail")` (Slice 3) |
 | `navigate(...)` outside a handler body | NO edge — NavController calls follow the same handler-attribution rules as Slice 1 |

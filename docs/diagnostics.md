@@ -74,7 +74,7 @@ error).
 | CCB-P1002 | CSS parse error, partial parse kept (warning) |
 | CCB-P1003 | Overlapping boxes (warning) |
 | CCB-P1004 | Box extends past the interior bounds (warning) |
-| CCB-P1005 | Navigation to an unknown screen (error) |
+| CCB-P1005 | Navigation to a target matching nothing: no screen, no nav-graph destination, and no manifest activity (error) |
 | CCB-P1006 | Unreachable screen, nothing navigates to it (warning) |
 | CCB-P1007 | Empty screen, no components (warning) |
 | CCB-P1008 | Duplicate screen name, 2nd and later occurrences (error) |

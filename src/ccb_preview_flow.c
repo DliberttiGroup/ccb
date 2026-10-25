@@ -2315,6 +2315,11 @@ void pv_render_logic_tree(ccb_str *out, pv_project *p) {
   for (size_t i = 0; i < p->nscreens; i++) {
     pv_screen *screen = p->screens[i];
     ccb_str_append(out, screen->name);
+    // Chunk A: graph-only nodes carry unknown layout, marked so
+    // the tree never presents one as a sketched screen.
+    if (screen->graph_only) {
+      ccb_str_append(out, " [graph]");
+    }
     if (screen == entry) {
       ccb_str_append(out, " (entry)");
     }

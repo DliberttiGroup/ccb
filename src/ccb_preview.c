@@ -25,11 +25,125 @@ static void pv_diag(ccb_diag_list *diags, const char *code,
   ccb_diag_list_push(diags, &d);
 }
 
-static int pv_screen_named(pv_project *p, const char *name) {
+// Normalize an Android class name for comparison (see
+// ccb_preview.h): strip a leading '.', strip the project package
+// prefix + '.', then take the simple name (after the last '.').
+char *pv_normalize_class(const char *package, const char *name) {
+  const char *s = NULL;
+  const char *dot = NULL;
+  size_t plen = 0;
+  if (name == NULL) {
+    return NULL;
+  }
+  s = name;
+  if (s[0] == '.') {
+    s++;
+  }
+  if (package != NULL && package[0] != '\0') {
+    plen = strlen(package);
+    if (strncmp(s, package, plen) == 0 && s[plen] == '.') {
+      s += plen + 1;
+    }
+  }
+  dot = strrchr(s, '.');
+  if (dot != NULL) {
+    s = dot + 1;
+  }
+  return ccb_xstrdup(s);
+}
+
+// Length of s without one trailing "Activity" or "Fragment", or
+// the full length when it has neither. A bare "Activity" or
+// "Fragment" is a name, not a suffix, so it is kept whole.
+static size_t pv_stripped_len(const char *s) {
+  size_t n = strlen(s);
+  if (n > 8 && strcmp(s + n - 8, "Activity") == 0) {
+    return n - 8;
+  }
+  if (n > 8 && strcmp(s + n - 8, "Fragment") == 0) {
+    return n - 8;
+  }
+  return n;
+}
+
+// True when two names denote the same screen (see ccb_preview.h).
+int pv_names_match(const char *package, const char *a, const char *b) {
+  char *na = NULL;
+  char *nb = NULL;
+  size_t la = 0;
+  size_t lb = 0;
+  int match = 0;
+  if (a == NULL || b == NULL) {
+    return 0;
+  }
+  na = pv_normalize_class(package, a);
+  nb = pv_normalize_class(package, b);
+  if (na == NULL || nb == NULL) {
+    free(na);
+    free(nb);
+    return 0;
+  }
+  la = strlen(na);
+  lb = strlen(nb);
+  match = strcmp(na, nb) == 0 ||
+    (pv_stripped_len(na) != la && pv_stripped_len(na) == lb &&
+      memcmp(na, nb, lb) == 0) ||
+    (pv_stripped_len(nb) != lb && pv_stripped_len(nb) == la &&
+      memcmp(na, nb, la) == 0);
+  free(na);
+  free(nb);
+  return match;
+}
+
+// Find a screen by target name (see ccb_preview.h): an exact
+// normalized match wins over a suffix match, so a "Detail" screen
+// always beats a "DetailActivity" screen for target "Detail".
+pv_screen *pv_screen_find(pv_project *p, const char *target) {
+  char *tnorm = NULL;
   size_t i = 0;
+  if (p == NULL || target == NULL) {
+    return NULL;
+  }
+  tnorm = pv_normalize_class(p->package, target);
+  if (tnorm == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < p->nscreens; i++) {
+    char *norm = NULL;
+    int eq = 0;
+    if (p->screens[i]->name == NULL) {
+      continue;
+    }
+    norm = pv_normalize_class(p->package, p->screens[i]->name);
+    eq = norm != NULL && strcmp(norm, tnorm) == 0;
+    free(norm);
+    if (eq) {
+      free(tnorm);
+      return p->screens[i];
+    }
+  }
+  free(tnorm);
   for (i = 0; i < p->nscreens; i++) {
     if (p->screens[i]->name != NULL &&
-        strcmp(p->screens[i]->name, name) == 0) {
+        pv_names_match(p->package, p->screens[i]->name, target)) {
+      return p->screens[i];
+    }
+  }
+  return NULL;
+}
+
+// True when a nav target names a manifest activity (normalized +
+// suffix match, same as screens). Manifest activities are known
+// targets, not screens: they exempt an edge from CCB-P1005 but
+// never create a node.
+static int pv_manifest_has(pv_project *p, const char *target) {
+  size_t i = 0;
+  if (p == NULL || target == NULL) {
+    return 0;
+  }
+  for (i = 0; i < p->nmanifest_activities; i++) {
+    if (pv_names_match(p->package, p->manifest_activities[i],
+        target)) {
       return 1;
     }
   }
@@ -688,12 +802,6 @@ static const char *pv_res_name(const char *v) {
   return slash != NULL ? slash + 1 : v;
 }
 
-// Simple name of a qualified class name: after the last '.'.
-static const char *pv_simple_name(const char *v) {
-  const char *dot = strrchr(v, '.');
-  return dot != NULL ? dot + 1 : v;
-}
-
 typedef struct {
   char ***methods_io;
   char ***ids_io;
@@ -731,6 +839,7 @@ static void pv_layout_tag(void *ctx_v, const char *text, size_t tag_start,
 
 typedef struct {
   ccb_arena *arena;
+  const char *package;
   char ***keys_io;
   char ***vals_io;
   size_t *n_io;
@@ -741,17 +850,94 @@ static void pv_graph_tag(void *ctx_v, const char *text, size_t tag_start,
   pv_graph_ctx *ctx = ctx_v;
   char *id = NULL;
   char *name = NULL;
+  char *norm = NULL;
   (void)local;
   (void)local_len;
   id = pv_xml_attr(text, tag_start, tag_end, "android:id");
   name = pv_xml_attr(text, tag_start, tag_end, "android:name");
   if (id != NULL && name != NULL) {
+    // Chunk A: graph values are stored normalized, so a
+    // fully-qualified destination compares equal to the flow screen
+    // it names (see pv_normalize_class).
+    norm = pv_normalize_class(ctx->package, name);
     pv_pair_add(ctx->arena, ctx->keys_io, ctx->vals_io, ctx->n_io,
       ccb_arena_strdup(ctx->arena, pv_res_name(id)),
-      ccb_arena_strdup(ctx->arena, pv_simple_name(name)), 1);
+      ccb_arena_strdup(ctx->arena, norm != NULL ? norm : name), 1);
+    free(norm);
   }
   free(id);
   free(name);
+}
+
+typedef struct {
+  ccb_arena *arena;
+  const char *package;
+  char ***acts_io;
+  size_t *nacts_io;
+} pv_manifest_ctx;
+
+static void pv_manifest_tag(void *ctx_v, const char *text, size_t tag_start,
+    size_t tag_end, const char *local, size_t local_len) {
+  pv_manifest_ctx *ctx = ctx_v;
+  char *name = NULL;
+  char *norm = NULL;
+  size_t i = 0;
+  size_t n = 0;
+  char **next = NULL;
+  // Only <activity> elements count; activity-alias, service,
+  // receiver, and provider are not screens and never exempt a nav
+  // target. Nested tags (intent-filter children) never match the
+  // local name, so no depth tracking is needed.
+  if (local_len != 8 || memcmp(local, "activity", 8) != 0) {
+    return;
+  }
+  name = pv_xml_attr(text, tag_start, tag_end, "android:name");
+  if (name == NULL) {
+    return;
+  }
+  norm = pv_normalize_class(ctx->package, name);
+  free(name);
+  if (norm == NULL) {
+    return;
+  }
+  for (i = 0; i < *ctx->nacts_io; i++) {
+    if (strcmp((*ctx->acts_io)[i], norm) == 0) {
+      free(norm);
+      return;
+    }
+  }
+  n = *ctx->nacts_io;
+  next = ccb_arena_alloc(ctx->arena, (n + 1) * sizeof(*next));
+  for (i = 0; i < n; i++) {
+    next[i] = (*ctx->acts_io)[i];
+  }
+  next[n] = ccb_arena_strdup(ctx->arena, norm);
+  free(norm);
+  *ctx->acts_io = next;
+  *ctx->nacts_io = n + 1;
+}
+
+// Collect normalized activity names from a manifest (see header).
+void pv_manifest_activities(ccb_arena *arena, const char *manifest_path,
+    const char *package, char ***acts_io, size_t *nacts_io) {
+  char *text = NULL;
+  size_t len = 0;
+  pv_manifest_ctx ctx;
+  if (arena == NULL || acts_io == NULL || nacts_io == NULL) {
+    return;
+  }
+  *acts_io = NULL;
+  *nacts_io = 0;
+  if (manifest_path == NULL ||
+      ccb_read_file(manifest_path, &text, &len) != CCB_OK) {
+    return;
+  }
+  ctx.arena = arena;
+  ctx.package = package;
+  ctx.acts_io = acts_io;
+  ctx.nacts_io = nacts_io;
+  pv_xml_scan_tags(text, len, pv_manifest_tag, &ctx);
+  free(text);
 }
 
 // XML input files for a configured path: the file itself when the
@@ -775,32 +961,55 @@ static void pv_xml_inputs(const char *path, char ***files_io,
   *nfiles_io = 1;
 }
 
-// Location of the layout inputs: [preview] layout, else
-// <resources>/layout, else <paths res>/layout, else none.
+// Location of the layout inputs: [preview] layout when set
+// (strict: the config layer requires the path), else the first
+// EXISTING directory among <paths res>/layout and
+// <resources>/layout, else none. [paths] res is preferred: the
+// build already knows the res root, and [preview] resources is
+// documented as the values directory, whose /layout never exists
+// — so a values-dir resources must fall through to res instead of
+// shadowing it with an empty input set.
 char *pv_preview_layout_path(const ccb_config *cfg) {
   if (cfg->preview_layout != NULL) {
     return ccb_xstrdup(cfg->preview_layout);
   }
-  if (cfg->preview_resources != NULL) {
-    return ccb_path_join(cfg->preview_resources, "layout");
-  }
   if (cfg->res != NULL) {
-    return ccb_path_join(cfg->res, "layout");
+    char *cand = ccb_path_join(cfg->res, "layout");
+    if (ccb_path_exists(cand)) {
+      return cand;
+    }
+    free(cand);
+  }
+  if (cfg->preview_resources != NULL) {
+    char *cand = ccb_path_join(cfg->preview_resources, "layout");
+    if (ccb_path_exists(cand)) {
+      return cand;
+    }
+    free(cand);
   }
   return NULL;
 }
 
-// Location of the nav-graph inputs: [preview] nav_graph, else
-// <resources>/navigation, else <paths res>/navigation, else none.
+// Location of the nav-graph inputs: [preview] nav_graph when set
+// (strict, as above), else the first EXISTING directory among
+// <paths res>/navigation and <resources>/navigation, else none.
 char *pv_preview_nav_path(const ccb_config *cfg) {
   if (cfg->preview_nav_graph != NULL) {
     return ccb_xstrdup(cfg->preview_nav_graph);
   }
-  if (cfg->preview_resources != NULL) {
-    return ccb_path_join(cfg->preview_resources, "navigation");
-  }
   if (cfg->res != NULL) {
-    return ccb_path_join(cfg->res, "navigation");
+    char *cand = ccb_path_join(cfg->res, "navigation");
+    if (ccb_path_exists(cand)) {
+      return cand;
+    }
+    free(cand);
+  }
+  if (cfg->preview_resources != NULL) {
+    char *cand = ccb_path_join(cfg->preview_resources, "navigation");
+    if (ccb_path_exists(cand)) {
+      return cand;
+    }
+    free(cand);
   }
   return NULL;
 }
@@ -1036,6 +1245,7 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
         continue;
       }
       gctx.arena = arena;
+      gctx.package = cfg != NULL ? cfg->package : NULL;
       gctx.keys_io = &graph_keys;
       gctx.vals_io = &graph_vals;
       gctx.n_io = &ngraph;
@@ -1162,18 +1372,76 @@ void pv_project_assemble(pv_project *p, pv_screen **screens,
     size_t nscreens, pv_pending_edge **pending, size_t npending,
     pv_css_entry *css_entries, size_t ncss,
     const char *resources_dir, const ccb_scenario *scenario,
-    ccb_diag_list *diags) {
+    ccb_diag_list *diags, char **graph_vals, size_t ngraph,
+    char **manifest_activities, size_t nmanifest_activities,
+    const char *package) {
   ccb_arena *arena = NULL;
   size_t i = 0;
   size_t pi = 0;
+  pv_screen **all = NULL;
+  size_t nall = 0;
+  size_t g = 0;
   if (p == NULL) {
     return;
   }
   arena = p->arena;
+  // Chunk A: record the package + manifest activities for
+  // pv_project_diagnose (P1005 scope) before anything needs them.
+  p->package = package != NULL ? ccb_arena_strdup(arena, package) : NULL;
+  if (nmanifest_activities > 0) {
+    p->manifest_activities = ccb_arena_alloc(arena,
+      nmanifest_activities * sizeof(*p->manifest_activities));
+    for (i = 0; i < nmanifest_activities; i++) {
+      p->manifest_activities[i] =
+        ccb_arena_strdup(arena, manifest_activities[i]);
+    }
+  } else {
+    p->manifest_activities = NULL;
+  }
+  p->nmanifest_activities = nmanifest_activities;
+  // Chunk A: one node per nav-graph destination with no matching
+  // flow screen, appended after the flow screens so the entry rule
+  // (Home, else first screen) never changes for a project that has
+  // flow screens. Matching is pv_names_match, so a DetailActivity
+  // destination never duplicates a Detail screen, and two graph
+  // ids naming the same destination yield one node. Nodes carry no
+  // boxes, so distribution (label match), CSS scoping by label,
+  // scenario row/field application (root-NULL guards), and layout
+  // (root-NULL early return) all skip them naturally.
+  all = ccb_arena_alloc(arena,
+    (nscreens + ngraph == 0 ? 1 : nscreens + ngraph) * sizeof(*all));
+  for (i = 0; i < nscreens; i++) {
+    all[nall++] = screens[i];
+  }
+  for (g = 0; g < ngraph; g++) {
+    pv_screen *node = NULL;
+    int found = 0;
+    if (graph_vals == NULL || graph_vals[g] == NULL) {
+      continue;
+    }
+    for (i = 0; i < nall; i++) {
+      if (all[i]->name != NULL &&
+          pv_names_match(package, all[i]->name, graph_vals[g])) {
+        found = 1;
+        break;
+      }
+    }
+    if (found) {
+      continue;
+    }
+    node = ccb_arena_alloc(arena, sizeof(*node));
+    memset(node, 0, sizeof(*node));
+    node->name = ccb_arena_strdup(arena, graph_vals[g]);
+    node->graph_only = 1;
+    all[nall++] = node;
+  }
+  screens = all;
+  nscreens = nall;
   // The screens array is a fresh arena array of borrowed screen
   // pointers; the screens themselves stay caller-owned (the
   // load path parses them into this arena, the LSP server
-  // deep-copies its staging fragments into it).
+  // deep-copies its staging fragments into it), except the
+  // graph-only nodes above, which are arena-owned here.
   p->screens = ccb_arena_alloc(arena,
     (nscreens == 0 ? 1 : nscreens) * sizeof(*p->screens));
   for (i = 0; i < nscreens; i++) {
@@ -1336,6 +1604,12 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
   size_t nscreens = 0;
   pv_pending_edge **pending = NULL;
   size_t npending = 0;
+  // Chunk A: graph values are function-scoped (not scan-block
+  // scoped) so pv_project_assemble can create nodes for graph
+  // destinations with no flow screen. The arrays are arena-owned
+  // by the scan, so they outlive the block either way.
+  char **graph_vals = NULL;
+  size_t ngraph = 0;
   if (out == NULL) {
     return CCB_ERR_CONFIG;
   }
@@ -1374,8 +1648,6 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
   p->interior_cols = frame_width - 2;
   {
     char **graph_keys = NULL;
-    char **graph_vals = NULL;
-    size_t ngraph = 0;
     char **onclick_methods = NULL;
     char **onclick_labels = NULL;
     size_t nonclick = 0;
@@ -1436,9 +1708,19 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
         }
       }
     }
-    pv_project_assemble(p, screens, nscreens, pending, npending,
-      css_entries, ncss_entries, cfg->preview_resources, scenario,
-      dl);
+    {
+      // Chunk A: manifest activities for the P1005 scope, parsed
+      // from the configured manifest (none when unconfigured or
+      // unreadable — preview never fails on the manifest).
+      char **manifest_acts = NULL;
+      size_t nmanifest_acts = 0;
+      pv_manifest_activities(arena, cfg->manifest, cfg->package,
+        &manifest_acts, &nmanifest_acts);
+      pv_project_assemble(p, screens, nscreens, pending, npending,
+        css_entries, ncss_entries, cfg->preview_resources, scenario,
+        dl, graph_vals, ngraph, manifest_acts, nmanifest_acts,
+        cfg->package);
+    }
     for (ci = 0; ci < ncss_entries; ci++) {
       ccb_diag_list_free(&css_lists[ci]);
     }
@@ -1503,8 +1785,10 @@ long pv_project_diagnose(pv_project *p) {
     p->screens[i]->reachable = 0;
   }
   entry->reachable = 1;
-  // BFS from the entry over known (non-unknown) edges, by screen name,
-  // to a fixed point. Unknown edges never traverse.
+  // BFS from the entry over known (non-unknown) edges, by screen
+  // name, to a fixed point. Unknown edges never traverse. Chunk A:
+  // the target resolves through pv_screen_find, so an edge to
+  // DetailActivity marks the Detail screen reachable.
   do {
     changed = 0;
     for (i = 0; i < p->nscreens; i++) {
@@ -1515,21 +1799,22 @@ long pv_project_diagnose(pv_project *p) {
       }
       for (e = 0; e < screen->nedges; e++) {
         pv_edge *edge = &screen->edges[e];
+        pv_screen *target = NULL;
         if (edge->unknown || edge->target == NULL) {
           continue;
         }
-        for (j = 0; j < p->nscreens; j++) {
-          if (p->screens[j]->name != NULL &&
-              strcmp(p->screens[j]->name, edge->target) == 0 &&
-              !p->screens[j]->reachable) {
-            p->screens[j]->reachable = 1;
-            changed = 1;
-          }
+        target = pv_screen_find(p, edge->target);
+        if (target != NULL && !target->reachable) {
+          target->reachable = 1;
+          changed = 1;
         }
       }
     }
   } while (changed);
-  // Missing-target edges: one error per edge.
+  // Missing-target edges: one error per edge. Chunk A: a target is
+  // known when it matches a screen (normalized, suffix-aware), a
+  // nav-graph destination (now a node, so matched above), or a
+  // manifest activity. Anything else is CCB-P1005.
   for (i = 0; i < p->nscreens; i++) {
     pv_screen *screen = p->screens[i];
     size_t e = 0;
@@ -1539,7 +1824,8 @@ long pv_project_diagnose(pv_project *p) {
       if (edge->unknown || edge->target == NULL) {
         continue;
       }
-      if (pv_screen_named(p, edge->target)) {
+      if (pv_screen_find(p, edge->target) != NULL ||
+          pv_manifest_has(p, edge->target)) {
         continue;
       }
       ccb_str_init(&msg);
@@ -1589,7 +1875,8 @@ long pv_project_diagnose(pv_project *p) {
         NULL, -1);
       ccb_str_free(&msg);
     }
-    if (screen->root == NULL || screen->root->nchildren == 0) {
+    if (!screen->graph_only &&
+        (screen->root == NULL || screen->root->nchildren == 0)) {
       ccb_str_init(&msg);
       ccb_str_append(&msg, "empty screen '");
       ccb_str_append(&msg, screen->name != NULL ? screen->name : "?");
@@ -1778,6 +2065,11 @@ static void pv_json_screen(ccb_str *out, pv_project *p,
     ccb_str_appendf(out, ",\"entry\":%s,\"reachable\":%s",
       screen == entry ? "true" : "false",
       screen->reachable ? "true" : "false");
+    // Chunk A: only when set, so output without graph nodes is
+    // byte-identical to before.
+    if (screen->graph_only) {
+      ccb_str_append(out, ",\"graph_only\":true");
+    }
     ccb_str_append(out, ",\"boxes\":");
     if (screen->root != NULL) {
       pv_json_box(out, screen->root, p->interior_cols,

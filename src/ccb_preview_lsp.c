@@ -850,8 +850,21 @@ static pv_project *lsp_build(pv_lsp_server *s, ccb_diag_list *dl) {
     s->cfg->preview_phone_width : PV_LSP_PHONE_DP_WIDTH;
   p->frame_width = PV_LSP_FRAME_WIDTH;
   p->interior_cols = PV_LSP_FRAME_WIDTH - 2;
-  pv_project_assemble(p, screens, nscreens, pending, npending,
-    entries, s->ncss, s->cfg->preview_resources, scenario, dl);
+  {
+    // Chunk A: same graph-node + manifest inputs as the load path.
+    // Manifest activities live in the build arena (not the XML
+    // arena, which the next rebuild destroys). Manifest changes do
+    // not yet trigger a rebuild on their own; the next flow, CSS,
+    // config, or XML change picks them up.
+    char **manifest_acts = NULL;
+    size_t nmanifest_acts = 0;
+    pv_manifest_activities(arena, s->cfg->manifest, s->cfg->package,
+      &manifest_acts, &nmanifest_acts);
+    pv_project_assemble(p, screens, nscreens, pending, npending,
+      entries, s->ncss, s->cfg->preview_resources, scenario, dl,
+      s->graph_vals, s->ngraph, manifest_acts, nmanifest_acts,
+      s->cfg->package);
+  }
   free(entries);
   // Trace overlay after assembly, before diagnose: the CLI's order.
   if (s->trace != NULL) {

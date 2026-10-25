@@ -220,6 +220,11 @@ typedef struct {
   pv_edge *edges;
   size_t nedges, capedges;
   int reachable; // computed by pv_project_diagnose
+  // Chunk A: 1 when this screen came from a nav-graph destination
+  // with no flow sketch (a node with unknown layout, not an error).
+  // Graph-only screens skip the CCB-P1007 empty-screen warning:
+  // emptiness is definitional for them, not a finding.
+  int graph_only;
 } pv_screen;
 
 typedef struct {
@@ -249,6 +254,16 @@ typedef struct {
   // matched. Emitted as "trace":{"steps":N} in JSON only when set.
   int trace_applied;
   long trace_step_count;
+  // Chunk A: [project] package (arena-owned, or NULL when the
+  // config has none), used to normalize Android class names before
+  // comparison.
+  char *package;
+  // Chunk A: manifest activity names, normalized (arena-owned).
+  // A nav target matching one of these is known, not a P1005 —
+  // but manifest activities are NOT screens: unlike graph
+  // destinations, they do not become nodes.
+  char **manifest_activities;
+  size_t nmanifest_activities;
 } pv_project;
 
 // ---------- CSS subset parser + layout (ccb_preview_css.c) ----------
@@ -433,10 +448,22 @@ typedef struct {
 // already initialized; this function fills screens, rules, diags,
 // and layout. Does not diagnose (pv_project_diagnose) and does not
 // apply a trace — both stay caller steps, as in the CLI.
+// Chunk A: assembly also appends one node per nav-graph
+// destination with no matching flow screen (graph_vals, normalized
+// at scan time; matched with pv_names_match, so a destination
+// spelling like DetailActivity never duplicates a Detail screen),
+// and records the package + manifest activities on the project
+// for pv_project_diagnose. Graph nodes are added before
+// distribution, CSS, and layout, so they flow through assembly
+// like any screen (except they carry no boxes, so distribution,
+// CSS scoping by label, scenario row/field application, and layout
+// all skip them naturally).
 void pv_project_assemble(pv_project *p, pv_screen **screens,
   size_t nscreens, pv_pending_edge **pending, size_t npending,
   pv_css_entry *css_entries, size_t ncss, const char *resources_dir,
-  const ccb_scenario *scenario, ccb_diag_list *diags);
+  const ccb_scenario *scenario, ccb_diag_list *diags,
+  char **graph_vals, size_t ngraph, char **manifest_activities,
+  size_t nmanifest_activities, const char *package);
 
 // Scan the nav-graph and layout XML inputs for a config: the graph
 // id -> screen name map and the onClick method -> bound label map
@@ -453,11 +480,45 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
   size_t *nonclick_io, ccb_diag_list *diags);
 
 // Location of the layout/nav-graph inputs: [preview] layout /
-// nav_graph, else <resources>/layout or navigation, else <paths
-// res>/layout or navigation, else NULL. Malloc'd, caller frees.
-// Shared with the LSP server, which watches the same inputs.
+// nav_graph when set (strict: the config layer requires the path),
+// else the first EXISTING directory among <paths res>/layout or
+// navigation and <resources>/layout or navigation, else NULL.
+// [paths] res is preferred: the build already knows the res root,
+// and [preview] resources is documented as the values directory,
+// whose /layout never exists — so a values-dir resources must fall
+// through to res instead of shadowing it with an empty input set.
+// Malloc'd, caller frees. Shared with the LSP server, which
+// watches the same inputs.
 char *pv_preview_layout_path(const ccb_config *cfg);
 char *pv_preview_nav_path(const ccb_config *cfg);
+// Normalize an Android class name for comparison: strip a leading
+// '.', strip the project package prefix + '.', then take the
+// simple name (after the last '.'). So ".DetailActivity",
+// "com.example.DetailActivity", and "DetailActivity" all normalize
+// to "DetailActivity". Malloc'd; NULL in gives NULL out. A NULL
+// package only skips the prefix strip.
+char *pv_normalize_class(const char *package, const char *name);
+// True when two names denote the same screen: equal after
+// normalization, or equal after stripping one trailing "Activity"
+// or "Fragment" from exactly one side (DetailActivity matches
+// Detail, and Detail matches DetailActivity; DetailActivity does
+// NOT match DetailFragment). Deterministic; anything else does
+// not match, never a guess.
+int pv_names_match(const char *package, const char *a, const char *b);
+// Find a screen by target name using pv_names_match, preferring an
+// exact normalized match over a suffix match, or NULL when no
+// screen matches. The project's package (when set) drives
+// normalization; a NULL package degrades to leading-dot + simple
+// name only.
+pv_screen *pv_screen_find(pv_project *p, const char *target);
+// Collect normalized activity names from the manifest at path
+// (android:name on <activity> elements), or none when the path is
+// NULL or the file is missing/unreadable. Arena-owned strings;
+// the arrays themselves are arena-grown. A malformed manifest
+// yields whatever tags scan cleanly, never an error: preview must
+// not fail on a manifest it cannot fully read.
+void pv_manifest_activities(ccb_arena *arena, const char *manifest_path,
+  const char *package, char ***acts_io, size_t *nacts_io);
 // Error classification for one diagnostic code under a strict flag:
 // CCB-P1005 and CCB-P1008 are always errors; CCB-P1001 and
 // CCB-P1014 count as errors only when strict is set; everything
