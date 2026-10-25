@@ -166,6 +166,34 @@ tests in `tests/test_preview_lsp.c`, docs in `docs/preview.md`):
   the terminal" client; editor integration via plain LSP clients
   comes free with chunk 3.
 
+As built (Chunk 4, 2026-10-24): new module
+`src/ccb_preview_tree.{h,c}` plus CLI wiring in `src/ccb_cli.c`
+(flag, conflicts, dispatch) and `tests/test_preview_tree.c` (77
+checks). The state machine / terminal layer split mirrors walk
+mode: scripted keys and canned publishTree payloads cover
+selection (clamp, name-preserving refresh, clamped fallback),
+in/out edges, branches with picks, diagnostics, scenario/trace
+headers, malformed-payload safety, and the framed-message feed
+(split header/body writes, several frames per read, responses
+ignored, garbage headers skipped, bad JSON skipped). The run loop
+spawns `ccb lsp` as a child (fork + pipes; `/proc/self/exe`
+when no exe path is given), initializes it at the project
+directory, and shuts it down cleanly on every exit path
+(shutdown + exit, bounded wait, SIGKILL fallback); the terminal
+is restored before returning. `--scenario`/`--trace` are passed
+to the server (unknown scenario / unreadable or malformed trace
+are exit 2, validated before spawning); `--screen` or a
+positional screen selects the initial screen after the first
+publish (unknown name is exit 1 with the list); non-TTY stdio is
+exit 2; server EOF without a publish, or unexpectedly
+mid-session, is exit 1. Two documented readings of the sketch:
+(1) "affected subtree refreshes" is a full view re-render on
+every publishTree — the changed data moves, there is no
+per-subtree diff marking. (2) Published JSON carries no
+named-arg flag, so every literal arg renders quoted in the tree
+view (named args lose their as-written form; the tree format in
+the docs says so). No editor plugin was built, per the brief.
+
 ## Parked, not this round
 
 - Snapshot rendering (uiautomator / accessibility dump -> boxes).

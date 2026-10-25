@@ -15,6 +15,7 @@
 #include "ccb_pipeline.h"
 #include "ccb_preview.h"
 #include "ccb_preview_lsp.h"
+#include "ccb_preview_tree.h"
 #include "ccb_preview_walk.h"
 #include "ccb_preview_watch.h"
 #include "ccb_preview_gate.h"
@@ -52,8 +53,8 @@ static const char *CCB_USAGE =
   "  logcat                                    stream device logs\n"
   "  preview [--ascii] [--width N] [--device phone|tablet] [--strict]\n"
   "          [--screen NAME] [--output FILE] [--update-goldens] [--walk]\n"
-  "          [--watch] [--diff DIR] [--storyboard A,B] [screen]\n"
-  "                                            render a UI preview\n"
+  "          [--watch] [--diff DIR] [--storyboard A,B] [--tree-live]\n"
+  "          [screen]                              render a UI preview\n"
   "  lsp [--scenario NAME] [--trace FILE]     preview logic-tree server\n"
   "                                            (JSON-RPC over stdio)\n"
   "  version                                   print the version\n";
@@ -77,6 +78,8 @@ typedef struct {
   int preview_strict;
   int preview_walk;
   int preview_watch;
+  // Chunk 4: --tree-live (live logic-tree client, spawns ccb lsp).
+  int preview_tree_live;
   long preview_width;
   int preview_width_set;
   const char *preview_device;
@@ -3210,6 +3213,40 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--walk\n");
     return 2;
   }
+  // Chunk 4: tree-live is interactive like walk, so it rejects the
+  // other output modes the same way. --scenario/--trace compose
+  // (they are passed to the spawned server); --screen and a
+  // positional screen select the initial screen.
+  if (a->preview_tree_live && a->preview_walk) {
+    fprintf(stderr, "error: --tree-live cannot be combined with "
+      "--walk\n");
+    return 2;
+  }
+  if (a->preview_tree_live && a->preview_watch) {
+    fprintf(stderr, "error: --tree-live cannot be combined with "
+      "--watch\n");
+    return 2;
+  }
+  if (a->preview_tree_live && a->preview_output != NULL) {
+    fprintf(stderr, "error: --tree-live cannot be combined with "
+      "--output (tree-live mode is interactive)\n");
+    return 2;
+  }
+  if (a->preview_tree_live && a->preview_update_goldens) {
+    fprintf(stderr, "error: --tree-live cannot be combined with "
+      "--update-goldens\n");
+    return 2;
+  }
+  if (a->preview_tree_live && a->preview_diff != NULL) {
+    fprintf(stderr, "error: --tree-live cannot be combined with "
+      "--diff\n");
+    return 2;
+  }
+  if (a->preview_tree_live && a->preview_storyboard != NULL) {
+    fprintf(stderr, "error: --tree-live cannot be combined with "
+      "--storyboard\n");
+    return 2;
+  }
   if (a->preview_diff != NULL && a->preview_watch) {
     fprintf(stderr, "error: --diff cannot be combined with --watch\n");
     return 2;
@@ -3479,6 +3516,70 @@ static int ccb_cmd_preview(ccb_args *a) {
       return 2;
     }
   }
+  // Chunk 4: tree-live spawns the server instead of loading a
+  // project locally, so it branches before the load. The scenario
+  // was already validated above; the trace is validated here
+  // (read + parse, exit 2 on failure) so a bad --trace is a usage
+  // error, not a server that dies mid-session. The server root is
+  // re-discovered rather than kept from the freed toml path, so
+  // this branch owns no extra lifetime.
+  if (a->preview_tree_live) {
+    char *root_path = NULL;
+    char *root_dir = NULL;
+    const char *start = a->preview_screen != NULL ?
+      a->preview_screen : a->positional;
+    int trc = 0;
+    if (ccb_config_discover(cwd, a->config_path, &root_path) !=
+        CCB_OK) {
+      fprintf(stderr, "error: no ccb.toml found in this directory "
+        "or any parent\n");
+      ccb_config_free(cfg);
+      ccb_diag_list_free(&diags);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return 2;
+    }
+    root_dir = ccb_dirname(root_path);
+    free(root_path);
+    if (a->preview_trace != NULL) {
+      char *ttext = NULL;
+      size_t tlen = 0;
+      char *terr = NULL;
+      pv_trace *trace = NULL;
+      if (ccb_read_file(a->preview_trace, &ttext, &tlen) != CCB_OK) {
+        fprintf(stderr, "error: cannot read trace file '%s'\n",
+          a->preview_trace);
+        free(root_dir);
+        ccb_config_free(cfg);
+        ccb_diag_list_free(&diags);
+        ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+          watch_styles, watch_flow);
+        return 2;
+      }
+      trace = pv_trace_parse(ttext, &terr);
+      free(ttext);
+      if (trace == NULL) {
+        fprintf(stderr, "error: invalid trace file '%s': %s\n",
+          a->preview_trace, terr != NULL ? terr : "parse error");
+        free(terr);
+        free(root_dir);
+        ccb_config_free(cfg);
+        ccb_diag_list_free(&diags);
+        ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+          watch_styles, watch_flow);
+        return 2;
+      }
+      pv_trace_free(trace);
+    }
+    trc = pv_tree_run(NULL, root_dir, a->preview_scenario,
+      a->preview_trace, start);
+    free(root_dir);
+    ccb_config_free(cfg);
+    ccb_diag_list_free(&diags);
+    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+      watch_styles, watch_flow);
+    return trc;
+  }
   lrc = pv_project_load_scenario(cfg, eff_width, a->preview_ascii,
     a->preview_strict, &diags, scenario, &proj);
   if (lrc == CCB_ERR_CONFIG) {
@@ -3703,6 +3804,8 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
         a->preview_walk = 1;
       } else if (strcmp(flag, "--watch") == 0) {
         a->preview_watch = 1;
+      } else if (strcmp(flag, "--tree-live") == 0) {
+        a->preview_tree_live = 1;
       } else if (strcmp(flag, "--strict") == 0) {
         a->preview_strict = 1;
       } else if (strcmp(flag, "--width") == 0) {
@@ -3825,7 +3928,8 @@ static int ccb_cmd_lsp(ccb_args *a) {
   if (a->preview_walk || a->preview_watch || a->preview_diff != NULL ||
       a->preview_storyboard != NULL || a->preview_screen != NULL ||
       a->preview_output != NULL || a->preview_update_goldens ||
-      a->preview_record != NULL || a->positional != NULL) {
+      a->preview_record != NULL || a->preview_tree_live ||
+      a->positional != NULL) {
     fprintf(stderr, "error: lsp takes only --scenario and --trace\n");
     return 2;
   }

@@ -939,6 +939,57 @@ no `ccb.toml` / preview not applicable are exit 2, matching the
 CLI. The project is found by upward search from the working
 directory, like `preview`.
 
+## Tree-live mode: `ccb preview --tree-live [--scenario NAME] [--trace FILE] [screen]`
+
+The terminal tree client: it spawns `ccb lsp` as a child process,
+initializes it at the project directory, and renders the logic
+tree live in the terminal — the "render straight to the terminal"
+client from the runtime plan. It never parses flow or CSS itself;
+everything it shows is a published tree from the server.
+
+The view has three parts. A screen list with a `>` cursor
+(`[entry]` marks the entry screen, `(unreachable)` marks screens
+no edge reaches). A detail pane for the selected screen: its
+outgoing edges (`-> Target(args) via "label" [branch] [trace]`,
+`-> unknown` for dynamic destinations), its incoming edges
+(`<- Screen via "label"` — self-edges included), and its branches
+(`when state: is Loading, is Loaded, else (picked: is Loaded
+[scenario])`). Diagnostics inline below, in project order
+(`CODE message (file:line)`; the file part is omitted when the
+diagnostic names no file). A `scenario: NAME` / `trace: N steps`
+line appears when an overlay is active. Argument provenance is
+per-slot: a scenario- or trace-filled literal renders as
+`"value" [scenario]` / `"value" [trace]`; static literals stay
+unmarked, and the published JSON carries no named-arg flag, so
+every literal renders quoted here.
+
+Keys: `j`/`k` or up/down move the selection (clamps at the ends,
+never wraps); `q` or Ctrl-C quits. A `ccb/publishTree`
+notification re-renders the view: the selection follows the
+selected screen's name when it still exists, else clamps to the
+previous index. Before the first publish the view says "waiting
+for logic tree..." and keys still work, so a slow server never
+looks hung.
+
+Composition and exit codes: `--scenario` and `--trace` are passed
+to the spawned server (an unknown scenario or an unreadable /
+malformed trace is exit 2, validated before spawning);
+`--screen` or a positional screen selects the initial screen
+after the first publish (an unknown name is exit 1 with the
+available screens listed). `--tree-live` rejects `--walk`,
+`--watch`, `--diff`, `--storyboard`, `--output`, and
+`--update-goldens` (exit 2); `--ascii`/`--width`/`--device` are
+accepted but have no effect on the tree view. Non-TTY stdin or
+stdout is exit 2 with a diagnostic, never a hang. The server is
+shut down cleanly on every exit path (shutdown + exit, bounded
+wait, SIGKILL fallback), and the terminal is restored. If the
+server ends without ever publishing a tree, or ends unexpectedly
+mid-session, the client prints a diagnostic and exits 1. The
+state machine (selection, publish application, framed-message
+feed) is unit-tested with scripted keys and canned payloads in
+`tests/test_preview_tree.c`; the terminal loop itself is covered
+by a scripted pty session on the phone, like walk mode.
+
 ## Worked example
 
 The reference sample app lives in `examples/preview-sample/`. Run it
