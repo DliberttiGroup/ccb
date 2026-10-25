@@ -96,6 +96,65 @@ index of every top-level fun across all flow files, then:
   warns, never guesses. Still static, still conservative.
 - Tests + docs with every behavior change.
 
+### Chunk B as built (2026-10-24)
+
+- Project load reads all flow texts first, builds one
+  `pv_fun_index` (name -> flow file, over borrowed label/text
+  pairs), then parses each file with `pv_flow_parse_indexed`;
+  the texts outlive every parse that uses the index. The old
+  `pv_flow_parse_full` is a NULL-index wrapper, so index-less
+  parses keep the exact old behavior (pinned by a test).
+- Cross-file bodies are scanned with a scratch parser that
+  re-tokenizes the retained foreign text and shares the caller's
+  arena, diagnostics, bindings, graph, and index, with
+  `p->screen` set to the button's screen, so edges land
+  correctly with dedup/conflict behavior inherited. Same-file
+  resolution shadows cross-file resolution.
+- Ambiguity counts DISTINCT files, not definitions: two
+  definitions in one file resolve to the first, while one
+  definition in each of two files warns CCB-P1024 (once per
+  referencing file and name, covering both `::` refs and helper
+  calls) and records nothing. P1024 falls through to the default
+  warning-always classification, like P1023, so no gate change
+  was needed; `docs/diagnostics.md` and the `ccb_preview.h`
+  comment record it.
+- Helper following is a `helper_depth` parser field: 0 in a
+  handler body (calls followed), 1 inside a followed helper
+  (calls not followed), which alone guarantees termination for
+  self- and mutual recursion. The current branch annotation
+  propagates through the followed helper. Dotted calls and
+  calls without `(` are not helpers; unmatched ordinary calls
+  warn about nothing.
+- Val tracking is a per-parser map, reset at each new screen
+  fun, recording only the plain `val`/`var NAME = ::HANDLER`
+  shape (contiguous tokens). The typed form
+  (`val h: Handler = ::x`) is a documented limitation that
+  keeps the old behavior (no edge, no warning).
+- Screen candidacy deliberately NOT changed here: cross-file
+  handler funs (and same-file helper funs) still appear as
+  screens until Chunk C's reference counting — the P3 test
+  asserts edge facts only, not phantom absence. Chunk A's
+  follow-ups (tree-live / CLI `--screen` exact-name lookup,
+  LSP manifest watching) also untouched, per the task.
+- P3-messy outcome on device and VM alike: "Helper nav" ->
+  Detail, "Cross file" -> Form, "Var ref" -> Form now resolve;
+  "Nested" stays missing (Chunk C territory), "Mystery" stays
+  P1019, "Dynamic" stays unknown.
+- Tests: `tests/test_preview_correctness_b.c` (64 checks),
+  covering cross-file `::` resolution, helper inlining
+  (same-file, cross-file, depth cap, branch propagation),
+  self- and mutual-recursion termination, val/var-held refs
+  plus the typed-form limitation plus `onClick = h`,
+  ambiguous `::` refs and helper calls with dedup,
+  same-file shadowing, two-definitions-one-file, NULL-index
+  old behavior, and the real P3 tree plus a CLI `--json`
+  smoke test. Two pre-existing handler tests were deliberately
+  updated (not weakened): the helper-call and val-held-ref
+  cases in `tests/test_preview_handlers.c` asserted the old
+  no-edge outcomes that Chunk B reverses by design; they now
+  assert the edge exists, keeping the still-a-screen checks
+  that Chunk C will revisit. No other test changed.
+
 ## Chunk C — No silence + diagnostic precision + regression corpus
 
 - Unattributed-nav warning (new P-code): EVERY nav call found

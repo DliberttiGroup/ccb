@@ -76,6 +76,24 @@ typedef struct {
   // in the caller's arena (NULL when the caller wants none).
   pv_pending_edge ***pending_io;
   size_t *npending_io;
+  // Chunk B: whole-project function index (borrowed, NULL means
+  // per-file behavior). Cross-file method references and helper
+  // calls resolve through it; see pv_fun_index in ccb_preview.h.
+  pv_fun_index *index;
+  // Chunk B: helper-follow depth. 0 while scanning a handler body
+  // (helper calls are followed one level); 1 while scanning a
+  // followed helper's body (calls inside it are NOT followed, so
+  // every helper chain terminates).
+  int helper_depth;
+  // Chunk B: local `val`/`var` bindings in the current screen fun
+  // body: `val NAME = ::HANDLER` statements, in order. Reset at
+  // each new screen fun. Names and targets point at token text
+  // (arena); the arrays are xmalloc'd and freed at the end of the
+  // parse. Only the plain shape is recorded; a typed form
+  // (`val h: Handler = ::onClick`) is not, and keeps the old
+  // behavior (no edge, no warning).
+  char **val_names, **val_targets;
+  size_t nvals, capvals;
 } pv_parser;
 
 static void pv_diag(pv_parser *p, const char *code, const char *message, long line) {
@@ -700,23 +718,39 @@ static void pv_scan_navs(pv_parser *p, size_t start, size_t end) {
 //   recv.setOnClickListener({ ... })         (parenthesized lambda)
 //   recv.onClick = { ... }                   (property assignment)
 //   recv.setOnClickListener(::handler)       (direct method reference)
+//   recv.setOnClickListener(h)               (variable-held reference,
+//     where `val h = ::handler` appeared earlier in the same screen
+//     body; the plain shape only, no typed form)
+//   recv.onClick = h                         (same, property form)
 // where recv is the receiver identifier (the last identifier before
 // the method in a dotted chain, e.g. `openButton` in
 // `binding.openButton.setOnClickListener`). The handler body's nav
 // calls become derived edges from the bound component label (via
 // [preview.bindings]); nav/startActivity calls nested inside any
 // brace block of the handler body, inside a conditional, or inside a
-// helper the handler merely calls are NOT edges in Slice 1. A
-// reference held in a variable first is not a direct reference and
-// resolves nothing. A named handler must be a top-level fun in the
-// SAME file as the attachment; a cross-file reference resolves
-// nothing (the parser is per-file) and warns nothing.
+// helper the handler merely calls are NOT edges in Slice 1 — except
+// for Chunk B's one-level helper follow (below). A named handler
+// must be a top-level fun; same-file first, else the whole-project
+// index when the name is unique across files. An ambiguous index
+// match warns CCB-P1024 and records nothing, never a guess.
+//
+// Chunk B: a handler body may call a helper by bare name
+// (`openDetail()`), and the helper's body is scanned one level
+// deep (calls inside the helper body are not followed, so every
+// chain terminates, including self-recursion) with the current
+// branch annotation, attributing the helper's navs to the button.
+// Dotted calls, nested-block calls, and calls to unknown names are
+// not followed. A helper is any top-level fun found by bare name;
+// a screen fun scanned this way yields only its depth-0 navs.
 //
 // A top-level fun whose name is referenced via :: from a screen body
 // is a handler, not a screen: the pre-pass below collects those
 // names (pruned to references from non-handler funs, so two handlers
 // referencing each other do not keep each other alive) and the main
 // loop skips their bodies instead of creating screens for them.
+// (The pre-pass is still per-file; cross-file handler funs still
+// appear as screens until Chunk C's reference counting. Chunk B
+// only resolves their edges.)
 
 static const char *pv_binding_label(pv_parser *p, const char *receiver) {
   size_t i = 0;
@@ -726,6 +760,39 @@ static const char *pv_binding_label(pv_parser *p, const char *receiver) {
   for (i = 0; i < p->nbind; i++) {
     if (p->bind_keys[i] != NULL && strcmp(p->bind_keys[i], receiver) == 0) {
       return p->bind_vals[i];
+    }
+  }
+  return NULL;
+}
+
+// Chunk B: local `val`/`var` bindings in the current screen fun
+// body. Record `val NAME = ::HANDLER` (plain shape only); look a
+// variable's handler name up, or NULL when unrecorded.
+static void pv_val_record(pv_parser *p, char *name, char *target) {
+  size_t i = 0;
+  for (i = 0; i < p->nvals; i++) {
+    if (strcmp(p->val_names[i], name) == 0) {
+      p->val_targets[i] = target;
+      return;
+    }
+  }
+  if (p->nvals == p->capvals) {
+    size_t ncap = p->capvals == 0 ? 8 : p->capvals * 2;
+    p->val_names = ccb_xrealloc(p->val_names, ncap * sizeof(*p->val_names));
+    p->val_targets = ccb_xrealloc(p->val_targets,
+      ncap * sizeof(*p->val_targets));
+    p->capvals = ncap;
+  }
+  p->val_names[p->nvals] = name;
+  p->val_targets[p->nvals] = target;
+  p->nvals++;
+}
+
+static char *pv_val_lookup(pv_parser *p, const char *name) {
+  size_t i = 0;
+  for (i = 0; i < p->nvals; i++) {
+    if (strcmp(p->val_names[i], name) == 0) {
+      return p->val_targets[i];
     }
   }
   return NULL;
@@ -890,6 +957,155 @@ static int pv_handler_range(pv_parser *p, const char *name, size_t *start_out,
     }
   }
   return 0;
+}
+
+// ---------- Chunk B: whole-project function index ----------
+//
+// The index maps every top-level fun name to the flow file(s)
+// holding it, over borrowed (label, text) pairs. It is built once
+// per project load, before any file is parsed; the texts must
+// outlive every parse that uses the index. Lookup counts DISTINCT
+// files, not definitions: two definitions in one file behave like
+// the same-file first match, while one definition in each of two
+// files is ambiguous.
+
+struct pv_fun_index {
+  ccb_arena *arena;
+  char **labels; // borrowed, never freed here
+  char **texts; // borrowed, never freed here
+  size_t nfiles;
+  char **fun_names; // arena-owned (token text)
+  size_t *fun_files; // xmalloc'd, freed by pv_fun_index_free
+  size_t nfuns, capfuns;
+  // CCB-P1024 dedup: (referencing file label, name) pairs already
+  // warned about, arena-grown.
+  char **warned_files, **warned_names;
+  size_t nwarned, capwarned;
+};
+
+pv_fun_index *pv_fun_index_build(ccb_arena *arena, char **labels,
+    char **texts, size_t nfiles) {
+  pv_fun_index *index = NULL;
+  size_t f = 0;
+  if (arena == NULL || nfiles == 0) {
+    return NULL;
+  }
+  index = ccb_xmalloc(sizeof(*index));
+  memset(index, 0, sizeof(*index));
+  index->arena = arena;
+  index->labels = labels;
+  index->texts = texts;
+  index->nfiles = nfiles;
+  for (f = 0; f < nfiles; f++) {
+    pv_parser q;
+    size_t g = 0;
+    if (texts[f] == NULL) {
+      continue;
+    }
+    memset(&q, 0, sizeof(q));
+    q.arena = arena;
+    q.text = texts[f];
+    q.text_len = strlen(texts[f]);
+    q.file = labels != NULL ? labels[f] : NULL;
+    pv_tokenize(&q);
+    pv_collect_funs(&q);
+    for (g = 0; g < q.nfuns; g++) {
+      if (index->nfuns == index->capfuns) {
+        size_t ncap = index->capfuns == 0 ? 16 : index->capfuns * 2;
+        index->fun_names = ccb_xrealloc(index->fun_names,
+          ncap * sizeof(*index->fun_names));
+        index->fun_files = ccb_xrealloc(index->fun_files,
+          ncap * sizeof(*index->fun_files));
+        index->capfuns = ncap;
+      }
+      index->fun_names[index->nfuns] = q.fun_names[g];
+      index->fun_files[index->nfuns] = f;
+      index->nfuns++;
+    }
+    free(q.toks);
+    free(q.fun_names);
+    free(q.fun_braces);
+    free(q.fun_closes);
+  }
+  return index;
+}
+
+void pv_fun_index_free(pv_fun_index *index) {
+  if (index == NULL) {
+    return;
+  }
+  free(index->fun_files);
+  free(index->fun_names);
+  free(index);
+}
+
+// Count distinct files defining name; return the first file index
+// (or (size_t)-1 when absent). Count goes in *count_out.
+static size_t pv_index_lookup(pv_fun_index *index, const char *name,
+    size_t *count_out) {
+  size_t first = (size_t)-1;
+  size_t count = 0;
+  size_t f = 0;
+  size_t i = 0;
+  for (f = 0; f < index->nfiles; f++) {
+    for (i = 0; i < index->nfuns; i++) {
+      if (index->fun_files[i] == f &&
+          strcmp(index->fun_names[i], name) == 0) {
+        if (first == (size_t)-1) {
+          first = f;
+        }
+        count++;
+        break;
+      }
+    }
+  }
+  if (count_out != NULL) {
+    *count_out = count;
+  }
+  return first;
+}
+
+// Warn CCB-P1024 once per (referencing file, name): an ambiguous
+// reference records nothing and is never guessed.
+static void pv_warn_ambiguous(pv_parser *p, const char *name,
+    size_t count, long line) {
+  size_t i = 0;
+  ccb_str msg;
+  const char *file = p->file != NULL ? p->file : "";
+  if (p->index == NULL) {
+    return;
+  }
+  for (i = 0; i < p->index->nwarned; i++) {
+    if (strcmp(p->index->warned_files[i], file) == 0 &&
+        strcmp(p->index->warned_names[i], name) == 0) {
+      return;
+    }
+  }
+  if (p->index->nwarned == p->index->capwarned) {
+    size_t ncap = p->index->capwarned == 0 ? 8 : p->index->capwarned * 2;
+    char **nf = ccb_arena_alloc(p->arena, ncap * sizeof(*nf));
+    char **nn = ccb_arena_alloc(p->arena, ncap * sizeof(*nn));
+    for (i = 0; i < p->index->nwarned; i++) {
+      nf[i] = p->index->warned_files[i];
+      nn[i] = p->index->warned_names[i];
+    }
+    p->index->warned_files = nf;
+    p->index->warned_names = nn;
+    p->index->capwarned = ncap;
+  }
+  p->index->warned_files[p->index->nwarned] =
+    ccb_arena_strdup(p->arena, file);
+  p->index->warned_names[p->index->nwarned] =
+    ccb_arena_strdup(p->arena, name);
+  p->index->nwarned++;
+  ccb_str_init(&msg);
+  ccb_str_append(&msg, "ambiguous reference to '");
+  ccb_str_append(&msg, name);
+  ccb_str_append(&msg, "': defined in ");
+  ccb_str_appendf(&msg, "%zu", count);
+  ccb_str_append(&msg, " flow files; no edge recorded");
+  pv_diag(p, "CCB-P1024", msg.buf != NULL ? msg.buf : "", line);
+  ccb_str_free(&msg);
 }
 
 static void pv_warn_unbound(pv_parser *p, const char *receiver) {
@@ -1209,6 +1425,20 @@ static void pv_scan_if(pv_parser *p, size_t *i_io, size_t end,
     char *from_label, char *outer, int is_else_if);
 static void pv_scan_when(pv_parser *p, size_t *i_io, size_t end,
     char *from_label, char *outer);
+// Chunk B: scan a foreign file's fun body with a scratch parser
+// (defined after pv_scan_handler_body); helper_depth 0 scans a
+// handler body, 1 scans a followed helper body.
+static void pv_scan_foreign_body(pv_parser *p, size_t file_idx,
+    const char *name, char *from_label, char *branch, int helper_depth);
+// Chunk B: attribute one handler body range to a button (defined
+// after pv_scan_handler_branch).
+static void pv_handle_body(pv_parser *p, const char *receiver,
+    size_t start, size_t end);
+// Chunk B: try to consume a bare helper call at token i (defined
+// before pv_scan_handler_branch); returns the index past the call,
+// or 0 when token i is not a followed helper call.
+static size_t pv_try_helper_call(pv_parser *p, size_t i, size_t end,
+    char *from_label, char *branch);
 
 // Scan one if/else-if statement whose `if` is at *i_io: the then
 // body (braced or a single braceless statement) and the else chain,
@@ -1365,6 +1595,62 @@ static void pv_scan_when(pv_parser *p, size_t *i_io, size_t end,
   *i_io = i > end ? end : i;
 }
 
+// Chunk B: try to consume a bare helper call at token i in a
+// handler-body scan: `helper(...)` where helper is a top-level fun
+// (same file first, else the whole-project index when unique).
+// The helper's body is scanned at helper depth 1 with the current
+// branch annotation, so its navs become edges from from_label;
+// calls inside the helper body are NOT followed (depth cap), so
+// every helper chain terminates, including self-recursion. Dotted
+// calls (`x.helper()`), nav-ish calls, and calls to unknown names
+// are not helpers: return 0 and let the caller move on. An
+// ambiguous index match warns CCB-P1024 and consumes the call.
+// Returns the index past the call's closing paren, or 0.
+static size_t pv_try_helper_call(pv_parser *p, size_t i, size_t end,
+    char *from_label, char *branch) {
+  char *name = NULL;
+  size_t hs = 0;
+  size_t he = 0;
+  size_t close = 0;
+  if (p->helper_depth != 0) {
+    return 0;
+  }
+  if (p->toks[i].kind != PV_TK_IDENT) {
+    return 0;
+  }
+  if (i > 0 && pv_is_sym(&p->toks[i - 1], '.')) {
+    return 0;
+  }
+  if (i + 1 >= end || !pv_is_sym(&p->toks[i + 1], '(')) {
+    return 0;
+  }
+  name = p->toks[i].text;
+  close = pv_match_paren(p, i + 1);
+  if (close == (size_t)-1) {
+    return 0;
+  }
+  if (pv_handler_range(p, name, &hs, &he)) {
+    int saved = p->helper_depth;
+    p->helper_depth = 1;
+    pv_scan_handler_branch(p, hs, he, from_label, branch);
+    p->helper_depth = saved;
+    return close + 1;
+  }
+  if (p->index != NULL) {
+    size_t count = 0;
+    size_t file = pv_index_lookup(p->index, name, &count);
+    if (count == 1) {
+      pv_scan_foreign_body(p, file, name, from_label, branch, 1);
+      return close + 1;
+    }
+    if (count > 1) {
+      pv_warn_ambiguous(p, name, count, p->toks[i].line);
+      return close + 1;
+    }
+  }
+  return 0;
+}
+
 // Scan a handler body range [start, end) for navigation at brace
 // depth 0 only, recording derived edges from from_label, annotated
 // with branch (NULL at the handler top level). Slice 2: a nav or
@@ -1373,8 +1659,10 @@ static void pv_scan_when(pv_parser *p, size_t *i_io, size_t end,
 // ("if ready: then", "when state: is Loaded"); the condition is
 // labeled, never evaluated. A nav inside any other nested brace
 // block (a nested lambda/callback, a coroutine, any inner block)
-// still produces NO edge at all, not even an unknown edge. A
-// startActivity whose Intent carries a `Name::class.java` literal
+// still produces NO edge at all, not even an unknown edge. Chunk B:
+// a bare helper call at depth 0 is followed one level (see
+// pv_try_helper_call); its navs become edges from from_label with
+// the current branch annotation. A startActivity whose Intent carries a `Name::class.java` literal
 // yields that simple name as the target; any other startActivity
 // argument shape yields an unknown edge, never a guessed
 // destination. NavController navigate() calls in the same positions
@@ -1422,6 +1710,13 @@ static void pv_scan_handler_branch(pv_parser *p, size_t start, size_t end,
           continue;
         }
       }
+      {
+        size_t next = pv_try_helper_call(p, i, end, from_label, branch);
+        if (next != 0) {
+          i = next;
+          continue;
+        }
+      }
     }
     i++;
   }
@@ -1430,6 +1725,89 @@ static void pv_scan_handler_branch(pv_parser *p, size_t start, size_t end,
 static void pv_scan_handler_body(pv_parser *p, size_t start, size_t end,
     char *from_label) {
   pv_scan_handler_branch(p, start, end, from_label, NULL);
+}
+
+// Chunk B: scan a foreign file's top-level fun body with a scratch
+// parser over the index's retained text, sharing arena, diagnostics,
+// bindings, graph, and index with the caller, and attributing edges
+// to the caller's screen (p->screen). helper_depth 0 scans a
+// handler body (helper calls inside it are followed); 1 scans a
+// followed helper body (calls inside it are not). The scratch
+// parser's token and fun arrays are freed here; token text is
+// arena-owned and lives on. A missing fun (index raced ahead of
+// the text, or an unbalanced body) scans nothing, never crashes.
+static void pv_scan_foreign_body(pv_parser *p, size_t file_idx,
+    const char *name, char *from_label, char *branch, int helper_depth) {
+  pv_parser q;
+  size_t i = 0;
+  if (p->index == NULL || file_idx >= p->index->nfiles ||
+      p->index->texts[file_idx] == NULL || p->screen == NULL) {
+    return;
+  }
+  memset(&q, 0, sizeof(q));
+  q.arena = p->arena;
+  q.text = p->index->texts[file_idx];
+  q.text_len = strlen(q.text);
+  q.file = p->index->labels[file_idx];
+  q.diags = p->diags;
+  q.screen = p->screen;
+  q.bind_keys = p->bind_keys;
+  q.bind_vals = p->bind_vals;
+  q.nbind = p->nbind;
+  q.graph_keys = p->graph_keys;
+  q.graph_vals = p->graph_vals;
+  q.ngraph = p->ngraph;
+  q.index = p->index;
+  q.helper_depth = helper_depth;
+  pv_tokenize(&q);
+  // No P1010 here: the foreign file's own parse reports its
+  // malformation; the scratch scan only reuses its tokens.
+  pv_collect_funs(&q);
+  for (i = 0; i < q.nfuns; i++) {
+    if (strcmp(q.fun_names[i], name) == 0) {
+      pv_scan_handler_branch(&q, q.fun_braces[i] + 1, q.fun_closes[i],
+        from_label, branch);
+      break;
+    }
+  }
+  free(q.toks);
+  free(q.fun_names);
+  free(q.fun_braces);
+  free(q.fun_closes);
+}
+
+// Chunk B: resolve a named handler to a body and attribute it to
+// its button. Same-file fun range first (today's behavior); else
+// the whole-project index when the name is unique across files.
+// An ambiguous index match warns CCB-P1024 and records nothing.
+// No match at all records nothing and warns nothing (today's
+// cross-file behavior, kept for index-less parses).
+static void pv_handle_named(pv_parser *p, const char *receiver,
+    const char *hname, long line) {
+  size_t hs = 0;
+  size_t he = 0;
+  if (pv_handler_range(p, hname, &hs, &he)) {
+    pv_handle_body(p, receiver, hs, he);
+    return;
+  }
+  if (p->index != NULL) {
+    size_t count = 0;
+    size_t file = pv_index_lookup(p->index, hname, &count);
+    if (count == 1) {
+      const char *label = pv_binding_label(p, receiver);
+      if (label == NULL) {
+        pv_warn_unbound(p, receiver);
+        return;
+      }
+      pv_scan_foreign_body(p, file, hname,
+        ccb_arena_strdup(p->arena, label), NULL, 0);
+      return;
+    }
+    if (count > 1) {
+      pv_warn_ambiguous(p, hname, count, line);
+      return;
+    }
+  }
 }
 
 // Attribute one handler body to its button: bound receivers get
@@ -1482,8 +1860,22 @@ static int pv_try_handler_attachment(pv_parser *p) {
     size_t brace = 0;
     size_t close = 0;
     if (method_idx + 2 >= p->ntoks ||
-        !pv_is_sym(&p->toks[method_idx + 1], '=') ||
-        !pv_is_sym(&p->toks[method_idx + 2], '{')) {
+        !pv_is_sym(&p->toks[method_idx + 1], '=')) {
+      return 0;
+    }
+    // Chunk B: `onClick = h` where `val h = ::handler` (or `var`)
+    // appeared earlier in this screen body. An unrecorded
+    // identifier falls through, as today.
+    if (p->toks[method_idx + 2].kind == PV_TK_IDENT) {
+      char *hname = pv_val_lookup(p, p->toks[method_idx + 2].text);
+      if (hname == NULL) {
+        return 0;
+      }
+      p->pos = method_idx + 3;
+      pv_handle_named(p, receiver, hname, p->toks[method_idx + 2].line);
+      return 1;
+    }
+    if (!pv_is_sym(&p->toks[method_idx + 2], '{')) {
       return 0;
     }
     brace = method_idx + 2;
@@ -1533,15 +1925,22 @@ static int pv_try_handler_attachment(pv_parser *p) {
         pv_is_sym(&p->toks[open + 2], ':') &&
         p->toks[open + 3].kind == PV_TK_IDENT) {
       char *hname = p->toks[open + 3].text;
-      size_t hs = 0;
-      size_t he = 0;
       p->pos = close + 1;
-      if (!pv_handler_range(p, hname, &hs, &he)) {
-        // Unresolvable reference (e.g. a handler in another file):
-        // no edge, no warning, never a guess.
-        return 1;
+      pv_handle_named(p, receiver, hname, p->toks[open + 3].line);
+      return 1;
+    }
+    // Chunk B: identifier argument, `setOnClickListener(h)` where
+    // `val h = ::handler` (or `var`) appeared earlier in this
+    // screen body. An unrecorded identifier falls through, as
+    // today: it may be a property or a lambda value, not a
+    // handler reference.
+    if (open + 2 == close && p->toks[open + 1].kind == PV_TK_IDENT) {
+      char *hname = pv_val_lookup(p, p->toks[open + 1].text);
+      if (hname == NULL) {
+        return 0;
       }
-      pv_handle_body(p, receiver, hs, he);
+      p->pos = close + 1;
+      pv_handle_named(p, receiver, hname, p->toks[open + 1].line);
       return 1;
     }
     return 0;
@@ -1784,6 +2183,24 @@ static void pv_parse_statement(pv_parser *p, pv_box *parent) {
   if (pv_try_handler_attachment(p)) {
     return;
   }
+  // Chunk B: a local `val`/`var` binding of the plain shape
+  // `val NAME = ::HANDLER` records NAME -> HANDLER for later
+  // identifier-argument attachments in this screen body. Any
+  // other shape (typed form, non-:: right-hand side) falls
+  // through to generic handling, unchanged.
+  if (pv_is_ident(t, "val") || pv_is_ident(t, "var")) {
+    if (p->pos + 5 < p->ntoks &&
+        p->toks[p->pos + 1].kind == PV_TK_IDENT &&
+        pv_is_sym(&p->toks[p->pos + 2], '=') &&
+        pv_is_sym(&p->toks[p->pos + 3], ':') &&
+        pv_is_sym(&p->toks[p->pos + 4], ':') &&
+        p->toks[p->pos + 5].kind == PV_TK_IDENT) {
+      pv_val_record(p, p->toks[p->pos + 1].text,
+        p->toks[p->pos + 5].text);
+      p->pos += 6;
+      return;
+    }
+  }
   int is_call = p->pos + 1 < p->ntoks &&
     (pv_is_sym(&p->toks[p->pos + 1], '(') || pv_is_sym(&p->toks[p->pos + 1], '{'));
   if (!is_call) {
@@ -2006,12 +2423,13 @@ ccb_status pv_flow_parse_bindings(ccb_arena *arena, const char *text,
     0, NULL, NULL);
 }
 
-ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
-    const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
-    size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind,
-    char **onclick_methods, char **onclick_labels, size_t nonclick,
-    char **graph_keys, char **graph_vals, size_t ngraph,
-    pv_pending_edge ***pending_io, size_t *npending_io) {
+static ccb_status pv_flow_parse_full_inner(ccb_arena *arena,
+    const char *text, const char *file, ccb_diag_list *diags,
+    pv_screen ***screens_io, size_t *nscreens_io, char **bind_keys,
+    char **bind_vals, size_t nbind, char **onclick_methods,
+    char **onclick_labels, size_t nonclick, char **graph_keys,
+    char **graph_vals, size_t ngraph, pv_pending_edge ***pending_io,
+    size_t *npending_io, pv_fun_index *index) {
   if (arena == NULL || screens_io == NULL || nscreens_io == NULL ||
       diags == NULL) {
     return CCB_OK;
@@ -2037,6 +2455,7 @@ ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
   p.graph_keys = graph_keys;
   p.graph_vals = graph_vals;
   p.ngraph = ngraph;
+  p.index = index;
   p.pending_io = pending_io;
   p.npending_io = npending_io;
   if (p.pending_io != NULL && p.npending_io == NULL) {
@@ -2143,6 +2562,9 @@ ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
       pv_screen_add(arena, screens_io, nscreens_io, screen);
       p.screen = screen;
       pv_stack_push(&p, screen->root);
+      // Chunk B: a new screen fun starts with an empty val map;
+      // bindings never leak across screens.
+      p.nvals = 0;
       pv_parse_block(&p, screen->root);
       pv_stack_pop(&p);
       p.screen = NULL;
@@ -2162,7 +2584,34 @@ ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
   free(p.handler_names);
   free(p.unbound_screens);
   free(p.unbound_receivers);
+  free(p.val_names);
+  free(p.val_targets);
   return CCB_OK;
+}
+
+ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
+    const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
+    size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind,
+    char **onclick_methods, char **onclick_labels, size_t nonclick,
+    char **graph_keys, char **graph_vals, size_t ngraph,
+    pv_pending_edge ***pending_io, size_t *npending_io) {
+  return pv_flow_parse_full_inner(arena, text, file, diags, screens_io,
+    nscreens_io, bind_keys, bind_vals, nbind, onclick_methods,
+    onclick_labels, nonclick, graph_keys, graph_vals, ngraph,
+    pending_io, npending_io, NULL);
+}
+
+ccb_status pv_flow_parse_indexed(ccb_arena *arena, const char *text,
+    const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
+    size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind,
+    char **onclick_methods, char **onclick_labels, size_t nonclick,
+    char **graph_keys, char **graph_vals, size_t ngraph,
+    pv_pending_edge ***pending_io, size_t *npending_io,
+    pv_fun_index *index) {
+  return pv_flow_parse_full_inner(arena, text, file, diags, screens_io,
+    nscreens_io, bind_keys, bind_vals, nbind, onclick_methods,
+    onclick_labels, nonclick, graph_keys, graph_vals, ngraph,
+    pending_io, npending_io, index);
 }
 
 // ---------- logic tree ----------

@@ -1654,22 +1654,44 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
     pv_preview_scan_xml(cfg, arena, &graph_keys, &graph_vals,
       &ngraph, &onclick_methods, &onclick_labels, &nonclick, dl);
     // Flow first: screens must exist before CSS files can be scoped.
+    // Chunk B: all flow texts are read first so the whole-project
+    // function index can be built before any file is parsed; the
+    // texts outlive every parse that uses the index. The kept
+    // arrays borrow their paths from flow_files (still owned by
+    // it) and own their texts.
     if (cfg->preview_flow != NULL) {
       if (ccb_collect_files(cfg->preview_flow, ".kt", &flow_files,
           &nflow) == CCB_OK) {
+        char **kept_files = ccb_xcalloc(nflow == 0 ? 1 : nflow,
+          sizeof(*kept_files));
+        char **kept_texts = ccb_xcalloc(nflow == 0 ? 1 : nflow,
+          sizeof(*kept_texts));
+        size_t nkept = 0;
+        pv_fun_index *index = NULL;
         for (i = 0; i < nflow; i++) {
           char *text = NULL;
           size_t len = 0;
           if (ccb_read_file(flow_files[i], &text, &len) != CCB_OK) {
             continue;
           }
-          pv_flow_parse_full(arena, text, flow_files[i], dl,
+          kept_files[nkept] = flow_files[i];
+          kept_texts[nkept] = text;
+          nkept++;
+        }
+        index = pv_fun_index_build(arena, kept_files, kept_texts, nkept);
+        for (i = 0; i < nkept; i++) {
+          pv_flow_parse_indexed(arena, kept_texts[i], kept_files[i], dl,
             &screens, &nscreens, cfg->preview_binding_keys,
             cfg->preview_binding_values, cfg->preview_binding_count,
             onclick_methods, onclick_labels, nonclick,
-            graph_keys, graph_vals, ngraph, &pending, &npending);
-          free(text);
+            graph_keys, graph_vals, ngraph, &pending, &npending, index);
         }
+        for (i = 0; i < nkept; i++) {
+          free(kept_texts[i]);
+        }
+        free(kept_files);
+        free(kept_texts);
+        pv_fun_index_free(index);
         ccb_free_str_array(flow_files, nflow);
       }
     }

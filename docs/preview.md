@@ -127,10 +127,22 @@ below):
 - Property assignment: `openButton.onClick = { nav("Detail") }`
 - Direct method reference:
   `openButton.setOnClickListener(::onOpenClick)` where
-  `fun onOpenClick(v: View) { nav("Detail") }` is a top-level fun
-  in the same file. ONLY a direct `::name` reference resolves; a
-  reference held in a variable first (`val h = ::onOpenClick`, then
-  `setOnClickListener(h)`) resolves nothing.
+  `fun onOpenClick(v: View) { nav("Detail") }` is a top-level fun —
+  in the same file, or in any other flow file (the whole-project
+  function index resolves cross-file references when the name is
+  unique; a name defined in two flow files warns CCB-P1024 and
+  resolves nothing, never a guess). A reference held in a variable
+  first also resolves, for the plain shape only:
+  `val h = ::onOpenClick` (or `var`), then `setOnClickListener(h)`
+  or `onClick = h`. The typed form (`val h: Handler = ::onOpenClick`)
+  does not resolve — a documented limitation.
+- Helper call: a handler body may call a helper by bare name
+  (`openDetail()`), and the helper's body is scanned one level deep
+  with the current branch annotation, so the helper's navs become
+  edges from the button. Calls inside the helper body are NOT
+  followed (depth cap), so every chain terminates, including
+  self-recursion; dotted calls (`x.helper()`) and calls to unknown
+  names are not followed either.
 
 Navigation calls recognized inside a handler body: `nav("X")` and
 `navigateTo("X")` as usual, plus
@@ -293,12 +305,14 @@ edges against declared edges for the same button (same `from`):
 | XML `android:onClick` button with no `[preview.bindings]` entry for its view id | CCB-P1019, no edge (same code as an unbound listener receiver) |
 | XML `android:onClick` button, bound, but its label in no screen | CCB-P1021, no edge |
 | XML `android:onClick` method with no matching fun, or handler with no nav | NO edge, no warning |
-| Handler that merely calls a shared helper (`openDetail()`), with the nav inside the helper | NO edge attributed to the button. The helper fun follows the existing top-level-fun rules (it is a screen if unreferenced, not an edge source) |
+| Handler that merely calls a shared helper (`openDetail()`), with the nav inside the helper | Edge attributed to the button: the helper body is scanned one level deep (Chunk B), with the current branch annotation; calls inside the helper body are not followed, so a second-level helper's nav yields no edge |
 | `startActivity` without a class literal (`startActivity(intent)`) | Unknown edge, never a guessed destination |
-| Method reference to a fun in another file, or to no fun at all | NO edge, no warning (the parser is per-file; see scope limit) |
+| Method reference to a fun in another file | Resolved through the whole-project function index when the name is unique across files (Chunk B); same-file definitions shadow cross-file ones |
+| Method reference or helper call naming a fun defined in two or more flow files | NO edge, CCB-P1024 (once per file and name) — never a guess |
+| Method reference to no fun at all | NO edge, no warning |
 
-CCB-P1019, CCB-P1020, and CCB-P1021 are warnings always — even under
-`--strict` — so they never fail the build gate.
+CCB-P1019, CCB-P1020, CCB-P1021, and CCB-P1024 are warnings always
+— even under `--strict` — so they never fail the build gate.
 
 ### Scope limits (Slices 1–3, by design)
 
@@ -306,13 +320,17 @@ CCB-P1019, CCB-P1020, and CCB-P1021 are warnings always — even under
   `fun Name` bodies that define screens). A handler written
   elsewhere (e.g. an Activity `onCreate` outside any screen fun)
   is ignored, not warned about.
-- Named handlers must be top-level funs in the SAME file as the
-  attachment. A top-level fun whose name is referenced via `::`
-  from a screen body is treated as a handler, NOT as a screen: it
-  does not appear in the screen list, and its nav targets become
-  resolvable only through the referencing button. A fun referenced
-  only from another handler, or only via a variable, stays a screen
-  under the existing rules.
+- Named handlers must be top-level funs. Same-file definitions win;
+  otherwise the whole-project function index resolves a `::` name
+  (or a bare helper call) when it is unique across flow files. An
+  ambiguous name warns CCB-P1024 and resolves nothing. A top-level
+  fun whose name is referenced via `::` from a screen body is
+  treated as a handler, NOT as a screen: it does not appear in the
+  screen list, and its nav targets become resolvable only through
+  the referencing button. That pruning is still per-file: a handler
+  fun defined in another file, a fun referenced only from another
+  handler, or a fun referenced only via a variable still appears
+  as a screen until Chunk C's reference counting lands.
 - Attachments inside an ignored-call lambda block (e.g. inside a
   `foo { ... }` argument block, which the parser scans for navs
   only) fall back to the existing generic scan instead of Slice 1

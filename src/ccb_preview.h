@@ -62,6 +62,10 @@
 //   that does not exist in the named screen, so that step (or its
 //   unmatched part) is skipped (warning, always — a trace never
 //   fails the build)
+// CCB-P1024 ambiguous function reference: a click-handler method
+//   reference or a helper call names a top-level fun defined in
+//   more than one flow file, so no edge is recorded for it (warning,
+//   always — the reference is never guessed)
 
 // Lengths: px values scale to columns/rows by interior_cols /
 // phone_dp_width; % values are relative to the parent content size.
@@ -339,6 +343,27 @@ ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
   char **onclick_methods, char **onclick_labels, size_t nonclick,
   char **graph_keys, char **graph_vals, size_t ngraph,
   pv_pending_edge ***pending_io, size_t *npending_io);
+// Chunk B: whole-project function index. An index records every
+// top-level fun name and the flow file holding it, over borrowed
+// (label, text) pairs — the texts must outlive every parse that
+// uses the index. pv_flow_parse_indexed is pv_flow_parse_full with
+// an index: a click-handler method reference or a helper call that
+// names a fun in another file resolves through the index when the
+// name is unique across files; an ambiguous name (same fun in two
+// files) records nothing and warns CCB-P1024. A NULL index behaves
+// exactly like pv_flow_parse_full. The index owns only its fun
+// table; labels and texts stay borrowed and are never freed here.
+typedef struct pv_fun_index pv_fun_index;
+pv_fun_index *pv_fun_index_build(ccb_arena *arena, char **labels,
+  char **texts, size_t nfiles);
+void pv_fun_index_free(pv_fun_index *index);
+ccb_status pv_flow_parse_indexed(ccb_arena *arena, const char *text,
+  const char *file, ccb_diag_list *diags, pv_screen ***screens_io,
+  size_t *nscreens_io, char **bind_keys, char **bind_vals, size_t nbind,
+  char **onclick_methods, char **onclick_labels, size_t nonclick,
+  char **graph_keys, char **graph_vals, size_t ngraph,
+  pv_pending_edge ***pending_io, size_t *npending_io,
+  pv_fun_index *index);
 
 // Render one edge's argument list into out, in tree/walk format:
 // "(...)" with literals quoted, named args as written, unknown args
@@ -527,8 +552,8 @@ void pv_manifest_activities(ccb_arena *arena, const char *manifest_path,
 // gate. This is the single definition of the rule that
 // pv_project_diagnose counts with and that the preview gate
 // (ccb_preview_gate) collects with; keep the three in sync.
-// CCB-P1023 falls through to the default (warning always), like
-// CCB-P1022, so it needs no case here.
+// CCB-P1023 and CCB-P1024 fall through to the default (warning
+// always), like CCB-P1022, so they need no case here.
 int pv_diag_is_error(const char *code, int strict);
 // Run the diagnostics pass: overlap/off-screen/clip are emitted during
 // layout; this pass adds missing-target (error), duplicate-screen

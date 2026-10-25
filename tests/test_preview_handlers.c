@@ -496,9 +496,10 @@ int main(void) {
     }
     free(dir);
   }
-  // --- (i) Handler that merely calls a shared helper: no edge
-  // attributed to the button. The helper fun itself follows the
-  // existing top-level-fun rules (it is a screen, not an edge).
+  // --- (i) Chunk B: handler that calls a shared helper: the
+  // helper's nav IS attributed to the button (one level deep).
+  // The helper fun itself still appears as a screen until
+  // Chunk C's reference counting.
   {
     char *dir = make_scratch(
       "fun Home() {\n"
@@ -525,16 +526,18 @@ int main(void) {
       home = find_screen(p, "Home");
       CHECK(home != NULL);
       if (home != NULL) {
-        CHECK(!has_edge_from(home, "Open note"));
+        CHECK(has_edge_from(home, "Open note"));
       }
       CHECK(find_screen(p, "openDetail") != NULL);
       pv_project_free(p);
     }
     free(dir);
   }
-  // --- (j) Variable-held method reference: no edge. The fun is
-  // not referenced directly, so it stays a screen by the existing
-  // top-level-fun rules.
+  // --- (j) Chunk B: variable-held method reference: the plain
+  // `val handler = ::onOpenClick` shape resolves, so the edge IS
+  // attributed to the button. The fun still appears as a screen:
+  // the handler pre-pass only prunes direct :: attachments, and
+  // reference counting is Chunk C's work.
   {
     char *dir = make_scratch(
       "fun Home() {\n"
@@ -562,7 +565,7 @@ int main(void) {
       home = find_screen(p, "Home");
       CHECK(home != NULL);
       if (home != NULL) {
-        CHECK(!has_edge_from(home, "Open note"));
+        CHECK(has_edge_from(home, "Open note"));
       }
       CHECK(find_screen(p, "onOpenClick") != NULL);
       pv_project_free(p);

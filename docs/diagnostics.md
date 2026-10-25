@@ -93,9 +93,10 @@ error).
 | CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
 | CCB-P1022 | Scenario entry does not match the project: a scenario names an unknown screen, branch entry, list, or field; a list that already has static rows; a button label matching no edge; or a button whose edges have no unknown argument to fill. The entry is skipped, rendering continues (warning, always; a scenario never fails the build gate) |
 | CCB-P1023 | Trace step does not match the project: a trace names an unknown screen; an edge label matching no edge in the screen; a branch entry that does not exist in the screen; a step naming neither an edge nor a branch; or a branch entry that contains no component with the step's button label (the edge is still marked taken). The step (or its unmatched part) is skipped, rendering continues (warning, always; a trace never fails the build gate) |
+| CCB-P1024 | Ambiguous function reference: a click-handler method reference or a helper call names a top-level fun defined in more than one flow file, so no edge is recorded for it — the reference is never guessed. Warns once per (file, name) (warning, always; never fails the build gate) |
 
 Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under
-`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021/P1022/P1023 are
+`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021/P1022/P1023/P1024 are
 warnings even under `--strict`, so they never fail the build gate.
 A project with no usable
 `[preview]` section is not a diagnostic at all: `ccb preview` prints
