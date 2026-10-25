@@ -619,6 +619,19 @@ static void paint_box(pv_grid *g, pv_box *box, int ascii, int color) {
       // F1: only the label text scales; the "[]" chrome does not.
       sw = pv_scaled_text_width(display_width(box->label),
         box->rule) + 2;
+      // Chunk 1: scenario content is additional, never a
+      // replacement — the static label stays and the content joins
+      // it as "[label: text]".
+      if (box->scenario_text != NULL) {
+        ccb_str_append(&s, ": ");
+        ccb_str_append(&s, box->scenario_text);
+        sw += 2 + pv_scaled_text_width(
+          display_width(box->scenario_text), box->rule);
+      }
+    } else if (box->scenario_text != NULL) {
+      ccb_str_append(&s, box->scenario_text);
+      sw = pv_scaled_text_width(display_width(box->scenario_text),
+        box->rule) + 2;
     } else {
       sw = 2;
     }

@@ -1,0 +1,18 @@
+Detail
+  branches: when state [is Loading, is Loaded [scenario], else]
+  -> Empty via "Delete"
+  -> Home("42" [scenario]) via "Back"
+Empty
+  -> Form via "Create one"
+Form
+  -> Home via "Save"
+  -> unknown via "More"
+  scenario: field "Title" = "Milk" [scenario]
+Home (entry)
+  -> Detail("note-42") via "Open note"
+  -> Form via "New note"
+  -> Settings via "Settings"
+  scenario: list "notes" = ["Buy milk", "Call Ana"] [scenario]
+Settings
+  branches: if darkMode [then, else [scenario]]
+  -> Home via "Back"

@@ -5,6 +5,7 @@
 // pv_project_json from ccb_preview.h. Never touches the SDK/toolchain.
 #include "ccb_common.h"
 #include "ccb_preview.h"
+#include "ccb_preview_scenario.h"
 #include "ccb_alloc.h"
 #include "ccb_str.h"
 #include "ccb_fs.h"
@@ -852,6 +853,8 @@ static void pv_screen_edge_add(ccb_arena *arena, pv_screen *screen,
   screen->edges[screen->nedges].args_named = args_named;
   screen->edges[screen->nedges].derived = 1;
   screen->edges[screen->nedges].branch = branch;
+  // Chunk 1: see pv_edge_add in ccb_preview_flow.c.
+  screen->edges[screen->nedges].args_scenario = NULL;
   screen->nedges++;
 }
 
@@ -968,6 +971,13 @@ static void pv_reconcile_derived(pv_project *p, ccb_diag_list *diags) {
 
 ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
     int strict, ccb_diag_list *diags, pv_project **out) {
+  return pv_project_load_scenario(cfg, frame_width, ascii, strict,
+    diags, NULL, out);
+}
+
+ccb_status pv_project_load_scenario(const ccb_config *cfg,
+    long frame_width, int ascii, int strict, ccb_diag_list *diags,
+    const ccb_scenario *scenario, pv_project **out) {
   ccb_diag_list own_diags;
   ccb_diag_list *dl = NULL;
   pv_project *p = NULL;
@@ -1286,6 +1296,13 @@ ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
     free(strings.items);
     free(colors.items);
   }
+  // Chunk 1: scenario merge, after resolution (scenario keys match
+  // the labels as rendered) and before layout (scenario list rows
+  // size the list like static rows do). Warnings go to dl, which is
+  // adopted below along with the rest.
+  if (scenario != NULL) {
+    pv_scenario_apply(p, scenario, dl);
+  }
   // Adopt the diag list BEFORE layout: pv_layout_screen pushes its
   // diagnostics directly into p->diags, so the project must own the
   // list by then (adopting it after layout would discard them).
@@ -1512,7 +1529,18 @@ static void pv_json_box(ccb_str *out, pv_box *box, long interior_cols,
       pv_json_box(out, box->children[i], interior_cols, phone_dp_width);
     }
   }
-  ccb_str_append(out, "]}");
+  ccb_str_append(out, "]");
+  // Chunk 1: scenario provenance, only when a scenario supplied
+  // something for this box — static boxes stay unmarked.
+  if (box != NULL && box->from_scenario) {
+    ccb_str_append(out, ",\"provenance\":\"scenario\"");
+  }
+  if (box != NULL && box->scenario_text != NULL) {
+    ccb_str_append(out, ",\"value\":");
+    pv_json_str(out, box->scenario_text);
+    ccb_str_append(out, ",\"value_provenance\":\"scenario\"");
+  }
+  ccb_str_append(out, "}");
 }
 
 static int pv_box_is_branch(pv_box *box) {
@@ -1548,7 +1576,26 @@ static void pv_json_branches(ccb_str *out, pv_box *box, int *first) {
         ccb_str_append(out, "\"\"");
       }
     }
-    ccb_str_append(out, "]}");
+    // Chunk 1: the scenario-picked entry, if any. Entries stay plain
+    // strings; only a pick adds a field, so unpicked branches render
+    // exactly as before.
+    {
+      const char *picked = NULL;
+      for (i = 0; i < box->nchildren; i++) {
+        if (box->children[i]->scenario_picked) {
+          picked = box->children[i]->label;
+          break;
+        }
+      }
+      if (picked != NULL) {
+        ccb_str_append(out, "],\"picked\":{\"entry\":");
+        ccb_json_escape(out, picked);
+        ccb_str_append(out, ",\"provenance\":\"scenario\"}");
+      } else {
+        ccb_str_append(out, "]");
+      }
+    }
+    ccb_str_append(out, "}");
   }
   for (i = 0; i < box->nchildren; i++) {
     pv_json_branches(out, box->children[i], first);
@@ -1573,7 +1620,13 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
       }
     }
   }
-  ccb_str_append(out, "{\"event\":\"preview\",\"version\":2,\"screens\":[");
+  ccb_str_append(out, "{\"event\":\"preview\",\"version\":2");
+  // Chunk 1: the applied scenario's name, only when one was applied.
+  if (p->scenario_name != NULL) {
+    ccb_str_append(out, ",\"scenario\":");
+    pv_json_str(out, p->scenario_name);
+  }
+  ccb_str_append(out, ",\"screens\":[");
   for (i = 0; i < nscreens; i++) {
     pv_screen *screen = screens[i];
     int first_branch = 1;
@@ -1613,6 +1666,29 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
       }
       ccb_str_append(out, "],\"branch\":");
       pv_json_str(out, e->branch);
+      // Chunk 1: per-argument provenance, only when a scenario
+      // filled at least one argument of this edge. Static entries
+      // stay null (unmarked); filled ones read "scenario".
+      if (e->args_scenario != NULL) {
+        int has_filled = 0;
+        for (k = 0; k < e->nargs; k++) {
+          if (e->args_scenario[k]) {
+            has_filled = 1;
+            break;
+          }
+        }
+        if (has_filled) {
+          ccb_str_append(out, ",\"args_provenance\":[");
+          for (k = 0; k < e->nargs; k++) {
+            if (k > 0) {
+              ccb_str_append(out, ",");
+            }
+            ccb_str_append(out, e->args_scenario[k] ?
+              "\"scenario\"" : "null");
+          }
+          ccb_str_append(out, "]");
+        }
+      }
       ccb_str_append(out, "}");
     }
     ccb_str_append(out, "],\"branches\":[");

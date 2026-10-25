@@ -91,9 +91,10 @@ error).
 | CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
 | CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
 | CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
+| CCB-P1022 | Scenario entry does not match the project: a scenario names an unknown screen, branch entry, list, or field; a list that already has static rows; a button label matching no edge; or a button whose edges have no unknown argument to fill. The entry is skipped, rendering continues (warning, always; a scenario never fails the build gate) |
 
 Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under
-`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021 are
+`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021/P1022 are
 warnings even under `--strict`, so they never fail the build gate.
 A project with no usable
 `[preview]` section is not a diagnostic at all: `ccb preview` prints

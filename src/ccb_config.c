@@ -364,7 +364,47 @@ void ccb_config_free(ccb_config *c) {
     free(m->package);
   }
   free(c->modules);
+  for (size_t i = 0; i < c->preview_scenario_count; i++) {
+    ccb_scenario *sc = &c->preview_scenarios[i];
+    size_t j = 0;
+    free(sc->name);
+    for (j = 0; j < sc->nbranches; j++) {
+      free(sc->branches[j].screen);
+      free(sc->branches[j].entry);
+    }
+    free(sc->branches);
+    for (j = 0; j < sc->nlists; j++) {
+      free(sc->lists[j].label);
+      ccb_free_str_array(sc->lists[j].rows, sc->lists[j].nrows);
+    }
+    free(sc->lists);
+    for (j = 0; j < sc->nfields; j++) {
+      free(sc->fields[j].label);
+      free(sc->fields[j].text);
+    }
+    free(sc->fields);
+    for (j = 0; j < sc->nargs; j++) {
+      free(sc->args[j].label);
+      ccb_free_str_array(sc->args[j].values, sc->args[j].nvalues);
+    }
+    free(sc->args);
+  }
+  free(c->preview_scenarios);
   free(c);
+}
+
+const ccb_scenario *ccb_config_scenario(const ccb_config *c,
+    const char *name) {
+  size_t i = 0;
+  if (c == NULL || name == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < c->preview_scenario_count; i++) {
+    if (strcmp(c->preview_scenarios[i].name, name) == 0) {
+      return &c->preview_scenarios[i];
+    }
+  }
+  return NULL;
 }
 
 // ---------- library modules ----------
@@ -994,6 +1034,165 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
             ccb_xstrdup(bt->kvs[i].value.str);
           c->preview_binding_count = n + 1;
         }
+      }
+    }
+  }
+
+  // [preview.scenario.<name>.<section>] tables, sub-table spelling:
+  // branches maps screen -> entry label (strings), lists maps list
+  // label -> rows (string arrays), fields maps textfield label ->
+  // text (strings), args maps button label -> values (string
+  // arrays). The TOML subset has no inline tables, so the plan's
+  // `branches = {...}` example is written as a section table
+  // instead; the data model is identical. A bare
+  // [preview.scenario.<name>] table carries no data: keys under it
+  // are CCB-E1001, like any unknown key. Wrong value types are
+  // CCB-E1007 via the shared getters. Parsed regardless of whether
+  // [preview] exists: the preview-applicability gate, not the
+  // config, decides whether scenarios ever run.
+  {
+    static const char prefix[] = "preview.scenario.";
+    size_t plen = strlen(prefix);
+    for (size_t ti = 0; ti < doc->count; ti++) {
+      const char *tname = doc->tables[ti].name;
+      const char *rest = NULL;
+      const char *dot = NULL;
+      const char *section = NULL;
+      ccb_scenario *sc = NULL;
+      size_t si = 0;
+      size_t ki = 0;
+      if (strncmp(tname, prefix, plen) != 0) {
+        continue;
+      }
+      rest = tname + plen;
+      dot = strchr(rest, '.');
+      if (dot == NULL) {
+        // Bare scenario table: register the name (an empty scenario
+        // is a valid no-op), but keys under it are not part of the
+        // format — data lives in the section tables.
+        size_t nlen = strlen(rest);
+        ccb_scenario *found = NULL;
+        for (si = 0; si < c->preview_scenario_count; si++) {
+          if (strcmp(c->preview_scenarios[si].name, rest) == 0) {
+            found = &c->preview_scenarios[si];
+            break;
+          }
+        }
+        if (found == NULL) {
+          if (nlen == 0 || strcmp(rest, ".") == 0 ||
+              strcmp(rest, "..") == 0 || strchr(rest, '/') != NULL ||
+              strchr(rest, '\\') != NULL) {
+            ccb_vdiagf(&v, "CCB-E1005", "invalid scenario name '%s'",
+              rest, "");
+            continue;
+          }
+          c->preview_scenarios = ccb_xrealloc(c->preview_scenarios,
+            (c->preview_scenario_count + 1) *
+            sizeof(*c->preview_scenarios));
+          sc = &c->preview_scenarios[c->preview_scenario_count];
+          memset(sc, 0, sizeof(*sc));
+          sc->name = ccb_xstrdup(rest);
+          c->preview_scenario_count++;
+        }
+        for (ki = 0; ki < doc->tables[ti].count; ki++) {
+          ccb_vdiagf(&v, "CCB-E1001",
+            "unknown key '%s' in table [%s]",
+            doc->tables[ti].kvs[ki].key, tname);
+        }
+        continue;
+      }
+      // Find or create the scenario by its single-segment name.
+      for (si = 0; si < c->preview_scenario_count; si++) {
+        size_t nlen = strlen(c->preview_scenarios[si].name);
+        if (strlen(rest) > nlen &&
+            strncmp(rest, c->preview_scenarios[si].name, nlen) == 0 &&
+            rest[nlen] == '.') {
+          sc = &c->preview_scenarios[si];
+          break;
+        }
+      }
+      if (sc == NULL) {
+        size_t nlen = (size_t)(dot - rest);
+        char *name = ccb_xmalloc(nlen + 1);
+        memcpy(name, rest, nlen);
+        name[nlen] = '\0';
+        if (nlen == 0 || strcmp(name, ".") == 0 ||
+            strcmp(name, "..") == 0 || strchr(name, '/') != NULL ||
+            strchr(name, '\\') != NULL) {
+          ccb_vdiagf(&v, "CCB-E1005", "invalid scenario name '%s'",
+            name, "");
+          free(name);
+          continue;
+        }
+        c->preview_scenarios = ccb_xrealloc(c->preview_scenarios,
+          (c->preview_scenario_count + 1) *
+          sizeof(*c->preview_scenarios));
+        sc = &c->preview_scenarios[c->preview_scenario_count];
+        memset(sc, 0, sizeof(*sc));
+        sc->name = name;
+        c->preview_scenario_count++;
+      }
+      section = dot + 1;
+      if (strcmp(section, "branches") == 0) {
+        for (ki = 0; ki < doc->tables[ti].count; ki++) {
+          char *entry = NULL;
+          const char *screen = doc->tables[ti].kvs[ki].key;
+          if (!ccb_get_str(&v, tname, screen, &entry)) {
+            continue;
+          }
+          sc->branches = ccb_xrealloc(sc->branches,
+            (sc->nbranches + 1) * sizeof(*sc->branches));
+          sc->branches[sc->nbranches].screen = ccb_xstrdup(screen);
+          sc->branches[sc->nbranches].entry = entry;
+          sc->nbranches++;
+        }
+      } else if (strcmp(section, "fields") == 0) {
+        for (ki = 0; ki < doc->tables[ti].count; ki++) {
+          char *text = NULL;
+          const char *label = doc->tables[ti].kvs[ki].key;
+          if (!ccb_get_str(&v, tname, label, &text)) {
+            continue;
+          }
+          sc->fields = ccb_xrealloc(sc->fields,
+            (sc->nfields + 1) * sizeof(*sc->fields));
+          sc->fields[sc->nfields].label = ccb_xstrdup(label);
+          sc->fields[sc->nfields].text = text;
+          sc->nfields++;
+        }
+      } else if (strcmp(section, "lists") == 0) {
+        for (ki = 0; ki < doc->tables[ti].count; ki++) {
+          char **rows = NULL;
+          size_t nrows = 0;
+          const char *label = doc->tables[ti].kvs[ki].key;
+          if (!ccb_get_str_array(&v, tname, label, &rows, &nrows)) {
+            continue;
+          }
+          sc->lists = ccb_xrealloc(sc->lists,
+            (sc->nlists + 1) * sizeof(*sc->lists));
+          sc->lists[sc->nlists].label = ccb_xstrdup(label);
+          sc->lists[sc->nlists].rows = rows;
+          sc->lists[sc->nlists].nrows = nrows;
+          sc->nlists++;
+        }
+      } else if (strcmp(section, "args") == 0) {
+        for (ki = 0; ki < doc->tables[ti].count; ki++) {
+          char **values = NULL;
+          size_t nvalues = 0;
+          const char *label = doc->tables[ti].kvs[ki].key;
+          if (!ccb_get_str_array(&v, tname, label, &values, &nvalues)) {
+            continue;
+          }
+          sc->args = ccb_xrealloc(sc->args,
+            (sc->nargs + 1) * sizeof(*sc->args));
+          sc->args[sc->nargs].label = ccb_xstrdup(label);
+          sc->args[sc->nargs].values = values;
+          sc->args[sc->nargs].nvalues = nvalues;
+          sc->nargs++;
+        }
+      } else {
+        ccb_vdiagf(&v, "CCB-E1001",
+          "unknown scenario section '%s' in [preview.scenario.%s]",
+          section, sc->name);
       }
     }
   }

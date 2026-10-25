@@ -84,6 +84,7 @@ typedef struct {
   int preview_update_goldens;
   const char *preview_diff;
   const char *preview_storyboard;
+  const char *preview_scenario;
   int preview_gate_on;
   int preview_gate_off;
 } ccb_args;
@@ -3247,6 +3248,35 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--update-goldens\n");
     return 2;
   }
+  // Chunk 1: a scenario applies to the plain render (human or
+  // --json) only. Walk takes it later, and watch/diff/storyboard/
+  // goldens each own their own project load; failing loudly beats
+  // silently rendering without the scenario.
+  if (a->preview_scenario != NULL && a->preview_walk) {
+    fprintf(stderr, "error: --scenario cannot be combined with "
+      "--walk (walk takes --scenario in a later chunk)\n");
+    return 2;
+  }
+  if (a->preview_scenario != NULL && a->preview_watch) {
+    fprintf(stderr, "error: --scenario cannot be combined with "
+      "--watch\n");
+    return 2;
+  }
+  if (a->preview_scenario != NULL && a->preview_diff != NULL) {
+    fprintf(stderr, "error: --scenario cannot be combined with "
+      "--diff\n");
+    return 2;
+  }
+  if (a->preview_scenario != NULL && a->preview_storyboard != NULL) {
+    fprintf(stderr, "error: --scenario cannot be combined with "
+      "--storyboard\n");
+    return 2;
+  }
+  if (a->preview_scenario != NULL && a->preview_update_goldens) {
+    fprintf(stderr, "error: --scenario cannot be combined with "
+      "--update-goldens (goldens cover the no-scenario baseline)\n");
+    return 2;
+  }
   if (getcwd(cwd, sizeof(cwd)) == NULL) {
     fprintf(stderr, "error: cannot determine working directory\n");
     return 2;
@@ -3386,8 +3416,32 @@ static int ccb_cmd_preview(ccb_args *a) {
     eff_width = strcmp(a->preview_device, "tablet") == 0 ?
       CCB_PREVIEW_TABLET_WIDTH : CCB_PREVIEW_PHONE_WIDTH;
   }
-  lrc = pv_project_load(cfg, eff_width, a->preview_ascii,
-    a->preview_strict, &diags, &proj);
+  // Chunk 1: resolve the scenario by name before the config is
+  // freed. An unknown name is a usage error (exit 2), like an
+  // unknown --screen — distinct from a scenario entry that matches
+  // nothing, which warns (CCB-P1022) during the load.
+  const ccb_scenario *scenario = NULL;
+  if (a->preview_scenario != NULL) {
+    scenario = ccb_config_scenario(cfg, a->preview_scenario);
+    if (scenario == NULL) {
+      fprintf(stderr, "error: unknown scenario '%s'\n",
+        a->preview_scenario);
+      fprintf(stderr, "available scenarios:");
+      for (i = 0; i < cfg->preview_scenario_count; i++) {
+        fprintf(stderr, " %s",
+          cfg->preview_scenarios[i].name != NULL ?
+          cfg->preview_scenarios[i].name : "?");
+      }
+      fprintf(stderr, "\n");
+      ccb_config_free(cfg);
+      ccb_diag_list_free(&diags);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return 2;
+    }
+  }
+  lrc = pv_project_load_scenario(cfg, eff_width, a->preview_ascii,
+    a->preview_strict, &diags, scenario, &proj);
   if (lrc == CCB_ERR_CONFIG) {
     if (a->preview_output != NULL) {
       int rc = ccb_preview_write_file(a->preview_output,
@@ -3638,6 +3692,14 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
           value = argv[++i];
         }
         a->preview_storyboard = value;
+      } else if (strcmp(flag, "--scenario") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_scenario = value;
       } else if (strcmp(flag, "--preview-gate") == 0) {
         a->preview_gate_on = 1;
       } else if (strcmp(flag, "--no-preview-gate") == 0) {

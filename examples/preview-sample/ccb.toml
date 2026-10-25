@@ -17,3 +17,20 @@ phone_height = 844
 
 [paths]
 manifest = "src/main/AndroidManifest.xml"
+
+# Chunk 1 scenario: the app with runtime facts applied. Branches are
+# picked (Detail's "is Loaded" state, Settings' "else" state), the
+# childless notes list gets rows instead of placeholders, the Title
+# field gets content, and the Back button's unknown argument is
+# filled. Static literals are never touched: Home's "Open note"
+# keeps its literal "note-42", and Form's "More" keeps its dynamic
+# target. Sub-table spelling: the TOML subset has no inline tables.
+[preview.scenario.loaded.branches]
+Detail = "is Loaded"
+Settings = "else"
+[preview.scenario.loaded.lists]
+notes = ["Buy milk", "Call Ana"]
+[preview.scenario.loaded.fields]
+Title = "Milk"
+[preview.scenario.loaded.args]
+Back = ["42"]

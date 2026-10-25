@@ -7,6 +7,42 @@
 #include "ccb_common.h"
 #include "ccb_diag.h"
 
+// One preview scenario: declared runtime facts for a project (see
+// docs/preview.md). A scenario never overrides a static literal: the
+// merge only fills unknowns and picks branches. All strings are
+// config-owned (malloc'd).
+typedef struct {
+  char *screen; // screen the branch pick applies to
+  char *entry; // when/if entry label, e.g. "is Loaded", "else"
+} ccb_scenario_branch;
+typedef struct {
+  char *label; // list label; rows replace placeholder rows only when
+               // the list has no static children
+  char **rows;
+  size_t nrows;
+} ccb_scenario_list;
+typedef struct {
+  char *label; // textfield label; text is shown as "[label: text]"
+  char *text;
+} ccb_scenario_field;
+typedef struct {
+  char *label; // button label; values fill unknown arguments
+               // left-to-right, never a static literal
+  char **values;
+  size_t nvalues;
+} ccb_scenario_args;
+typedef struct {
+  char *name; // single segment: no dots (dots separate the sections)
+  ccb_scenario_branch *branches;
+  size_t nbranches;
+  ccb_scenario_list *lists;
+  size_t nlists;
+  ccb_scenario_field *fields;
+  size_t nfields;
+  ccb_scenario_args *args;
+  size_t nargs;
+} ccb_scenario;
+
 // A library module: [modules.<name>] in ccb.toml. After load the
 // modules array is in topological order (dependencies first).
 typedef struct {
@@ -112,6 +148,17 @@ typedef struct {
   char **preview_binding_keys;
   char **preview_binding_values;
   size_t preview_binding_count;
+  // [preview.scenario.<name>] tables, in sub-table spelling (the TOML
+  // subset has no inline tables, so the plan's `branches = {...}`
+  // example is written as [preview.scenario.<name>.branches] with one
+  // key per entry): branches maps screen -> when/if entry label,
+  // lists maps list label -> row strings, fields maps textfield
+  // label -> text, args maps button label -> values that fill
+  // unknown arguments. Config-owned (malloc'd); freed by
+  // ccb_config_free. The preview merge copies what it needs into
+  // the project arena, so a scenario never outlives its config.
+  ccb_scenario *preview_scenarios;
+  size_t preview_scenario_count;
   // [modules.<name>] library modules, in topological order
   // (dependencies first). Empty when the project is single-module.
   ccb_module *modules;
@@ -126,5 +173,9 @@ ccb_status ccb_config_discover(const char *start_dir, const char *explicit, char
 // leaves *out NULL. On success *out owns the config.
 ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_config **out, ccb_diag_list *diags);
 void ccb_config_free(ccb_config *c);
+// Find a scenario by name in a loaded config, or NULL when absent.
+// Borrowed: the config owns it.
+const ccb_scenario *ccb_config_scenario(const ccb_config *c,
+  const char *name);
 
 #endif

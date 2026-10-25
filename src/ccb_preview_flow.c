@@ -249,6 +249,9 @@ static void pv_edge_add(pv_parser *p, char *from, char *target, int unknown,
   screen->edges[screen->nedges].args_named = args_named;
   screen->edges[screen->nedges].derived = derived;
   screen->edges[screen->nedges].branch = branch;
+  // Chunk 1: no scenario has filled anything yet; the merge sets
+  // this (never the parser) so a stale pointer can never leak in.
+  screen->edges[screen->nedges].args_scenario = NULL;
   screen->nedges++;
 }
 
@@ -2175,6 +2178,11 @@ static void pv_render_branches(ccb_str *out, pv_box *box) {
         ccb_str_append(out, ", ");
       }
       ccb_str_append(out, child->label);
+      // Chunk 1: the scenario-picked entry is marked; the other
+      // entries still render, so the pick never hides structure.
+      if (child->scenario_picked) {
+        ccb_str_append(out, " [scenario]");
+      }
       first = 0;
     }
     ccb_str_append(out, "]\n");
@@ -2203,11 +2211,69 @@ void pv_render_edge_args(ccb_str *out, const pv_edge *e) {
         ccb_str_append(out, e->args[k]);
         ccb_str_append(out, "\"");
       }
+      // Chunk 1: a scenario-filled argument keeps its literal text
+      // but carries its provenance, so a filled value is never
+      // mistaken for a static one.
+      if (e->args_scenario != NULL && e->args_scenario[k]) {
+        ccb_str_append(out, " [scenario]");
+      }
     } else {
       ccb_str_append(out, "unknown");
     }
   }
   ccb_str_append(out, ")");
+}
+
+// Chunk 1: per-screen scenario effects in the tree. List rows and
+// field content are values the wireframe shows as content, so the
+// tree marks their provenance here: one line per affected list or
+// field, in tree-walk order. Branch picks are marked inline in the
+// branches line and filled args inline in the edge lines, so this
+// covers only the two value classes that have no tree line of their
+// own. Nothing is emitted for screens a scenario does not touch.
+static void pv_render_scenario_lines(ccb_str *out, pv_box *box) {
+  size_t i = 0;
+  if (out == NULL || box == NULL) {
+    return;
+  }
+  if (box->type != NULL && strcmp(box->type, "list") == 0) {
+    size_t nrows = 0;
+    for (i = 0; i < box->nchildren; i++) {
+      if (box->children[i]->from_scenario) {
+        nrows++;
+      }
+    }
+    if (nrows > 0) {
+      int first = 1;
+      ccb_str_append(out, "  scenario: list \"");
+      ccb_str_append(out, box->label != NULL ? box->label : "");
+      ccb_str_append(out, "\" = [");
+      for (i = 0; i < box->nchildren; i++) {
+        if (!box->children[i]->from_scenario) {
+          continue;
+        }
+        if (!first) {
+          ccb_str_append(out, ", ");
+        }
+        ccb_str_append(out, "\"");
+        ccb_str_append(out, box->children[i]->label != NULL ?
+          box->children[i]->label : "");
+        ccb_str_append(out, "\"");
+        first = 0;
+      }
+      ccb_str_append(out, "] [scenario]\n");
+    }
+  } else if (box->type != NULL && strcmp(box->type, "textfield") == 0 &&
+      box->scenario_text != NULL) {
+    ccb_str_append(out, "  scenario: field \"");
+    ccb_str_append(out, box->label != NULL ? box->label : "");
+    ccb_str_append(out, "\" = \"");
+    ccb_str_append(out, box->scenario_text);
+    ccb_str_append(out, "\" [scenario]\n");
+  }
+  for (i = 0; i < box->nchildren; i++) {
+    pv_render_scenario_lines(out, box->children[i]);
+  }
 }
 
 void pv_render_logic_tree(ccb_str *out, pv_project *p) {
@@ -2249,6 +2315,9 @@ void pv_render_logic_tree(ccb_str *out, pv_project *p) {
         ccb_str_append(out, "]");
       }
       ccb_str_append(out, "\n");
+    }
+    if (screen->root != NULL) {
+      pv_render_scenario_lines(out, screen->root);
     }
   }
 }

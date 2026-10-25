@@ -52,6 +52,11 @@
 //   android:onClick handler whose bound component label appears in
 //   no screen's component tree, so its edges have nowhere to attach
 //   (warning, always)
+// CCB-P1022 scenario entry does not match the project: a scenario
+//   names a screen, branch entry, list, field, or button that does
+//   not exist (or a list that already has static rows, or a button
+//   with no unknown argument to fill), so that entry is skipped
+//   (warning, always — a scenario never fails the build)
 
 // Lengths: px values scale to columns/rows by interior_cols /
 // phone_dp_width; % values are relative to the parent content size.
@@ -120,6 +125,16 @@ struct pv_box {
   int has_border;
   const pv_rule *rule; // resolved during layout; NULL when no rule matches
   int is_branch; // true for when/if wrapper nodes
+  // Scenario (Chunk 1 runtime input, arena-owned): values supplied by
+  // a scenario, never by static analysis. scenario_text is a
+  // textfield's scenario content, shown as "[label: text]" — the
+  // static label is never replaced. from_scenario marks boxes the
+  // scenario merge created (list rows for a childless list).
+  // scenario_picked marks a branch entry a scenario picked (the
+  // other entries still render; a pick marks, it never hides).
+  char *scenario_text;
+  int from_scenario;
+  int scenario_picked;
 };
 
 typedef struct {
@@ -136,6 +151,13 @@ typedef struct {
   // argument (shown as written), 0 for a literal (shown quoted).
   // Internal only: JSON carries args alone, never this array.
   int *args_named;
+  // Chunk 1: parallel to args: 1 when that entry was filled by a
+  // scenario (the static argument was unknown); NULL when no
+  // scenario filled any argument of this edge. A filled argument is
+  // a literal in args, so without this array its provenance would be
+  // lost. Drives the " [scenario]" mark in the tree and
+  // "args_provenance" in JSON. Arena-owned.
+  int *args_scenario;
   // Slice 1: 1 when this edge was derived from a click handler
   // (listener lambda, onClick assignment, or named handler) rather
   // than declared by a nav() call in the flow. Internal only: the
@@ -196,6 +218,11 @@ typedef struct {
   // layout to skip rules scoped to another screen. NULL matches all
   // rules; set by pv_layout_screen, cleared when it returns.
   const char *layout_screen_name;
+  // Chunk 1: name of the scenario applied at load (arena-owned), or
+  // NULL when no scenario was applied. Emitted as "scenario" in
+  // JSON only when set, so the no-scenario output is byte-identical
+  // to before.
+  char *scenario_name;
 } pv_project;
 
 // ---------- CSS subset parser + layout (ccb_preview_css.c) ----------
@@ -323,12 +350,22 @@ void pv_render_logic_tree(ccb_str *out, pv_project *p);
 // project uses its own list. No SDK/toolchain is ever consulted.
 ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
   int strict, ccb_diag_list *diags, pv_project **out);
+// Full variant: applies scenario (borrowed from the config, NULL for
+// none) after parsing and @string/@color resolution but before
+// layout, so scenario list rows size the list and scenario values
+// are laid out like any other content. pv_project_load is this
+// function with no scenario. Scenario entries that match nothing
+// warn (CCB-P1022) into the diag list; they never fail the load.
+ccb_status pv_project_load_scenario(const ccb_config *cfg,
+  long frame_width, int ascii, int strict, ccb_diag_list *diags,
+  const ccb_scenario *scenario, pv_project **out);
 void pv_project_free(pv_project *p);
 // Error classification for one diagnostic code under a strict flag:
 // CCB-P1005 and CCB-P1008 are always errors; CCB-P1001 and
 // CCB-P1014 count as errors only when strict is set; everything
-// else is a warning — including CCB-P1019, CCB-P1020, and CCB-P1021,
-// which are warnings always and never fail the build gate. This is the single definition of the rule that
+// else is a warning — including CCB-P1019, CCB-P1020, CCB-P1021, and
+// CCB-P1022, which are warnings always and never fail the build
+// gate. This is the single definition of the rule that
 // pv_project_diagnose counts with and that the preview gate
 // (ccb_preview_gate) collects with; keep the three in sync.
 int pv_diag_is_error(const char *code, int strict);
@@ -352,7 +389,16 @@ long pv_project_diagnose(pv_project *p);
 // of string-or-null, [] when the nav call has no extra arguments)
 // and "branch" (the Slice 2 branch label string, or null when the
 // edge is unconditional). w_dp/h_dp are additive per-box fields, so
-// the version stays 2.
+// the version stays 2. Scenario fields are additive the same way
+// and appear only when a scenario supplied them, so no-scenario
+// JSON is byte-identical to before: "scenario" (top level, the
+// scenario name) when one was applied; per-edge "args_provenance"
+// (parallel to "args", null for static entries, "scenario" for
+// filled ones) when an edge has a filled argument; per-branch
+// "picked" ({"entry":..., "provenance":"scenario"}) when a branch
+// was picked; per-box "provenance":"scenario" on scenario-created
+// boxes (list rows) and "value"/"value_provenance":"scenario" on a
+// textfield with scenario content.
 void pv_project_json(ccb_str *out, pv_project *p);
 // JSON for a subset of screens, in the given order: the same object
 // as pv_project_json, but the "screens" array contains only these
