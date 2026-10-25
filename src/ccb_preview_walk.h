@@ -38,6 +38,7 @@
 #define CCB_PREVIEW_WALK_H
 
 #include "ccb_common.h"
+#include "ccb_preview_trace.h"
 #include "ccb_preview.h"
 #include "ccb_str.h"
 
@@ -89,6 +90,15 @@ typedef struct {
   const char *picked_entry; // borrowed
   int picked_has_edge;
   int quit; // set by PV_WALK_KEY_QUIT
+  // Chunk 2: the walk's recorded trace — one step per forward
+  // navigation taken (plus pick-only steps for branch picks that
+  // did not navigate). Steps borrow strings and argument arrays
+  // from the project arena: the trace must be written before
+  // pv_project_free. Back navigation is never recorded. The array
+  // itself is malloc'd and freed by pv_walk_free; the strings and
+  // argument arrays inside it are borrowed and must never be freed.
+  pv_trace_step *record;
+  size_t nrecord, caprecord;
 } pv_walk;
 
 // Start a walk. start_name NULL means the entry screen (the screen
@@ -142,9 +152,13 @@ void pv_walk_render(ccb_str *out, const pv_walk *w, long frame_width,
 // until quit, and restore the terminal on EVERY exit path (normal
 // quit, Ctrl-C byte, SIGINT/SIGTERM, read error, EOF). Returns 0 on
 // a clean quit, 1 when start_name names no screen, 2 when stdin or
-// stdout is not a TTY (a clean diagnostic on stderr, never a hang).
-// frame_width of 0 means the project's frame width.
+// stdout is not a TTY (a clean diagnostic on stderr, never a hang),
+// or when a requested record file cannot be written. frame_width of
+// 0 means the project's frame width. record_path NULL means no
+// recording; otherwise the walk's recorded steps are written as
+// trace JSON (see ccb_preview_trace.h) after the terminal is
+// restored, before the walk is freed.
 int pv_walk_run(pv_project *proj, const char *start_name, long frame_width,
-  int ascii, int color);
+  int ascii, int color, const char *record_path);
 
 #endif

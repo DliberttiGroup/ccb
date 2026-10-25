@@ -57,6 +57,11 @@
 //   not exist (or a list that already has static rows, or a button
 //   with no unknown argument to fill), so that entry is skipped
 //   (warning, always — a scenario never fails the build)
+// CCB-P1023 trace step does not match the project: a trace names
+//   an unknown screen, an edge no screen carries, or a branch entry
+//   that does not exist in the named screen, so that step (or its
+//   unmatched part) is skipped (warning, always — a trace never
+//   fails the build)
 
 // Lengths: px values scale to columns/rows by interior_cols /
 // phone_dp_width; % values are relative to the parent content size.
@@ -135,6 +140,11 @@ struct pv_box {
   char *scenario_text;
   int from_scenario;
   int scenario_picked;
+  // Chunk 2: the trace equivalent of scenario_picked — a branch
+  // entry the applied trace picked (the step's branch). Trace and
+  // scenario picks are independent flags: both overlays may apply,
+  // and each value keeps its own provenance.
+  int trace_picked;
 };
 
 typedef struct {
@@ -158,6 +168,16 @@ typedef struct {
   // lost. Drives the " [scenario]" mark in the tree and
   // "args_provenance" in JSON. Arena-owned.
   int *args_scenario;
+  // Chunk 2: parallel to args_scenario, for arguments filled by a
+  // trace step (positional: step arg k fills edge arg k when that
+  // slot was unknown). A slot is filled by at most one source: the
+  // trace only fills slots still NULL after any scenario, so the
+  // two arrays never mark the same slot.
+  int *args_trace;
+  // Chunk 2: set when an applied trace records this edge as taken
+  // (a step named this screen and this button). Drives the
+  // " [trace]" mark on the tree edge line and "taken":true in JSON.
+  int trace_taken;
   // Slice 1: 1 when this edge was derived from a click handler
   // (listener lambda, onClick assignment, or named handler) rather
   // than declared by a nav() call in the flow. Internal only: the
@@ -223,6 +243,12 @@ typedef struct {
   // JSON only when set, so the no-scenario output is byte-identical
   // to before.
   char *scenario_name;
+  // Chunk 2: set when a trace was applied (after load, by the CLI
+  // or by a test calling pv_trace_apply). trace_step_count is the
+  // number of steps in the trace file, whether or not every step
+  // matched. Emitted as "trace":{"steps":N} in JSON only when set.
+  int trace_applied;
+  long trace_step_count;
 } pv_project;
 
 // ---------- CSS subset parser + layout (ccb_preview_css.c) ----------
@@ -368,6 +394,8 @@ void pv_project_free(pv_project *p);
 // gate. This is the single definition of the rule that
 // pv_project_diagnose counts with and that the preview gate
 // (ccb_preview_gate) collects with; keep the three in sync.
+// CCB-P1023 falls through to the default (warning always), like
+// CCB-P1022, so it needs no case here.
 int pv_diag_is_error(const char *code, int strict);
 // Run the diagnostics pass: overlap/off-screen/clip are emitted during
 // layout; this pass adds missing-target (error), duplicate-screen
@@ -398,7 +426,13 @@ long pv_project_diagnose(pv_project *p);
 // "picked" ({"entry":..., "provenance":"scenario"}) when a branch
 // was picked; per-box "provenance":"scenario" on scenario-created
 // boxes (list rows) and "value"/"value_provenance":"scenario" on a
-// textfield with scenario content.
+// textfield with scenario content. Trace fields are additive the
+// same way and appear only when a trace was applied: "trace"
+// (top level, {"steps":N} for steps in the file) when one was
+// applied; per-edge "taken":true when the trace took the edge;
+// "trace" entries in "args_provenance" for trace-filled arguments;
+// per-branch "picked" with "provenance":"trace" (a trace pick wins
+// over a scenario pick of a different entry).
 void pv_project_json(ccb_str *out, pv_project *p);
 // JSON for a subset of screens, in the given order: the same object
 // as pv_project_json, but the "screens" array contains only these

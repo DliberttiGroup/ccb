@@ -5,28 +5,35 @@
 
 // ---------- small helpers ----------
 
-static void sc_diag(ccb_diag_list *diags, const char *message) {
+void pv_rt_warn(ccb_diag_list *diags, const char *code,
+    const char *label, const char *detail) {
   ccb_diag d;
+  ccb_str msg;
   if (diags == NULL) {
     return;
   }
+  ccb_str_init(&msg);
+  ccb_str_append(&msg, label != NULL ? label : "?");
+  ccb_str_append(&msg, ": ");
+  ccb_str_append(&msg, detail != NULL ? detail : "");
   ccb_diag_init(&d);
-  ccb_diag_set_full(&d, "CCB-P1022", "preview", message, NULL, -1, -1,
-    NULL, NULL, NULL);
+  ccb_diag_set_full(&d, code != NULL ? code : "CCB-P1022", "preview",
+    msg.buf != NULL ? msg.buf : "", NULL, -1, -1, NULL, NULL, NULL);
   ccb_diag_list_push(diags, &d);
+  ccb_str_free(&msg);
 }
 
 // Warning message for one scenario entry: "scenario '<name>': <detail>".
 static void sc_warn(ccb_diag_list *diags, const ccb_scenario *sc,
     const char *detail) {
-  ccb_str msg;
-  ccb_str_init(&msg);
-  ccb_str_append(&msg, "scenario '");
-  ccb_str_append(&msg, sc->name != NULL ? sc->name : "?");
-  ccb_str_append(&msg, "': ");
-  ccb_str_append(&msg, detail);
-  sc_diag(diags, msg.buf != NULL ? msg.buf : "");
-  ccb_str_free(&msg);
+  ccb_str label;
+  ccb_str_init(&label);
+  ccb_str_append(&label, "scenario '");
+  ccb_str_append(&label, sc->name != NULL ? sc->name : "?");
+  ccb_str_append(&label, "'");
+  pv_rt_warn(diags, "CCB-P1022", label.buf != NULL ? label.buf : "",
+    detail);
+  ccb_str_free(&label);
 }
 
 static int sc_type_eq(const pv_box *box, const char *type) {
@@ -120,6 +127,60 @@ static pv_screen *sc_find_screen(pv_project *p, const char *name) {
   return NULL;
 }
 
+// ---------- shared merge primitives (Chunks 1 + 2) ----------
+
+// Mark every branch-entry box with this label in screen. Shared by
+// the scenario branch step and the trace branch step: a pick marks,
+// it never hides, and it never touches any other entry.
+size_t pv_rt_mark_branch(pv_project *p, pv_screen *screen,
+    const char *entry, pv_prov prov) {
+  sc_match_list found;
+  size_t i = 0;
+  if (p == NULL || screen == NULL || entry == NULL) {
+    return 0;
+  }
+  memset(&found, 0, sizeof(found));
+  if (screen->root != NULL) {
+    sc_collect(screen->root, "branch-entry", entry, screen->name,
+      p->arena, &found);
+  }
+  for (i = 0; i < found.count; i++) {
+    if (prov == PV_PROV_TRACE) {
+      found.items[i].box->trace_picked = 1;
+    } else {
+      found.items[i].box->scenario_picked = 1;
+    }
+  }
+  return found.count;
+}
+
+// Fill one unknown argument slot. Shared by the scenario args step
+// (which walks unknown slots left-to-right) and the trace args step
+// (which maps step args positionally): the rule is identical — a
+// NULL slot takes the value, a static literal never changes, and
+// the filled slot carries its source's provenance.
+int pv_rt_fill_arg(pv_project *p, pv_edge *e, size_t k,
+    const char *value, pv_prov prov) {
+  int **prov_array = NULL;
+  size_t z = 0;
+  if (p == NULL || e == NULL || value == NULL || k >= e->nargs ||
+      e->args[k] != NULL) {
+    return 0;
+  }
+  prov_array = prov == PV_PROV_TRACE ? &e->args_trace :
+    &e->args_scenario;
+  if (*prov_array == NULL) {
+    *prov_array = ccb_arena_alloc(p->arena,
+      (e->nargs == 0 ? 1 : e->nargs) * sizeof(int));
+    for (z = 0; z < e->nargs; z++) {
+      (*prov_array)[z] = 0;
+    }
+  }
+  e->args[k] = ccb_arena_strdup(p->arena, value);
+  (*prov_array)[k] = 1;
+  return 1;
+}
+
 // ---------- merge steps ----------
 
 // Branches: mark every branch-entry box with the picked label in the
@@ -130,9 +191,7 @@ static void sc_apply_branches(pv_project *p, const ccb_scenario *sc,
   size_t bi = 0;
   for (bi = 0; bi < sc->nbranches; bi++) {
     pv_screen *screen = sc_find_screen(p, sc->branches[bi].screen);
-    sc_match_list found;
     ccb_str detail;
-    size_t i = 0;
     if (screen == NULL) {
       ccb_str_init(&detail);
       ccb_str_append(&detail, "branch for unknown screen '");
@@ -146,12 +205,8 @@ static void sc_apply_branches(pv_project *p, const ccb_scenario *sc,
       ccb_str_free(&detail);
       continue;
     }
-    memset(&found, 0, sizeof(found));
-    if (screen->root != NULL) {
-      sc_collect(screen->root, "branch-entry", sc->branches[bi].entry,
-        screen->name, p->arena, &found);
-    }
-    if (found.count == 0) {
+    if (pv_rt_mark_branch(p, screen, sc->branches[bi].entry,
+        PV_PROV_SCENARIO) == 0) {
       ccb_str_init(&detail);
       ccb_str_append(&detail, "branch entry '");
       ccb_str_append(&detail, sc->branches[bi].entry != NULL ?
@@ -163,9 +218,6 @@ static void sc_apply_branches(pv_project *p, const ccb_scenario *sc,
       sc_warn(diags, sc, detail.buf != NULL ? detail.buf : "");
       ccb_str_free(&detail);
       continue;
-    }
-    for (i = 0; i < found.count; i++) {
-      found.items[i].box->scenario_picked = 1;
     }
   }
 }
@@ -293,19 +345,11 @@ static void sc_apply_args(pv_project *p, const ccb_scenario *sc,
           if (e->args[k] != NULL || vi >= sc->args[ai].nvalues) {
             continue;
           }
-          if (e->args_scenario == NULL) {
-            size_t z = 0;
-            e->args_scenario = ccb_arena_alloc(p->arena,
-              (e->nargs == 0 ? 1 : e->nargs) * sizeof(int));
-            for (z = 0; z < e->nargs; z++) {
-              e->args_scenario[z] = 0;
-            }
+          if (pv_rt_fill_arg(p, e, k, sc->args[ai].values[vi],
+              PV_PROV_SCENARIO)) {
+            vi++;
+            filled_any = 1;
           }
-          e->args[k] =
-            ccb_arena_strdup(p->arena, sc->args[ai].values[vi]);
-          e->args_scenario[k] = 1;
-          vi++;
-          filled_any = 1;
         }
       }
     }

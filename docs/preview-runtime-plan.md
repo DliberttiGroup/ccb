@@ -61,6 +61,26 @@ marking lives in the logic tree (`scenario:` lines) and JSON.
 - Document the trace format so a tiny in-app logger can emit it
   later. No in-app logger is built in this round.
 
+As built (Chunk 2, 2026-10-24): the merge is shared, not forked —
+chunk 1's scenario merge was generalized to a provenance parameter
+(`pv_prov`: scenario vs trace) with two shared primitives
+(`pv_rt_mark_branch`, `pv_rt_fill_arg`); the trace module only
+adds parsing, the taken-edge marking, and its own step loop.
+Three documented deviations from the sketch above. (1) "Greyed"
+in plain-text output is the `[not taken]` mark on untaken entries
+of a picked branch (the wireframe is unchanged by a trace; the
+path lives in the tree and JSON). (2) Trace args map positionally
+onto the taken edge (step arg k fills edge arg k), while scenario
+args fill unknown slots left-to-right for every edge with the
+button label — the trace fills only the taken edge, so the two
+rules differ by targeting, not by principle (never override a
+static literal). (3) Matching is by label: a branch-qualified step
+marks every edge whose button label appears inside the named
+branch entry; flow-declared navs carry no branch annotation, so
+the box-tree label link is the only one available. Mismatches
+warn (CCB-P1023), never fail. `--trace` composes with `--scenario`
+(scenario first, trace fills only slots still unknown).
+
 ## Chunk 3 — LSP server (`ccb lsp`)
 
 - stdio JSON-RPC with LSP-style Content-Length framing.

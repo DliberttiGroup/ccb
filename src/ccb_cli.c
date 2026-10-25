@@ -85,6 +85,10 @@ typedef struct {
   const char *preview_diff;
   const char *preview_storyboard;
   const char *preview_scenario;
+  // Chunk 2: --trace FILE (render with the trace overlay) and
+  // --record FILE (walk only: write the walk's trace).
+  const char *preview_trace;
+  const char *preview_record;
   int preview_gate_on;
   int preview_gate_off;
 } ccb_args;
@@ -3277,6 +3281,40 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--update-goldens (goldens cover the no-scenario baseline)\n");
     return 2;
   }
+  // Chunk 2: --record only makes sense with --walk (it records the
+  // walk), and --trace is a render overlay, so it rejects the other
+  // render modes the same way --scenario does. --trace composes
+  // with --scenario (scenario applies at load, trace after), and
+  // with --json/--screen/--output like any plain render.
+  if (a->preview_record != NULL && !a->preview_walk) {
+    fprintf(stderr, "error: --record requires --walk\n");
+    return 2;
+  }
+  if (a->preview_trace != NULL && a->preview_walk) {
+    fprintf(stderr, "error: --trace cannot be combined with "
+      "--walk (record a walk with --record instead)\n");
+    return 2;
+  }
+  if (a->preview_trace != NULL && a->preview_watch) {
+    fprintf(stderr, "error: --trace cannot be combined with "
+      "--watch\n");
+    return 2;
+  }
+  if (a->preview_trace != NULL && a->preview_diff != NULL) {
+    fprintf(stderr, "error: --trace cannot be combined with "
+      "--diff\n");
+    return 2;
+  }
+  if (a->preview_trace != NULL && a->preview_storyboard != NULL) {
+    fprintf(stderr, "error: --trace cannot be combined with "
+      "--storyboard\n");
+    return 2;
+  }
+  if (a->preview_trace != NULL && a->preview_update_goldens) {
+    fprintf(stderr, "error: --trace cannot be combined with "
+      "--update-goldens (goldens cover the no-trace baseline)\n");
+    return 2;
+  }
   if (getcwd(cwd, sizeof(cwd)) == NULL) {
     fprintf(stderr, "error: cannot determine working directory\n");
     return 2;
@@ -3471,6 +3509,40 @@ static int ccb_cmd_preview(ccb_args *a) {
   // From here the diag list belongs to the project; the caller's list
   // was left empty by pv_project_load, so it must not be freed again.
   ccb_config_free(cfg);
+  // Chunk 2: apply the trace after load (marks and argument fills
+  // do not affect layout, so post-load is fine) and before
+  // diagnose, so trace warnings print with the rest. A missing or
+  // malformed trace file is a usage error (exit 2); a step that
+  // matches nothing warns (CCB-P1023) during apply and rendering
+  // continues. A scenario applied at load keeps its values: the
+  // trace only fills slots still unknown.
+  if (a->preview_trace != NULL) {
+    char *ttext = NULL;
+    size_t tlen = 0;
+    char *terr = NULL;
+    pv_trace *trace = NULL;
+    if (ccb_read_file(a->preview_trace, &ttext, &tlen) != CCB_OK) {
+      fprintf(stderr, "error: cannot read trace file '%s'\n",
+        a->preview_trace);
+      pv_project_free(proj);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return 2;
+    }
+    trace = pv_trace_parse(ttext, &terr);
+    free(ttext);
+    if (trace == NULL) {
+      fprintf(stderr, "error: invalid trace file '%s': %s\n",
+        a->preview_trace, terr != NULL ? terr : "parse error");
+      free(terr);
+      pv_project_free(proj);
+      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
+        watch_styles, watch_flow);
+      return 2;
+    }
+    pv_trace_apply(proj, trace, &proj->diags);
+    pv_trace_free(trace);
+  }
   errors = pv_project_diagnose(proj);
   if (a->preview_storyboard != NULL) {
     size_t njourney = 0;
@@ -3525,7 +3597,7 @@ static int ccb_cmd_preview(ccb_args *a) {
     }
     wrc = pv_walk_run(proj,
       selected_screen != NULL ? selected_screen->name : NULL,
-      proj->frame_width, a->preview_ascii, color);
+      proj->frame_width, a->preview_ascii, color, a->preview_record);
     pv_project_free(proj);
     return wrc;
   }
@@ -3700,6 +3772,22 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
           value = argv[++i];
         }
         a->preview_scenario = value;
+      } else if (strcmp(flag, "--trace") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_trace = value;
+      } else if (strcmp(flag, "--record") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->preview_record = value;
       } else if (strcmp(flag, "--preview-gate") == 0) {
         a->preview_gate_on = 1;
       } else if (strcmp(flag, "--no-preview-gate") == 0) {

@@ -855,6 +855,9 @@ static void pv_screen_edge_add(ccb_arena *arena, pv_screen *screen,
   screen->edges[screen->nedges].branch = branch;
   // Chunk 1: see pv_edge_add in ccb_preview_flow.c.
   screen->edges[screen->nedges].args_scenario = NULL;
+  // Chunk 2: see pv_edge_add in ccb_preview_flow.c.
+  screen->edges[screen->nedges].args_trace = NULL;
+  screen->edges[screen->nedges].trace_taken = 0;
   screen->nedges++;
 }
 
@@ -1578,19 +1581,34 @@ static void pv_json_branches(ccb_str *out, pv_box *box, int *first) {
     }
     // Chunk 1: the scenario-picked entry, if any. Entries stay plain
     // strings; only a pick adds a field, so unpicked branches render
-    // exactly as before.
+    // exactly as before. Chunk 2: a trace pick is the same field
+    // with "trace" provenance, and it wins over a scenario pick of
+    // a different entry: the trace is the runtime record.
     {
       const char *picked = NULL;
+      const char *prov = NULL;
       for (i = 0; i < box->nchildren; i++) {
-        if (box->children[i]->scenario_picked) {
+        if (box->children[i]->trace_picked) {
           picked = box->children[i]->label;
+          prov = "trace";
           break;
+        }
+      }
+      if (picked == NULL) {
+        for (i = 0; i < box->nchildren; i++) {
+          if (box->children[i]->scenario_picked) {
+            picked = box->children[i]->label;
+            prov = "scenario";
+            break;
+          }
         }
       }
       if (picked != NULL) {
         ccb_str_append(out, "],\"picked\":{\"entry\":");
         ccb_json_escape(out, picked);
-        ccb_str_append(out, ",\"provenance\":\"scenario\"}");
+        ccb_str_append(out, ",\"provenance\":\"");
+        ccb_str_append(out, prov);
+        ccb_str_append(out, "\"}");
       } else {
         ccb_str_append(out, "]");
       }
@@ -1625,6 +1643,12 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
   if (p->scenario_name != NULL) {
     ccb_str_append(out, ",\"scenario\":");
     pv_json_str(out, p->scenario_name);
+  }
+  // Chunk 2: the applied trace's step count, only when one was
+  // applied. Steps in the file, whether or not every step matched.
+  if (p->trace_applied) {
+    ccb_str_appendf(out, ",\"trace\":{\"steps\":%ld}",
+      p->trace_step_count);
   }
   ccb_str_append(out, ",\"screens\":[");
   for (i = 0; i < nscreens; i++) {
@@ -1666,13 +1690,20 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
       }
       ccb_str_append(out, "],\"branch\":");
       pv_json_str(out, e->branch);
+      // Chunk 2: the taken mark, only when an applied trace took
+      // this edge.
+      if (e->trace_taken) {
+        ccb_str_append(out, ",\"taken\":true");
+      }
       // Chunk 1: per-argument provenance, only when a scenario
       // filled at least one argument of this edge. Static entries
-      // stay null (unmarked); filled ones read "scenario".
-      if (e->args_scenario != NULL) {
+      // stay null (unmarked); filled ones read "scenario". Chunk 2:
+      // trace fills read "trace"; a slot carries at most one.
+      if (e->args_scenario != NULL || e->args_trace != NULL) {
         int has_filled = 0;
         for (k = 0; k < e->nargs; k++) {
-          if (e->args_scenario[k]) {
+          if ((e->args_scenario != NULL && e->args_scenario[k]) ||
+              (e->args_trace != NULL && e->args_trace[k])) {
             has_filled = 1;
             break;
           }
@@ -1683,8 +1714,14 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
             if (k > 0) {
               ccb_str_append(out, ",");
             }
-            ccb_str_append(out, e->args_scenario[k] ?
-              "\"scenario\"" : "null");
+            if (e->args_trace != NULL && e->args_trace[k]) {
+              ccb_str_append(out, "\"trace\"");
+            } else if (e->args_scenario != NULL &&
+                e->args_scenario[k]) {
+              ccb_str_append(out, "\"scenario\"");
+            } else {
+              ccb_str_append(out, "null");
+            }
           }
           ccb_str_append(out, "]");
         }

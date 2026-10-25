@@ -252,6 +252,10 @@ static void pv_edge_add(pv_parser *p, char *from, char *target, int unknown,
   // Chunk 1: no scenario has filled anything yet; the merge sets
   // this (never the parser) so a stale pointer can never leak in.
   screen->edges[screen->nedges].args_scenario = NULL;
+  // Chunk 2: same for the trace fields; only the trace merge sets
+  // them, and only on edges an applied trace names.
+  screen->edges[screen->nedges].args_trace = NULL;
+  screen->edges[screen->nedges].trace_taken = 0;
   screen->nedges++;
 }
 
@@ -2165,12 +2169,24 @@ ccb_status pv_flow_parse_full(ccb_arena *arena, const char *text,
 
 static void pv_render_branches(ccb_str *out, pv_box *box) {
   if (box->is_branch) {
+    int has_trace_pick = 0;
+    size_t i = 0;
+    // Chunk 2: a trace pick greys the entries it did not take —
+    // in plain text, "greyed" is the [not taken] mark. The picked
+    // entry keeps its [trace] mark and every entry still renders,
+    // so the pick never hides structure (same rule as chunk 1).
+    for (i = 0; i < box->nchildren; i++) {
+      if (box->children[i]->trace_picked) {
+        has_trace_pick = 1;
+        break;
+      }
+    }
     ccb_str_append(out, "  branches: ");
     ccb_str_append(out, box->label != NULL ? box->label : "");
     ccb_str_append(out, " [");
     int first = 1;
-    for (size_t i = 0; i < box->nchildren; i++) {
-      pv_box *child = box->children[i];
+    for (size_t i2 = 0; i2 < box->nchildren; i2++) {
+      pv_box *child = box->children[i2];
       if (child->label == NULL) {
         continue;
       }
@@ -2182,6 +2198,11 @@ static void pv_render_branches(ccb_str *out, pv_box *box) {
       // entries still render, so the pick never hides structure.
       if (child->scenario_picked) {
         ccb_str_append(out, " [scenario]");
+      }
+      if (child->trace_picked) {
+        ccb_str_append(out, " [trace]");
+      } else if (has_trace_pick) {
+        ccb_str_append(out, " [not taken]");
       }
       first = 0;
     }
@@ -2213,9 +2234,13 @@ void pv_render_edge_args(ccb_str *out, const pv_edge *e) {
       }
       // Chunk 1: a scenario-filled argument keeps its literal text
       // but carries its provenance, so a filled value is never
-      // mistaken for a static one.
+      // mistaken for a static one. Chunk 2: same for trace-filled
+      // arguments; a slot carries at most one source's mark.
       if (e->args_scenario != NULL && e->args_scenario[k]) {
         ccb_str_append(out, " [scenario]");
+      }
+      if (e->args_trace != NULL && e->args_trace[k]) {
+        ccb_str_append(out, " [trace]");
       }
     } else {
       ccb_str_append(out, "unknown");
@@ -2313,6 +2338,10 @@ void pv_render_logic_tree(ccb_str *out, pv_project *p) {
         ccb_str_append(out, " [");
         ccb_str_append(out, e->branch);
         ccb_str_append(out, "]");
+      }
+      // Chunk 2: the taken path is highlighted with the trace mark.
+      if (e->trace_taken) {
+        ccb_str_append(out, " [trace]");
       }
       ccb_str_append(out, "\n");
     }

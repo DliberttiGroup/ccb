@@ -6,6 +6,7 @@
 #include "ccb_common.h"
 #include "ccb_preview_walk.h"
 #include "ccb_alloc.h"
+#include "ccb_fs.h"
 #include "ccb_str.h"
 #include <signal.h>
 #include <sys/select.h>
@@ -150,6 +151,50 @@ static void walk_push(pv_walk *w) {
   w->back[w->nback++] = w->current;
 }
 
+// Append one recorded step. Screen, edge label, branch label, and
+// argument arrays are borrowed from the project arena; only the
+// steps array itself is owned by the walk. A NULL edge records a
+// pick-only step (a branch picked without navigating).
+static void walk_record(pv_walk *w, const char *screen,
+    const pv_edge *e, const char *branch) {
+  pv_trace_step *step = NULL;
+  if (w == NULL || screen == NULL) {
+    return;
+  }
+  if (w->nrecord >= w->caprecord) {
+    size_t ncap = w->caprecord == 0 ? 8 : w->caprecord * 2;
+    if (w->caprecord != 0 &&
+        __builtin_mul_overflow(w->caprecord, (size_t)2, &ncap)) {
+      ncap = (size_t)-1;
+    }
+    w->record = ccb_xrealloc(w->record, ncap * sizeof(*w->record));
+    w->caprecord = ncap;
+  }
+  step = &w->record[w->nrecord++];
+  step->screen = screen;
+  step->edge = e != NULL ? e->from : NULL;
+  step->branch = branch;
+  step->args = e != NULL ? (const char **)e->args : NULL;
+  step->nargs = e != NULL ? e->nargs : 0;
+}
+
+// The branch-entry label an edge-list follow ran under, if the edge
+// is the first edge of some branch entry of the current screen.
+// Branch annotations on the edge itself are labels, not entry links,
+// so the flattened branch list is the exact link.
+static const char *walk_edge_branch(pv_walk *w, const pv_edge *e) {
+  size_t i = 0;
+  if (w == NULL || e == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < w->nbranches; i++) {
+    if (w->branches[i].edge == e) {
+      return w->branches[i].entry_label;
+    }
+  }
+  return NULL;
+}
+
 // Move to a known target screen: push, switch, reset selection and
 // notes, rebuild the branch list.
 static void walk_go(pv_walk *w, pv_screen *target) {
@@ -188,6 +233,9 @@ void pv_walk_free(pv_walk *w) {
   }
   free(w->back);
   free(w->branches);
+  // The record array only: step strings and argument arrays are
+  // borrowed from the project arena and must never be freed.
+  free(w->record);
   memset(w, 0, sizeof(*w));
 }
 
@@ -264,6 +312,9 @@ void pv_walk_follow(pv_walk *w) {
     w->unknown_target = e->target;
     return;
   }
+  // Record before the move: walk_go rebuilds the branch list, and
+  // the branch lookup above reads it.
+  walk_record(w, w->current->name, e, walk_edge_branch(w, e));
   walk_go(w, target);
 }
 
@@ -332,12 +383,17 @@ void pv_walk_branch_pick(pv_walk *w) {
   w->in_branch = 0;
   w->branch_sel = 0;
   if (be->edge == NULL) {
-    return; // entry has no outgoing edge: stay, pick recorded
+    // Entry has no outgoing edge: stay, pick recorded as a
+    // pick-only step (the branch fact is real even without a move).
+    walk_record(w, w->current->name, NULL, be->entry_label);
+    return;
   }
   if (be->edge->unknown || be->edge->target == NULL) {
     w->unknown_shown = 1;
     w->unknown_from = be->edge->from;
     w->unknown_target = be->edge->target;
+    // Same: the pick happened, the navigation did not.
+    walk_record(w, w->current->name, NULL, be->entry_label);
     return;
   }
   target = walk_find(w->proj, be->edge->target);
@@ -345,8 +401,10 @@ void pv_walk_branch_pick(pv_walk *w) {
     w->unknown_shown = 1;
     w->unknown_from = be->edge->from;
     w->unknown_target = be->edge->target;
+    walk_record(w, w->current->name, NULL, be->entry_label);
     return;
   }
+  walk_record(w, w->current->name, be->edge, be->entry_label);
   walk_go(w, target);
 }
 
@@ -606,7 +664,7 @@ static int walk_read_key(pv_walk_key *key) {
 }
 
 int pv_walk_run(pv_project *proj, const char *start_name, long frame_width,
-    int ascii, int color) {
+    int ascii, int color, const char *record_path) {
   pv_walk w;
   struct termios raw;
   struct sigaction sa, old_int, old_term;
@@ -689,6 +747,23 @@ int pv_walk_run(pv_project *proj, const char *start_name, long frame_width,
   if (have_old) {
     sigaction(SIGINT, &old_int, NULL);
     sigaction(SIGTERM, &old_term, NULL);
+  }
+  // Chunk 2: write the recorded trace after the terminal is
+  // restored but before the walk is freed (steps borrow project
+  // strings, which are still alive; only the steps array is freed
+  // with the walk). A write failure is a usage error, not a
+  // silent loss of the recording.
+  if (record_path != NULL) {
+    ccb_str out;
+    ccb_str_init(&out);
+    pv_trace_write(&out, w.record, w.nrecord);
+    if (ccb_write_file(record_path, out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : "")) != CCB_OK) {
+      fprintf(stderr, "error: cannot write trace to '%s'\n",
+        record_path);
+      rc = 2;
+    }
+    ccb_str_free(&out);
   }
   pv_walk_free(&w);
   fputs("\n", stdout);
