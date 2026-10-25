@@ -259,6 +259,24 @@ typedef struct {
 // failures surface as diagnostics, never as crashes.
 ccb_status pv_css_parse(ccb_arena *arena, const char *text, const char *file,
   int strict, ccb_diag_list *diags, pv_rule **rules_io, size_t *nrules_io);
+// Merge one fully-parsed rule (already merged within its own file)
+// into the merged rule array, replicating pv_css_parse's cross-file
+// semantics exactly: a rule for a selector this file already owns
+// (same file, or same scope) merges in place, property by property;
+// a per-screen file (scope != NULL) redeclaring a selector first
+// seen elsewhere appends a copy of the first matching rule carrying
+// the new file and scope, leaving the earlier rule untouched; a
+// common file (scope == NULL) merges into the first matching rule;
+// otherwise the rule is appended with the given file and scope.
+// Only has_* properties copy on a merge — selector, file, line, and
+// scope keep the target's values (a split copy takes the base rule's
+// line, like the parser's own split path). Lets the LSP server merge
+// per-file cached rules in load order instead of re-parsing every
+// CSS file on each rebuild; pv_project_load_scenario uses the same
+// function, so both paths share one merge definition.
+void pv_css_rule_merge(ccb_arena *arena, pv_rule **rules_io,
+  size_t *nrules_io, const pv_rule *src, const char *file,
+  const char *scope);
 // Compute x/y/w/h for a screen tree. Rules are matched by box type
 // ("screen" for the root). Absolute boxes do not affect parent height.
 // Emits CCB-P1003/P1004/P1009 diagnostics (overlap/off-screen/clip).
@@ -386,6 +404,60 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
   long frame_width, int ascii, int strict, ccb_diag_list *diags,
   const ccb_scenario *scenario, pv_project **out);
 void pv_project_free(pv_project *p);
+
+// One pre-parsed CSS file for assembly: the rules pv_css_parse
+// produced for that file alone (merged within the file only), plus
+// the parse diagnostics for the file, replayed by assembly in load
+// order. Paths and rule strings are borrowed; the diag list is
+// borrowed and never consumed (assembly copies each diagnostic).
+typedef struct {
+  const char *path;
+  pv_rule *rules;
+  size_t nrules;
+  ccb_diag_list *diags;
+} pv_css_entry;
+
+// Assemble a project from pre-parsed inputs: attach pending onClick
+// edges, reconcile declared-beats-derived edges, merge CSS entries
+// in load order (common files first, then per-screen files, with
+// CCB-P1015 for a per-screen file naming no screen), resolve
+// @string/@color resources, apply the scenario, adopt the diag list,
+// and lay out every screen. Parse diagnostics for flow files are the
+// caller's job (pushed before this call, in file order); CSS parse
+// diagnostics replay from the entries during the CSS loop, so the
+// final diag order matches pv_project_load_scenario exactly.
+// pv_project_load_scenario is this function over freshly parsed
+// inputs; the LSP server calls it over cached per-file parses, so
+// both paths share one assembly definition and one output shape.
+// The project shell (arena, frame width, strict, phone width) is
+// already initialized; this function fills screens, rules, diags,
+// and layout. Does not diagnose (pv_project_diagnose) and does not
+// apply a trace — both stay caller steps, as in the CLI.
+void pv_project_assemble(pv_project *p, pv_screen **screens,
+  size_t nscreens, pv_pending_edge **pending, size_t npending,
+  pv_css_entry *css_entries, size_t ncss, const char *resources_dir,
+  const ccb_scenario *scenario, ccb_diag_list *diags);
+
+// Scan the nav-graph and layout XML inputs for a config: the graph
+// id -> screen name map and the onClick method -> bound label map
+// (resolved through [preview.bindings]). The returned arrays are
+// arena-grown; the scan's temporary string arrays are freed before
+// return. A layout button with no binding warns (CCB-P1019) into
+// diags, exactly as in pv_project_load_scenario, which calls this
+// before flow parsing. The LSP server reuses it on every rebuild
+// (re-scanning only when the XML inputs change) so both paths share
+// one scan definition.
+void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
+  char ***graph_keys_io, char ***graph_vals_io, size_t *ngraph_io,
+  char ***onclick_methods_io, char ***onclick_labels_io,
+  size_t *nonclick_io, ccb_diag_list *diags);
+
+// Location of the layout/nav-graph inputs: [preview] layout /
+// nav_graph, else <resources>/layout or navigation, else <paths
+// res>/layout or navigation, else NULL. Malloc'd, caller frees.
+// Shared with the LSP server, which watches the same inputs.
+char *pv_preview_layout_path(const ccb_config *cfg);
+char *pv_preview_nav_path(const ccb_config *cfg);
 // Error classification for one diagnostic code under a strict flag:
 // CCB-P1005 and CCB-P1008 are always errors; CCB-P1001 and
 // CCB-P1014 count as errors only when strict is set; everything
@@ -440,5 +512,11 @@ void pv_project_json(ccb_str *out, pv_project *p);
 // pv_project_json is this function over every screen, in order.
 void pv_project_json_screens(ccb_str *out, pv_project *p,
   pv_screen **screens, size_t nscreens);
+// JSON for one screen object, exactly as it appears in the "screens"
+// array of pv_project_json_screens: name, entry, reachable, boxes,
+// edges, branches. Used by the LSP server's ccb/screenInfo, so the
+// screen object never drifts from the project JSON shape.
+void pv_project_json_screen(ccb_str *out, pv_project *p,
+  pv_screen *screen);
 
 #endif

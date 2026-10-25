@@ -81,7 +81,7 @@ the box-tree label link is the only one available. Mismatches
 warn (CCB-P1023), never fail. `--trace` composes with `--scenario`
 (scenario first, trace fills only slots still unknown).
 
-## Chunk 3 — LSP server (`ccb lsp`)
+## Chunk 3 — LSP server (`ccb lsp`) — DONE 2026-10-24
 
 - stdio JSON-RPC with LSP-style Content-Length framing.
 - Standard: `initialize`, `shutdown`, `exit`,
@@ -93,6 +93,69 @@ warn (CCB-P1023), never fail. `--trace` composes with `--scenario`
 - Serves the tree PLUS the active scenario/trace overlay when one
   is selected. Single-threaded select() loop over stdin + inotify
   (watch mode already has the inotify part). No threads (v1 rule).
+
+As built (`src/ccb_preview_lsp.c`, `src/ccb_preview_lsp.h`,
+`ccb lsp [--scenario NAME] [--trace FILE]` in `src/ccb_cli.c`,
+tests in `tests/test_preview_lsp.c`, docs in `docs/preview.md`):
+
+- Frame width 40, phone DP width from the config (390 default):
+  the same defaults as the CLI, so the server tree JSON (no
+  scenario/trace) is byte-identical to `ccb preview --json` for
+  the same project (modulo the CLI's trailing newline). Pinned
+  by test against the sample golden.
+- Staging + deep copy, not shared boxes: scenario/trace apply and
+  resources resolution mutate boxes, so per-file parses live in
+  staging arenas and each build deep-copies them into a fresh
+  project arena, then runs the shared `pv_project_assemble`
+  (extracted from `pv_project_load_scenario` with
+  `pv_preview_scan_xml`; no forked merge). CSS merges with
+  `pv_css_rule_merge`, replicating `pv_css_parse`'s cross-file
+  semantics exactly — including one detail the first version got
+  wrong and the merge test caught: a split copy takes the NEW
+  declaration's line (the parser's split copy is returned as new
+  and stamped with the declaration line), not the base rule's.
+- Invalidation: flow/CSS parse once per file, re-parse only that
+  file (parse counts are the test's incrementality proof).
+  Editor changes rebuild immediately; disk changes debounce
+  200ms. `ccb.toml` disk-only (unsaved edits apply on save);
+  bindings or nav/layout/resources path change invalidates the
+  whole flow cache; styles/flow dir change rebuilds the watch
+  context. Failed reload keeps the old config and last good
+  project. Nav/layout XML rescanned every build; resources
+  re-read every build. Open docs override disk until closed.
+- `didChange` is full sync (last `contentChanges[]` entry's
+  text); `didSave` is a no-op. `initialize` result carries
+  `textDocumentSync: 1` and `serverInfo` (`ccb lsp`,
+  `CCB_VERSION`). Root priority: `rootUri` > first
+  `workspaceFolders[].uri` > `rootPath`. Re-root commits only
+  after a throwaway config load proves the new root usable;
+  otherwise ignored. Exit 0 iff shutdown preceded exit/EOF.
+  Errors: `-32700` unparseable JSON (null id), `-32601` unknown
+  method, `-32600` request after shutdown, `-32602` unknown
+  screen, `-32603` no project.
+- First-publish guarantee (found by the phone test, fixed same
+  round): the run loop publishes when the tree changed OR when
+  nothing was ever published. Before the fix, a rootUri spelling
+  that differed from the discovered directory (e.g. a trailing
+  slash) counted as a re-root, the handler skipped the publish
+  (rebuild queued), and the rebuild reported the identical tree
+  as unchanged — so the initial publish never arrived. The
+  reroot comparison now also ignores trailing slashes. Covered
+  by a trailing-slash regression test.
+- VERIFICATION: VM ctest plain 40/40 and sanitizer 40/40, both
+  solo runs on the final code (`test_preview_lsp` alone: 141
+  checks, 0 failures, both modes). One caution learned during
+  this chunk: do NOT run the plain and sanitizer suites
+  concurrently — the e2e build tests (`test_aab`,
+  `test_maven`, `test_modules`) share fixed `/tmp/ccb_test_*`
+  paths, and concurrent runs collide (missing generated
+  `R.java` at kotlinc time); the same tests pass sequentially.
+  Phone test: scripted stdio session against the native phone
+  build on a scratch copy of the sample — initialize +
+  publishTree (all 5 screens), logicTree byte-equal to the
+  golden, screenInfo incoming edges, didOpen adding a screen
+  with a publishTree push, diagnostics, shutdown, exit 0 — all
+  green after the first-publish fix.
 
 ## Chunk 4 — Terminal tree client
 

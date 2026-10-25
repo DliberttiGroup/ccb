@@ -860,6 +860,85 @@ Conflicts (exit 2, same style as the other preview conflicts):
 be combined with `--walk` — an interactive loop and a watch loop
 cannot share stdout semantics. `--watch` with `--output` is allowed.
 
+## LSP server: `ccb lsp [--scenario NAME] [--trace FILE]`
+
+A long-running server speaking JSON-RPC over stdio with LSP-style
+`Content-Length` framing. It serves the same logic tree as
+`ccb preview --json` (screens, edges, branch labels, args, plus the
+active scenario/trace overlay when one is selected), live: edit a
+file and the tree updates without restarting. Single-threaded
+`select()` loop over stdin + inotify; no threads (v1 rule). The
+terminal tree client (`ccb preview --tree-live`, Chunk 4) and plain
+LSP clients both talk to this server; no editor plugin ships with
+CCB itself.
+
+Standard methods: `initialize`, `shutdown`, `exit`,
+`textDocument/didOpen`, `didChange` (full sync: the last
+`contentChanges[]` entry's text), `didSave` (no-op — text is already
+synced), `didClose`. Custom methods: `ccb/logicTree` (the whole
+tree object, spliced verbatim from the preview JSON),
+`ccb/screenInfo` (`{"screen": <one screen object>, "incoming":
+[...]}` — incoming entries carry `from_screen, from, target,
+unknown, args, branch`; self-edges included), `ccb/diagnostics`
+(`{"diagnostics": [...]}` mirroring the tree's diagnostics exactly).
+`ccb/publishTree` is a push notification carrying the whole tree,
+sent after `initialize` and after every rebuild that changes the
+tree JSON (compared by string equality; the first publish always
+sends).
+
+`initialize` result: `{"capabilities":{"textDocumentSync":1},
+"serverInfo":{"name":"ccb lsp","version":<version>}}`. Root
+priority: `rootUri`, then the first `workspaceFolders[].uri`, then
+`rootPath`. A second `initialize` with a different root re-roots:
+it commits only after a throwaway config load proves the new root
+has a usable `[preview]` section; otherwise the root is ignored and
+the old tree keeps serving. Exit codes: 0 when `shutdown` preceded
+`exit`/EOF, 1 otherwise. Error codes: unparseable JSON `-32700`
+(null id), unknown method `-32601`, request after shutdown
+`-32600`, unknown screen `-32602`, no project `-32603`.
+
+What re-parses when: flow and CSS files parse once per file into
+staging arenas and re-parse only when that file changes — editor
+`didChange` rebuilds immediately, disk changes debounce 200ms (the
+watch module's debounce). `ccb.toml` is read from disk only:
+unsaved editor changes take effect on save. On reload, a bindings
+change or a nav/layout/resources path change invalidates the whole
+flow cache (bindings and graph/layout are flow-parse inputs); a
+styles/flow directory change rebuilds the watch context and
+snapshot. A failed reload (unloadable TOML or no usable `[preview]`)
+keeps the old config and the last good project and retries on the
+next change — a broken save never kills the server. Nav/layout XML
+is rescanned fresh on every build (small files); a nav/layout
+content change invalidates the flow cache. Resources
+(`strings.xml`/`colors.xml`) are re-read on every build as part of
+assembly, so a resources change only needs to trigger a rebuild.
+Open flow/CSS docs override disk content until closed; disk changes
+to open docs are ignored until close. Open docs for files not yet
+on disk are unioned into the file lists at resync, so unsaved new
+files still parse. A rebuild consumes pending disk changes too and
+resets the debounce.
+
+Incrementality is structural, not a flag: the server deep-copies
+pristine per-file parses into a fresh project arena on every build
+(scenario/trace apply and resources resolution mutate boxes, so
+parsed boxes are never reused across builds), then runs the same
+assembly the load path runs — `pv_project_assemble` shared, not
+forked. The server tree JSON (no scenario/trace) is byte-identical
+to `ccb preview --json` for the same project (modulo the CLI's
+trailing newline); the test suite pins this against the sample
+golden. The CSS merge is likewise shared: per-file parses merge
+with `pv_css_rule_merge`, which replicates `pv_css_parse`'s
+cross-file semantics exactly (same-file/same-scope in place; a
+per-screen redeclare splits a copy carrying the new file/scope and
+the new declaration's line; a common file merges into the first
+matching rule).
+
+Other preview flags are rejected for `lsp` (exit 2): it takes only
+`--scenario` and `--trace`. Unknown scenario / unreadable trace /
+no `ccb.toml` / preview not applicable are exit 2, matching the
+CLI. The project is found by upward search from the working
+directory, like `preview`.
+
 ## Worked example
 
 The reference sample app lives in `examples/preview-sample/`. Run it

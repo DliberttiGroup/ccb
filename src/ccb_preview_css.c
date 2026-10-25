@@ -602,6 +602,159 @@ static void css_skip_block(css_parser *ps) {
   }
 }
 
+// Copy every property the source rule sets onto the target, the
+// same property-by-property merge the parser applies declaration by
+// declaration. Only has_* properties copy: selector, file, line,
+// and scope keep the target's values. Color strings copy as
+// pointers (arena-owned by the caller's arena or a staging arena
+// that outlives the merge); NULL means unset and never overwrites.
+static void css_rule_merge_props(pv_rule *dst, const pv_rule *src) {
+  size_t i = 0;
+  if (src->has_display) {
+    dst->has_display = 1;
+    dst->display_flex = src->display_flex;
+  }
+  if (src->has_flex_dir) {
+    dst->has_flex_dir = 1;
+    dst->flex_row = src->flex_row;
+  }
+  if (src->has_width) {
+    dst->has_width = 1;
+    dst->width = src->width;
+  }
+  if (src->has_height) {
+    dst->has_height = 1;
+    dst->height = src->height;
+  }
+  if (src->has_padding) {
+    dst->has_padding = 1;
+    for (i = 0; i < 4; i++) {
+      dst->padding[i] = src->padding[i];
+    }
+  }
+  if (src->has_margin) {
+    dst->has_margin = 1;
+    for (i = 0; i < 4; i++) {
+      dst->margin[i] = src->margin[i];
+    }
+  }
+  if (src->bg != NULL) {
+    dst->bg = src->bg;
+  }
+  if (src->fg != NULL) {
+    dst->fg = src->fg;
+  }
+  if (src->has_font_size) {
+    dst->has_font_size = 1;
+    dst->font_size = src->font_size;
+  }
+  if (src->has_position) {
+    dst->has_position = 1;
+    dst->absolute = src->absolute;
+  }
+  if (src->has_top) {
+    dst->has_top = 1;
+    dst->top = src->top;
+  }
+  if (src->has_left) {
+    dst->has_left = 1;
+    dst->left = src->left;
+  }
+  if (src->has_gap) {
+    dst->has_gap = 1;
+    dst->gap = src->gap;
+  }
+  if (src->has_text_align) {
+    dst->has_text_align = 1;
+    dst->text_align = src->text_align;
+  }
+  if (src->has_border_width) {
+    dst->has_border_width = 1;
+    dst->border_width = src->border_width;
+  }
+  if (src->border_color != NULL) {
+    dst->border_color = src->border_color;
+  }
+  if (src->has_flex_wrap) {
+    dst->has_flex_wrap = 1;
+    dst->flex_wrap = src->flex_wrap;
+  }
+}
+
+void pv_css_rule_merge(ccb_arena *arena, pv_rule **rules_io,
+    size_t *nrules_io, const pv_rule *src, const char *file,
+    const char *scope) {
+  size_t i = 0;
+  size_t base_idx = (size_t)-1;
+  pv_rule *grown = NULL;
+  pv_rule *rule = NULL;
+  if (arena == NULL || rules_io == NULL || nrules_io == NULL ||
+      src == NULL || src->selector == NULL) {
+    return;
+  }
+  for (i = 0; i < *nrules_io; i++) {
+    pv_rule *r = &(*rules_io)[i];
+    if (r->selector != NULL && strcmp(r->selector, src->selector) == 0) {
+      int same_file = r->file != NULL && file != NULL &&
+        strcmp(r->file, file) == 0;
+      int same_scope = scope != NULL && r->scope != NULL &&
+        strcmp(r->scope, scope) == 0;
+      if (base_idx == (size_t)-1) {
+        base_idx = i;
+      }
+      // Merge into a rule this file already owns (created by it, or
+      // already scoped to its screen): plain property merge, the
+      // same branch the parser takes for same_file/same_scope.
+      if (same_file || same_scope) {
+        css_rule_merge_props(r, src);
+        return;
+      }
+    }
+  }
+  // The parser's split path, for a per-screen file redeclaring a
+  // selector first seen elsewhere: keep the earlier rule untouched
+  // and append a copy carrying the merged properties with this
+  // file's scope. The copy's line is the new rule's first
+  // declaration line, matching the parser: its split copy is
+  // returned as new, and the caller stamps the declaration line.
+  if (base_idx != (size_t)-1 && scope != NULL) {
+    grown = ccb_arena_alloc(arena, (*nrules_io + 1) * sizeof(pv_rule));
+    if (*nrules_io > 0) {
+      memcpy(grown, *rules_io, *nrules_io * sizeof(pv_rule));
+    }
+    rule = &grown[*nrules_io];
+    *rule = grown[base_idx];
+    rule->file = file != NULL ? ccb_arena_strdup(arena, file) : NULL;
+    rule->scope = ccb_arena_strdup(arena, scope);
+    rule->line = src->line;
+    css_rule_merge_props(rule, src);
+    *rules_io = grown;
+    (*nrules_io)++;
+    return;
+  }
+  // A common file merges into the first matching rule.
+  if (base_idx != (size_t)-1) {
+    css_rule_merge_props(&(*rules_io)[base_idx], src);
+    return;
+  }
+  // A selector seen for the first time: append it with this file
+  // and scope (NULL for common files; the screen name for a
+  // per-screen file, matching the scope load used to tag new rules).
+  grown = ccb_arena_alloc(arena, (*nrules_io + 1) * sizeof(pv_rule));
+  if (*nrules_io > 0) {
+    memcpy(grown, *rules_io, *nrules_io * sizeof(pv_rule));
+  }
+  rule = &grown[*nrules_io];
+  memset(rule, 0, sizeof(*rule));
+  rule->selector = ccb_arena_strdup(arena, src->selector);
+  rule->file = file != NULL ? ccb_arena_strdup(arena, file) : NULL;
+  rule->line = src->line;
+  rule->scope = scope != NULL ? ccb_arena_strdup(arena, scope) : NULL;
+  css_rule_merge_props(rule, src);
+  *rules_io = grown;
+  (*nrules_io)++;
+}
+
 ccb_status pv_css_parse(ccb_arena *arena, const char *text, const char *file,
     int strict, ccb_diag_list *diags, pv_rule **rules_io, size_t *nrules_io) {
   css_parser ps;

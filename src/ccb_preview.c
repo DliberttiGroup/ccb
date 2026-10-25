@@ -777,7 +777,7 @@ static void pv_xml_inputs(const char *path, char ***files_io,
 
 // Location of the layout inputs: [preview] layout, else
 // <resources>/layout, else <paths res>/layout, else none.
-static char *pv_layout_path(const ccb_config *cfg) {
+char *pv_preview_layout_path(const ccb_config *cfg) {
   if (cfg->preview_layout != NULL) {
     return ccb_xstrdup(cfg->preview_layout);
   }
@@ -792,7 +792,7 @@ static char *pv_layout_path(const ccb_config *cfg) {
 
 // Location of the nav-graph inputs: [preview] nav_graph, else
 // <resources>/navigation, else <paths res>/navigation, else none.
-static char *pv_nav_path(const ccb_config *cfg) {
+char *pv_preview_nav_path(const ccb_config *cfg) {
   if (cfg->preview_nav_graph != NULL) {
     return ccb_xstrdup(cfg->preview_nav_graph);
   }
@@ -978,79 +978,52 @@ ccb_status pv_project_load(const ccb_config *cfg, long frame_width, int ascii,
     diags, NULL, out);
 }
 
-ccb_status pv_project_load_scenario(const ccb_config *cfg,
-    long frame_width, int ascii, int strict, ccb_diag_list *diags,
-    const ccb_scenario *scenario, pv_project **out) {
-  ccb_diag_list own_diags;
-  ccb_diag_list *dl = NULL;
-  pv_project *p = NULL;
-  ccb_arena *arena = NULL;
-  char **css_files = NULL;
-  size_t ncss = 0;
-  char **flow_files = NULL;
-  size_t nflow = 0;
+// Copy every diagnostic from src into dl (push moves ownership,
+// so each item is copied field by field; src stays usable).
+// Lets assembly replay cached per-file parse diagnostics in load
+// order without consuming the staging cache's lists.
+static void pv_diag_replay(ccb_diag_list *dl,
+    const ccb_diag_list *src) {
   size_t i = 0;
-  if (out == NULL) {
-    return CCB_ERR_CONFIG;
+  if (dl == NULL || src == NULL) {
+    return;
   }
-  *out = NULL;
-  if (cfg == NULL || !cfg->has_preview || (cfg->preview_styles == NULL &&
-      cfg->preview_flow == NULL)) {
-    return CCB_ERR_CONFIG;
+  for (i = 0; i < src->count; i++) {
+    ccb_diag d;
+    const ccb_diag *s = &src->items[i];
+    ccb_diag_init(&d);
+    ccb_diag_set_full(&d, s->code, s->phase, s->message, s->file,
+      s->line, s->col, s->command, s->workdir, s->suggestion);
+    ccb_diag_list_push(dl, &d);
   }
-  if (diags != NULL) {
-    dl = diags;
-  } else {
-    ccb_diag_list_init(&own_diags);
-    dl = &own_diags;
-  }
-  arena = ccb_arena_create();
-  p = ccb_arena_alloc(arena, sizeof(*p));
-  memset(p, 0, sizeof(*p));
-  p->arena = arena;
-  p->ascii = ascii;
-  p->strict = strict || cfg->preview_strict;
-  p->phone_dp_width = cfg->preview_phone_width > 0 ?
-    cfg->preview_phone_width : PV_DEFAULT_PHONE_DP_WIDTH;
-  if (frame_width == 0) {
-    frame_width = PV_DEFAULT_FRAME_WIDTH;
-  }
-  if (frame_width < PV_MIN_FRAME_WIDTH) {
-    ccb_str msg;
-    ccb_str_init(&msg);
-    ccb_str_appendf(&msg, "frame width %ld clamped to minimum %d",
-      frame_width, PV_MIN_FRAME_WIDTH);
-    pv_diag(dl, "CCB-P1013", msg.buf != NULL ? msg.buf : "", NULL, -1);
-    ccb_str_free(&msg);
-    frame_width = PV_MIN_FRAME_WIDTH;
-  }
-  p->frame_width = frame_width;
-  p->interior_cols = frame_width - 2;
-  // Slice 3 inputs, before flow parsing: the nav graph (destination
-  // id -> screen name) and the layout onClick mapping (method ->
-  // bound component label, resolved through [preview.bindings]).
-  // A layout button with no binding is the CCB-P1019 case (warning,
-  // no edge), exactly like an unbound listener receiver.
-  {
-    char *nav_path = pv_nav_path(cfg);
+}
+
+// Scan the nav-graph and layout XML inputs (see ccb_preview.h).
+// Code motion from pv_project_load_scenario: the scan block
+// moved verbatim, with dl renamed to diags and the pending-edge
+// declarations left in the caller (pending belongs to flow
+// parsing, not to the scan).
+void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
+    char ***graph_keys_io, char ***graph_vals_io, size_t *ngraph_io,
+    char ***onclick_methods_io, char ***onclick_labels_io,
+    size_t *nonclick_io, ccb_diag_list *diags) {
+  char **graph_keys = NULL;
+  char **graph_vals = NULL;
+  size_t ngraph = 0;
+  char **onclick_methods = NULL;
+  char **onclick_labels = NULL;
+  size_t nonclick = 0;
+    char *nav_path = pv_preview_nav_path(cfg);
     char **nav_files = NULL;
     size_t nnav = 0;
-    char **graph_keys = NULL;
-    char **graph_vals = NULL;
-    size_t ngraph = 0;
-    char *layout_path = pv_layout_path(cfg);
+    char *layout_path = pv_preview_layout_path(cfg);
     char **layout_files = NULL;
     size_t nlayout = 0;
     char **lay_methods = NULL;
     char **lay_ids = NULL;
     size_t nlay = 0;
-    char **onclick_methods = NULL;
-    char **onclick_labels = NULL;
-    size_t nonclick = 0;
     char **warned_ids = NULL;
     size_t nwarned_ids = 0;
-    pv_pending_edge **pending = NULL;
-    size_t npending = 0;
     size_t li = 0;
     size_t pi = 0;
     pv_xml_inputs(nav_path, &nav_files, &nnav);
@@ -1124,7 +1097,7 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
           ccb_str_append(&msg, lay_methods[pi]);
           ccb_str_append(&msg,
             "') has no [preview.bindings] entry; no edge recorded");
-          pv_diag(dl, "CCB-P1019", msg.buf != NULL ? msg.buf : "",
+          pv_diag(diags, "CCB-P1019", msg.buf != NULL ? msg.buf : "",
             NULL, -1);
           ccb_str_free(&msg);
         }
@@ -1160,26 +1133,53 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
       free(warned_ids[pi]);
     }
     free(warned_ids);
-    // Flow first: screens must exist before CSS files can be scoped.
-    if (cfg->preview_flow != NULL) {
-      if (ccb_collect_files(cfg->preview_flow, ".kt", &flow_files,
-          &nflow) == CCB_OK) {
-        for (i = 0; i < nflow; i++) {
-          char *text = NULL;
-          size_t len = 0;
-          if (ccb_read_file(flow_files[i], &text, &len) != CCB_OK) {
-            continue;
-          }
-          pv_flow_parse_full(arena, text, flow_files[i], dl,
-            &p->screens, &p->nscreens, cfg->preview_binding_keys,
-            cfg->preview_binding_values, cfg->preview_binding_count,
-            onclick_methods, onclick_labels, nonclick,
-            graph_keys, graph_vals, ngraph, &pending, &npending);
-          free(text);
-        }
-        ccb_free_str_array(flow_files, nflow);
-      }
-    }
+  if (graph_keys_io != NULL) {
+    *graph_keys_io = graph_keys;
+  }
+  if (graph_vals_io != NULL) {
+    *graph_vals_io = graph_vals;
+  }
+  if (ngraph_io != NULL) {
+    *ngraph_io = ngraph;
+  }
+  if (onclick_methods_io != NULL) {
+    *onclick_methods_io = onclick_methods;
+  }
+  if (onclick_labels_io != NULL) {
+    *onclick_labels_io = onclick_labels;
+  }
+  if (nonclick_io != NULL) {
+    *nonclick_io = nonclick;
+  }
+}
+
+// Assemble a project from pre-parsed inputs (see ccb_preview.h).
+// Distribution, reconciliation, resources, scenario, diag adopt,
+// and layout moved verbatim from pv_project_load_scenario; only
+// the CSS loop is new, merging pre-parsed per-file entries
+// instead of parsing from disk.
+void pv_project_assemble(pv_project *p, pv_screen **screens,
+    size_t nscreens, pv_pending_edge **pending, size_t npending,
+    pv_css_entry *css_entries, size_t ncss,
+    const char *resources_dir, const ccb_scenario *scenario,
+    ccb_diag_list *diags) {
+  ccb_arena *arena = NULL;
+  size_t i = 0;
+  size_t pi = 0;
+  if (p == NULL) {
+    return;
+  }
+  arena = p->arena;
+  // The screens array is a fresh arena array of borrowed screen
+  // pointers; the screens themselves stay caller-owned (the
+  // load path parses them into this arena, the LSP server
+  // deep-copies its staging fragments into it).
+  p->screens = ccb_arena_alloc(arena,
+    (nscreens == 0 ? 1 : nscreens) * sizeof(*p->screens));
+  for (i = 0; i < nscreens; i++) {
+    p->screens[i] = screens[i];
+  }
+  p->nscreens = nscreens;
     // Slice 3 distribution: an onClick edge attaches to every screen
     // whose component tree contains the bound label (the button the
     // layout declares). A label in no screen is CCB-P1021 (warning,
@@ -1211,72 +1211,65 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
         ccb_str_append(&msg, pe->from);
         ccb_str_append(&msg,
           "' matches no component in any screen; no edge recorded");
-        pv_diag(dl, "CCB-P1021", msg.buf != NULL ? msg.buf : "",
+        pv_diag(diags, "CCB-P1021", msg.buf != NULL ? msg.buf : "",
           NULL, -1);
         ccb_str_free(&msg);
       }
     }
-    // Declared-beats-derived reconciliation, after all flow files.
-    pv_reconcile_derived(p, dl);
-  }
+  // Declared-beats-derived reconciliation, after all flow files.
+  pv_reconcile_derived(p, diags);
   // CSS: common.css first, then per-screen files in sorted order.
-  if (cfg->preview_styles != NULL) {
-    if (ccb_collect_files(cfg->preview_styles, ".css", &css_files,
-        &ncss) == CCB_OK) {
-      size_t pass = 0;
-      for (pass = 0; pass < 2; pass++) {
-        for (i = 0; i < ncss; i++) {
-          const char *path = css_files[i];
-          const char *scope = NULL;
-          size_t before = 0;
-          size_t j = 0;
-          char *text = NULL;
-          size_t len = 0;
-          if (pass == 0 && !pv_is_common_css(path)) {
+  // Entries carry each file's own parsed rules; merging here (not
+  // at parse time) is what lets the LSP server reuse per-file
+  // cached parses. The merge function reproduces pv_css_parse's
+  // cross-file semantics, including the per-screen split, so the
+  // merged rules are identical to a direct sequential parse.
+  {
+    size_t pass = 0;
+    size_t ci = 0;
+    for (pass = 0; pass < 2; pass++) {
+      for (ci = 0; ci < ncss; ci++) {
+        const pv_css_entry *entry = &css_entries[ci];
+        const char *scope = NULL;
+        size_t ri = 0;
+        if (pass == 0 && !pv_is_common_css(entry->path)) {
+          continue;
+        }
+        if (pass == 1 && pv_is_common_css(entry->path)) {
+          continue;
+        }
+        if (pass == 1) {
+          scope = pv_css_screen(p, entry->path);
+          if (scope == NULL) {
+            ccb_str msg;
+            ccb_str_init(&msg);
+            ccb_str_append(&msg, "CSS file ignored: no screen named '");
+            ccb_str_append_n(&msg, pv_basename(entry->path),
+              strlen(pv_basename(entry->path)) > 4 ?
+              strlen(pv_basename(entry->path)) - 4 : 0);
+            ccb_str_append(&msg, "'");
+            pv_diag(diags, "CCB-P1015",
+              msg.buf != NULL ? msg.buf : "", entry->path, -1);
+            ccb_str_free(&msg);
             continue;
-          }
-          if (pass == 1 && pv_is_common_css(path)) {
-            continue;
-          }
-          if (pass == 1) {
-            scope = pv_css_screen(p, path);
-            if (scope == NULL) {
-              ccb_str msg;
-              ccb_str_init(&msg);
-              ccb_str_append(&msg, "CSS file ignored: no screen named '");
-              ccb_str_append_n(&msg, pv_basename(path),
-                strlen(pv_basename(path)) > 4 ?
-                strlen(pv_basename(path)) - 4 : 0);
-              ccb_str_append(&msg, "'");
-              pv_diag(dl, "CCB-P1015",
-                msg.buf != NULL ? msg.buf : "", path, -1);
-              ccb_str_free(&msg);
-              continue;
-            }
-          }
-          if (ccb_read_file(path, &text, &len) != CCB_OK) {
-            continue;
-          }
-          // Tag only the rules this file newly appends: rules merged
-          // into an earlier selector keep their earlier scope.
-          before = p->nrules;
-          pv_css_parse(arena, text, path, p->strict, dl, &p->rules,
-            &p->nrules);
-          free(text);
-          if (scope != NULL) {
-            for (j = before; j < p->nrules; j++) {
-              p->rules[j].scope = ccb_arena_strdup(arena, scope);
-            }
           }
         }
+        // Replay this file's parse diagnostics in load order,
+        // then merge its rules.
+        if (entry->diags != NULL) {
+          pv_diag_replay(diags, entry->diags);
+        }
+        for (ri = 0; ri < entry->nrules; ri++) {
+          pv_css_rule_merge(arena, &p->rules, &p->nrules,
+            &entry->rules[ri], entry->path, scope);
+        }
       }
-      ccb_free_str_array(css_files, ncss);
     }
   }
   // @string/@color resolution, after flow parsing and CSS parsing
   // but before layout: labels resolve before clip widths are
   // computed, and CSS colors resolve before rules are used.
-  if (cfg->preview_resources != NULL) {
+  if (resources_dir != NULL) {
     pv_res_table strings;
     pv_res_table colors;
     char *spath = NULL;
@@ -1284,18 +1277,18 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
     size_t si = 0;
     memset(&strings, 0, sizeof(strings));
     memset(&colors, 0, sizeof(colors));
-    spath = ccb_path_join(cfg->preview_resources, "strings.xml");
-    cpath = ccb_path_join(cfg->preview_resources, "colors.xml");
-    pv_res_parse_file(arena, spath, 0, dl, &strings);
-    pv_res_parse_file(arena, cpath, 1, dl, &colors);
+    spath = ccb_path_join(resources_dir, "strings.xml");
+    cpath = ccb_path_join(resources_dir, "colors.xml");
+    pv_res_parse_file(arena, spath, 0, diags, &strings);
+    pv_res_parse_file(arena, cpath, 1, diags, &colors);
     free(spath);
     free(cpath);
     for (si = 0; si < p->nscreens; si++) {
       if (p->screens[si]->root != NULL) {
-        pv_res_resolve_labels(arena, p->screens[si]->root, &strings, dl);
+        pv_res_resolve_labels(arena, p->screens[si]->root, &strings, diags);
       }
     }
-    pv_res_resolve_colors(arena, p, &colors, dl);
+    pv_res_resolve_colors(arena, p, &colors, diags);
     free(strings.items);
     free(colors.items);
   }
@@ -1304,17 +1297,20 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
   // size the list like static rows do). Warnings go to dl, which is
   // adopted below along with the rest.
   if (scenario != NULL) {
-    pv_scenario_apply(p, scenario, dl);
+    pv_scenario_apply(p, scenario, diags);
   }
   // Adopt the diag list BEFORE layout: pv_layout_screen pushes its
-  // diagnostics directly into p->diags, so the project must own the
-  // list by then (adopting it after layout would discard them).
+  // diagnostics directly into p->diags, so the project must own
+  // the list by then (adopting it after layout would discard them).
   if (diags != NULL) {
     p->diags = *diags;
     memset(diags, 0, sizeof(*diags));
   } else {
-    p->diags = own_diags;
+    ccb_diag_list_init(&p->diags);
   }
+  // Adopt the diag list BEFORE layout: pv_layout_screen pushes its
+  // diagnostics directly into p->diags, so the project must own the
+  // list by then (adopting it after layout would discard them).
   for (i = 0; i < p->nscreens; i++) {
     pv_layout_screen(p, p->screens[i]);
   }
@@ -1322,6 +1318,134 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
   // owns malloc'd strings and is freed by pv_project_free.
   p->capscreens = p->nscreens;
   p->caprules = p->nrules;
+}
+
+ccb_status pv_project_load_scenario(const ccb_config *cfg,
+    long frame_width, int ascii, int strict, ccb_diag_list *diags,
+    const ccb_scenario *scenario, pv_project **out) {
+  ccb_diag_list own_diags;
+  ccb_diag_list *dl = NULL;
+  pv_project *p = NULL;
+  ccb_arena *arena = NULL;
+  char **css_files = NULL;
+  size_t ncss = 0;
+  char **flow_files = NULL;
+  size_t nflow = 0;
+  size_t i = 0;
+  pv_screen **screens = NULL;
+  size_t nscreens = 0;
+  pv_pending_edge **pending = NULL;
+  size_t npending = 0;
+  if (out == NULL) {
+    return CCB_ERR_CONFIG;
+  }
+  *out = NULL;
+  if (cfg == NULL || !cfg->has_preview || (cfg->preview_styles == NULL &&
+      cfg->preview_flow == NULL)) {
+    return CCB_ERR_CONFIG;
+  }
+  if (diags != NULL) {
+    dl = diags;
+  } else {
+    ccb_diag_list_init(&own_diags);
+    dl = &own_diags;
+  }
+  arena = ccb_arena_create();
+  p = ccb_arena_alloc(arena, sizeof(*p));
+  memset(p, 0, sizeof(*p));
+  p->arena = arena;
+  p->ascii = ascii;
+  p->strict = strict || cfg->preview_strict;
+  p->phone_dp_width = cfg->preview_phone_width > 0 ?
+    cfg->preview_phone_width : PV_DEFAULT_PHONE_DP_WIDTH;
+  if (frame_width == 0) {
+    frame_width = PV_DEFAULT_FRAME_WIDTH;
+  }
+  if (frame_width < PV_MIN_FRAME_WIDTH) {
+    ccb_str msg;
+    ccb_str_init(&msg);
+    ccb_str_appendf(&msg, "frame width %ld clamped to minimum %d",
+      frame_width, PV_MIN_FRAME_WIDTH);
+    pv_diag(dl, "CCB-P1013", msg.buf != NULL ? msg.buf : "", NULL, -1);
+    ccb_str_free(&msg);
+    frame_width = PV_MIN_FRAME_WIDTH;
+  }
+  p->frame_width = frame_width;
+  p->interior_cols = frame_width - 2;
+  {
+    char **graph_keys = NULL;
+    char **graph_vals = NULL;
+    size_t ngraph = 0;
+    char **onclick_methods = NULL;
+    char **onclick_labels = NULL;
+    size_t nonclick = 0;
+    pv_preview_scan_xml(cfg, arena, &graph_keys, &graph_vals,
+      &ngraph, &onclick_methods, &onclick_labels, &nonclick, dl);
+    // Flow first: screens must exist before CSS files can be scoped.
+    if (cfg->preview_flow != NULL) {
+      if (ccb_collect_files(cfg->preview_flow, ".kt", &flow_files,
+          &nflow) == CCB_OK) {
+        for (i = 0; i < nflow; i++) {
+          char *text = NULL;
+          size_t len = 0;
+          if (ccb_read_file(flow_files[i], &text, &len) != CCB_OK) {
+            continue;
+          }
+          pv_flow_parse_full(arena, text, flow_files[i], dl,
+            &screens, &nscreens, cfg->preview_binding_keys,
+            cfg->preview_binding_values, cfg->preview_binding_count,
+            onclick_methods, onclick_labels, nonclick,
+            graph_keys, graph_vals, ngraph, &pending, &npending);
+          free(text);
+        }
+        ccb_free_str_array(flow_files, nflow);
+      }
+    }
+  }
+  // CSS entries: every .css file parsed once, in sorted order,
+  // into its own rules + diagnostics. Assembly merges them in
+  // load order (common first, then per-screen) and replays the
+  // diagnostics of merged files only, so a file assembly skips
+  // (CCB-P1015) contributes nothing, exactly as before.
+  {
+    pv_css_entry *css_entries = NULL;
+    size_t ncss_entries = 0;
+    ccb_diag_list *css_lists = NULL;
+    size_t ci = 0;
+    if (cfg->preview_styles != NULL) {
+      if (ccb_collect_files(cfg->preview_styles, ".css", &css_files,
+          &ncss) == CCB_OK) {
+        css_entries = ccb_xcalloc(ncss == 0 ? 1 : ncss,
+          sizeof(*css_entries));
+        css_lists = ccb_xcalloc(ncss == 0 ? 1 : ncss,
+          sizeof(*css_lists));
+        ncss_entries = ncss;
+        for (ci = 0; ci < ncss; ci++) {
+          char *text = NULL;
+          size_t len = 0;
+          ccb_diag_list_init(&css_lists[ci]);
+          if (ccb_read_file(css_files[ci], &text, &len) != CCB_OK) {
+            continue;
+          }
+          css_entries[ci].path = css_files[ci];
+          pv_css_parse(arena, text, css_files[ci], p->strict,
+            &css_lists[ci], &css_entries[ci].rules,
+            &css_entries[ci].nrules);
+          css_entries[ci].diags = &css_lists[ci];
+          free(text);
+        }
+      }
+    }
+    pv_project_assemble(p, screens, nscreens, pending, npending,
+      css_entries, ncss_entries, cfg->preview_resources, scenario,
+      dl);
+    for (ci = 0; ci < ncss_entries; ci++) {
+      ccb_diag_list_free(&css_lists[ci]);
+    }
+    free(css_lists);
+    free(css_entries);
+    ccb_free_str_array(css_files, ncss);
+  }
   *out = p;
   return CCB_OK;
 }
@@ -1620,12 +1744,19 @@ static void pv_json_branches(ccb_str *out, pv_box *box, int *first) {
   }
 }
 
-void pv_project_json_screens(ccb_str *out, pv_project *p,
-    pv_screen **screens, size_t nscreens) {
-  size_t i = 0;
+// One screen object, exactly as it appears in the "screens"
+// array of pv_project_json_screens. first tracks comma
+// separation across calls (*first = 1 for the first screen).
+// Extracted from pv_project_json_screens so ccb/screenInfo
+// can serve one screen without duplicating the writer.
+static void pv_json_screen(ccb_str *out, pv_project *p,
+    pv_screen *screen, int *first) {
   size_t j = 0;
+  int first_branch = 1;
   pv_screen *entry = NULL;
-  if (out == NULL || p == NULL) {
+  size_t i = 0;
+  if (out == NULL || p == NULL || screen == NULL ||
+      first == NULL) {
     return;
   }
   if (p->nscreens > 0) {
@@ -1638,25 +1769,10 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
       }
     }
   }
-  ccb_str_append(out, "{\"event\":\"preview\",\"version\":2");
-  // Chunk 1: the applied scenario's name, only when one was applied.
-  if (p->scenario_name != NULL) {
-    ccb_str_append(out, ",\"scenario\":");
-    pv_json_str(out, p->scenario_name);
+  if (!*first) {
+    ccb_str_append(out, ",");
   }
-  // Chunk 2: the applied trace's step count, only when one was
-  // applied. Steps in the file, whether or not every step matched.
-  if (p->trace_applied) {
-    ccb_str_appendf(out, ",\"trace\":{\"steps\":%ld}",
-      p->trace_step_count);
-  }
-  ccb_str_append(out, ",\"screens\":[");
-  for (i = 0; i < nscreens; i++) {
-    pv_screen *screen = screens[i];
-    int first_branch = 1;
-    if (i > 0) {
-      ccb_str_append(out, ",");
-    }
+  *first = 0;
     ccb_str_append(out, "{\"name\":");
     pv_json_str(out, screen->name);
     ccb_str_appendf(out, ",\"entry\":%s,\"reachable\":%s",
@@ -1733,6 +1849,30 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
       pv_json_branches(out, screen->root, &first_branch);
     }
     ccb_str_append(out, "]}");
+}
+
+void pv_project_json_screens(ccb_str *out, pv_project *p,
+    pv_screen **screens, size_t nscreens) {
+  size_t i = 0;
+  int first = 1;
+  if (out == NULL || p == NULL) {
+    return;
+  }
+  ccb_str_append(out, "{\"event\":\"preview\",\"version\":2");
+  // Chunk 1: the applied scenario's name, only when one was applied.
+  if (p->scenario_name != NULL) {
+    ccb_str_append(out, ",\"scenario\":");
+    pv_json_str(out, p->scenario_name);
+  }
+  // Chunk 2: the applied trace's step count, only when one was
+  // applied. Steps in the file, whether or not every step matched.
+  if (p->trace_applied) {
+    ccb_str_appendf(out, ",\"trace\":{\"steps\":%ld}",
+      p->trace_step_count);
+  }
+  ccb_str_append(out, ",\"screens\":[");
+  for (i = 0; i < nscreens; i++) {
+    pv_json_screen(out, p, screens[i], &first);
   }
   ccb_str_append(out, "],\"diagnostics\":[");
   for (i = 0; i < p->diags.count; i++) {
@@ -1763,6 +1903,12 @@ void pv_project_json_screens(ccb_str *out, pv_project *p,
     ccb_str_appendf(out, ",\"line\":%ld}", d->line);
   }
   ccb_str_append(out, "]}");
+}
+
+void pv_project_json_screen(ccb_str *out, pv_project *p,
+    pv_screen *screen) {
+  int first = 1;
+  pv_json_screen(out, p, screen, &first);
 }
 
 void pv_project_json(ccb_str *out, pv_project *p) {

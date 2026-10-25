@@ -248,6 +248,71 @@ int pv_watch_snapshot_changed(const pv_watch_snapshot *old_snap,
   return (i < nold || j < nnew) ? 1 : 0;
 }
 
+ccb_status pv_watch_snapshot_diff(const pv_watch_snapshot *old_snap,
+    const pv_watch_snapshot *new_snap, char ***paths_io,
+    size_t *npaths_io) {
+  size_t i = 0;
+  size_t j = 0;
+  size_t nold = old_snap != NULL ? old_snap->count : 0;
+  size_t nnew = new_snap != NULL ? new_snap->count : 0;
+  char **paths = NULL;
+  size_t npaths = 0;
+  size_t cappaths = 0;
+  if (paths_io == NULL || npaths_io == NULL) {
+    return CCB_ERR_USAGE;
+  }
+  *paths_io = NULL;
+  *npaths_io = 0;
+  // Same merge walk as pv_watch_snapshot_changed, collecting every
+  // path that differs instead of stopping at the first one.
+  while (i < nold && j < nnew) {
+    int cmp = strcmp(old_snap->entries[i].path,
+      new_snap->entries[j].path);
+    const char *path = NULL;
+    if (cmp == 0) {
+      if (!pv_watch_entry_same(&old_snap->entries[i],
+          &new_snap->entries[j])) {
+        path = new_snap->entries[j].path;
+      }
+      i++;
+      j++;
+    } else if (cmp < 0) {
+      path = old_snap->entries[i].path; // removed
+      i++;
+    } else {
+      path = new_snap->entries[j].path; // added
+      j++;
+    }
+    if (path != NULL) {
+      if (npaths == cappaths) {
+        size_t ncap = cappaths == 0 ? 16 : cappaths * 2;
+        paths = ccb_xrealloc(paths, ncap * sizeof(*paths));
+        cappaths = ncap;
+      }
+      paths[npaths++] = ccb_xstrdup(path);
+    }
+  }
+  for (; i < nold; i++) {
+    if (npaths == cappaths) {
+      size_t ncap = cappaths == 0 ? 16 : cappaths * 2;
+      paths = ccb_xrealloc(paths, ncap * sizeof(*paths));
+      cappaths = ncap;
+    }
+    paths[npaths++] = ccb_xstrdup(old_snap->entries[i].path);
+  }
+  for (; j < nnew; j++) {
+    if (npaths == cappaths) {
+      size_t ncap = cappaths == 0 ? 16 : cappaths * 2;
+      paths = ccb_xrealloc(paths, ncap * sizeof(*paths));
+      cappaths = ncap;
+    }
+    paths[npaths++] = ccb_xstrdup(new_snap->entries[j].path);
+  }
+  *paths_io = paths;
+  *npaths_io = npaths;
+  return CCB_OK;
+}
+
 // ---------- debounce + clock ----------
 
 void pv_watch_debounce_event(pv_watch_debounce *d, long long now_ms) {

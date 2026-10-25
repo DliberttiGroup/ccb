@@ -14,6 +14,7 @@
 #include "ccb_sdk.h"
 #include "ccb_pipeline.h"
 #include "ccb_preview.h"
+#include "ccb_preview_lsp.h"
 #include "ccb_preview_walk.h"
 #include "ccb_preview_watch.h"
 #include "ccb_preview_gate.h"
@@ -21,8 +22,6 @@
 #include "ccb_cli.h"
 #include <unistd.h>
 #include <sys/stat.h>
-
-#define CCB_VERSION "0.1.0"
 
 // SHA-256 of the official cmdline-tools Linux zip used by `ccb setup`
 // to bootstrap an SDK. Verified against the complete download
@@ -55,6 +54,8 @@ static const char *CCB_USAGE =
   "          [--screen NAME] [--output FILE] [--update-goldens] [--walk]\n"
   "          [--watch] [--diff DIR] [--storyboard A,B] [screen]\n"
   "                                            render a UI preview\n"
+  "  lsp [--scenario NAME] [--trace FILE]     preview logic-tree server\n"
+  "                                            (JSON-RPC over stdio)\n"
   "  version                                   print the version\n";
 
 typedef struct {
@@ -3806,6 +3807,50 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
   return 0;
 }
 
+// ---------- lsp ----------
+
+// `ccb lsp [--scenario NAME] [--trace FILE]`: run the preview LSP
+// server on stdio for the project found by upward search. --scenario
+// and --trace reuse the preview flags (parsed globally). Exit 0 on
+// shutdown+exit, 1 on exit/EOF without shutdown, 2 on usage/config
+// errors (unknown scenario, unreadable trace, no ccb.toml, preview
+// not applicable). Other preview flags are rejected: they belong to
+// the render modes, not to the server.
+static int ccb_cmd_lsp(ccb_args *a) {
+  char cwd[4096];
+  char *path = NULL;
+  char *err = NULL;
+  pv_lsp_server *s = NULL;
+  int rc = 0;
+  if (a->preview_walk || a->preview_watch || a->preview_diff != NULL ||
+      a->preview_storyboard != NULL || a->preview_screen != NULL ||
+      a->preview_output != NULL || a->preview_update_goldens ||
+      a->preview_record != NULL || a->positional != NULL) {
+    fprintf(stderr, "error: lsp takes only --scenario and --trace\n");
+    return 2;
+  }
+  if (getcwd(cwd, sizeof(cwd)) == NULL) {
+    fprintf(stderr, "error: cannot determine working directory\n");
+    return 2;
+  }
+  if (ccb_config_discover(cwd, a->config_path, &path) != CCB_OK) {
+    fprintf(stderr,
+      "error: no ccb.toml found in this directory or any parent\n");
+    return 2;
+  }
+  s = pv_lsp_open(path, a->preview_scenario, a->preview_trace, &err);
+  free(path);
+  if (s == NULL) {
+    fprintf(stderr, "error: %s\n",
+      err != NULL ? err : "cannot start lsp server");
+    free(err);
+    return 2;
+  }
+  rc = pv_lsp_run(s, STDIN_FILENO, STDOUT_FILENO);
+  pv_lsp_close(s);
+  return rc;
+}
+
 int ccb_cli_main(int argc, char **argv) {
   ccb_args a;
   if (ccb_parse_args(argc, argv, &a) != 0) {
@@ -3845,6 +3890,9 @@ int ccb_cli_main(int argc, char **argv) {
   }
   if (strcmp(a.command, "preview") == 0) {
     return ccb_cmd_preview(&a);
+  }
+  if (strcmp(a.command, "lsp") == 0) {
+    return ccb_cmd_lsp(&a);
   }
   if (strcmp(a.command, "version") == 0) {
     if (a.json) {

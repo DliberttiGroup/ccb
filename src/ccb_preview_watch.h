@@ -73,6 +73,18 @@ void pv_watch_snapshot_free(pv_watch_snapshot *snap);
 int pv_watch_snapshot_changed(const pv_watch_snapshot *old_snap,
   const pv_watch_snapshot *new_snap);
 
+// The changed paths between two snapshots, in sorted order: every
+// path added, removed, or changed (mtime seconds, mtime
+// nanoseconds, or size). NULL counts as an empty snapshot. The
+// returned array is malloc'd (one strdup per path); the caller frees
+// it with ccb_free_str_array(paths, npaths). Lets the LSP server
+// re-parse only the files that changed instead of re-checking the
+// whole watched set. Returns CCB_OK, or CCB_ERR_USAGE when an output
+// pointer is NULL.
+ccb_status pv_watch_snapshot_diff(const pv_watch_snapshot *old_snap,
+  const pv_watch_snapshot *new_snap, char ***paths_io,
+  size_t *npaths_io);
+
 // Debounce: pure, injectable clock, no sleeping, no I/O. An event
 // starts a 200ms quiet window; a later event restarts it. The CLI loop
 // calls pv_watch_debounce_event on every pv_watch_wait hit and

@@ -7,6 +7,10 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE 1
 
+// CCB version, printed by `ccb version` and reported by `ccb lsp`
+// in its initialize response. Single source of truth; bump here.
+#define CCB_VERSION "0.1.0"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
