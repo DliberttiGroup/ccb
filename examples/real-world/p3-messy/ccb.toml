@@ -1,0 +1,29 @@
+ccb_version = 1
+
+[project]
+name = "messy"
+package = "com.example.messy"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"
+res = "src/main/res"
+kotlin = "src/main/kotlin"
+
+[preview]
+styles = "styles"
+flow = "flow"
+layout = "src/main/res/layout"
+phone_width = 390
+phone_height = 844
+
+[preview.bindings]
+helperButton = "Helper nav"
+crossButton = "Cross file"
+varButton = "Var ref"
+nestedButton = "Nested"
+share_button = "Share"

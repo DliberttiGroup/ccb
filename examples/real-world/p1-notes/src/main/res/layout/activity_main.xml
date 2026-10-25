@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:orientation="vertical"
+  android:padding="16dp">
+  <TextView android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:text="@string/notes_title"
+    android:textSize="24sp" />
+  <Button android:id="@+id/note1_button"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Note 1: Buy milk" />
+  <Button android:id="@+id/note2_button"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Note 2: Call Ana" />
+  <Button android:id="@+id/note3_button"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Note 3: Ideas" />
+  <Button android:id="@+id/new_note_button"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="New note" />
+  <Button android:id="@+id/settings_button"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Settings"
+    android:onClick="onSettingsClick" />
+</LinearLayout>

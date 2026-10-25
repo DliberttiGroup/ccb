@@ -1,0 +1,38 @@
+ccb_version = 1
+
+[project]
+name = "notes"
+package = "com.example.notes"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"
+res = "src/main/res"
+kotlin = "src/main/kotlin"
+
+[preview]
+styles = "styles"
+flow = "flow"
+resources = "src/main/res/values"
+layout = "src/main/res/layout"
+nav_graph = "src/main/res/navigation"
+phone_width = 390
+phone_height = 844
+
+[preview.bindings]
+editButton = "Edit note"
+quickButton = "Quick open"
+settings_button = "Settings"
+
+[preview.scenario.loaded.branches]
+Detail = "is Loaded"
+[preview.scenario.loaded.lists]
+notes = ["Buy milk", "Call Ana", "Ideas"]
+[preview.scenario.loaded.fields]
+Title = "Milk"
+[preview.scenario.loaded.args]
+"Open related" = ["note-7"]

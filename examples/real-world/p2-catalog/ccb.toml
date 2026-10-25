@@ -1,0 +1,35 @@
+ccb_version = 1
+
+[project]
+name = "catalog"
+package = "com.example.catalog"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"
+res = "src/main/res"
+kotlin = "src/main/kotlin"
+
+[preview]
+styles = "styles"
+flow = "flow"
+phone_width = 390
+phone_height = 844
+
+[preview.scenario.full.branches]
+Detail = "is Loaded"
+[preview.scenario.full.lists]
+products = ["Red shoes", "Blue jacket", "Green hat", "Black bag", "White shirt", "Yellow scarf", "Brown boots", "Grey gloves"]
+items = ["Red shoes", "Blue jacket", "Green hat"]
+[preview.scenario.full.fields]
+Name = "Ana"
+Address = "1 Main St"
+Card = "4242"
+
+[deps]
+maven = ["androidx.recyclerview:recyclerview:1.3.2"]
+maven_central = true

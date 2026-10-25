@@ -1,0 +1,297 @@
+# CCB real-world testing round — 2026-10-24
+
+Testing only: no `src/` changes, no fixes. Tool: `ccb 0.1.0` built
+from phone clone `~/ccb` at `9b6a079` (chunks 1–4). Phone: Termux,
+JDK 17, SDK build-tools 35.0.0, platform android-35, kotlinc 2.4.21,
+native aapt2/zipalign/adb. All builds ran with only `JAVA_HOME`
+exported (no `ANDROID_HOME`), relying on the `~/Android/Sdk` and
+`<sdk-home>/kotlinc` fallbacks — the average-user path on a
+provisioned phone.
+
+Method: projects were written following ONLY the repo docs
+(`README.md`, `docs/*.md`, `requirement.md`), the way an average
+user would. Every place the docs were insufficient, confusing, or
+wrong is logged below. Workarounds used during the round are logged
+as findings, not hidden. One piece of insider knowledge was used
+deliberately and is flagged: the P1 hypothesis test (see P1) was run
+in a scratch copy to isolate a fallback bug; the committed P1 keeps
+the workaround and documents it.
+
+Projects live under `examples/real-world/`. Each has real View/XML
+app code under `src/` and a flow + CSS preview sketch under `flow/`
+and `styles/` (preview reads flow files, not app code).
+
+`adb devices` on the phone shows no device attached, so `ccb
+install` was not attempted (per the round's rules, no wireless-
+debugging rabbit hole). APK verification (`jarsigner -verify` +
+`zipalign -c`) is the install substitute; install-on-device needs
+wireless debugging setup, a user action.
+
+## P0 — init-smoke: PASS
+
+Fresh `ccb init p0-init-smoke`, built untouched, then extended.
+
+- Untouched build: exit 0, 24 s (cold, JVM-bound), APK 12,765
+  bytes at `build/outputs/debug/app.apk`. `jarsigner -verify`:
+  "jar verified." `zipalign -c 4`: clean.
+- Extension (docs-only): added `SecondActivity` + layout, a button
+  in Main navigating to it, manifest entry. Rebuild: exit 0, 20 s,
+  APK 16,937 bytes. Verified clean.
+- Preview sketch (2 screens, Home/Second): exit 0. JSON: 2 resolved
+  edges, 0 unknown, 0 missing. Diagnostics: 2× P1017 (buttons, see
+  finding 3).
+
+Friction log:
+
+- `ccb init p0-init-smoke` without flags scaffolds name "hello"
+  and package `com.example.hello` even though the directory is named
+  otherwise. `--package`/`--name` must be passed explicitly (verified
+  working for P1/P2). `ccb init --help` prints only the global usage;
+  the flags appear in the usage line but their semantics are
+  undocumented (finding 8).
+
+Verdict: PASS. `init` → `build` → verified APK works first try.
+
+## P1 — notes: PASS with a workaround (fallback config: FAIL)
+
+Realistic notes app: 4 activities (Main/Detail/Form/Settings),
+3 note buttons, New-note and Settings navigation, a loading/loaded
+branch on Detail, one `setOnClickListener` handler, one XML
+`android:onClick`, nav-graph entries. Preview sketch: 4 flow files,
+`[preview.bindings]` for three receivers, a `loaded` scenario
+(branch pick, 3 list rows, 1 field value, 1 scenario arg).
+
+- Build: exit 0, 26 s, APK 29,451 bytes. `jarsigner -verify`:
+  "jar verified." `zipalign -c 4`: clean.
+- Preview, docs-following config (`resources =
+  "src/main/res/values"`, NO explicit `layout`/`nav_graph` keys):
+  exit 0 but DEGRADED — 5 screens including a phantom screen
+  `onSettingsClick` (P1006 unreachable + P1007 empty), Home's
+  `navigate(R.id.detail)` stayed an UNKNOWN edge, and Settings was
+  unreachable. Root cause: the layout and nav-graph fallbacks did
+  not discover `src/main/res/layout` or `src/main/res/navigation`
+  (finding 1). Confirmed by experiment: adding explicit `layout` +
+  `nav_graph` keys to a scratch copy fixed everything (DIAGS []).
+- Preview, committed config (explicit keys): exit 0, 4 screens, all
+  reachable, 12 edges, ALL resolved, DIAGS []. Edges: Detail 3
+  (Edit→Form, Open related→Detail, Back→Home), Form 2 (Save→Home,
+  Cancel→Home — same-target different-button edges are both kept),
+  Home 5 (Open note→Detail, New note→Form, Edit note→Form,
+  Quick open→Detail via graph, Settings→Settings via onClick),
+  Settings 2 (Back→Home, plus a self-edge "Settings"→Settings —
+  see finding 9). `@string/notes_title` resolved to "My Notes".
+- Scenario `loaded` (`--json`): branch Detail picked "is Loaded"
+  [scenario]; arg "Open related" filled "note-7" [scenario]; field
+  Title "Milk" [scenario]; list rows carry scenario provenance.
+  Diagnostics: ONLY 3× P1009 clip warnings on the scenario rows
+  (known chunk-1 quirk, finding 7).
+- Walk smoke (scripted pty): `ccb preview --walk --record` rendered
+  Home + edge list; keys Enter, t, j, Enter, b, q produced exactly
+  `{"version":1,"steps":[{"screen":"Home","edge":"Open
+  note","branch":null,"args":["note-42"]},{"screen":"Detail","edge":null,"branch":"is
+  Loaded","args":[]}]}` — back navigation correctly NOT recorded.
+- Trace replay (`--trace` + `--json`): 2 steps, taken edge marked,
+  branch picked [trace], DIAGS [].
+- Tree-live smoke (scripted pty): 4 screens rendered, j/j moved
+  selection, detail pane showed all outgoing edges + correct
+  incoming edges, clean quit, no hang.
+
+Friction log:
+
+- Finding 1 (MAJOR) hit here first; the committed `ccb.toml` keeps
+  the explicit-keys workaround and the P1 README documents it.
+- The `settings_button` → "Settings" binding attaches to the
+  Settings screen itself via its title Text("Settings"), producing
+  a "Settings" → Settings self-edge (finding 9).
+
+Verdict: BUILD PASS, PREVIEW PASS with explicit keys; the
+docs-following fallback configuration FAILS silently (wrong tree,
+exit 0).
+
+## P2 — catalog: PASS (including the Maven stretch)
+
+Shop app: 4 activities, 8 product buttons, product detail with an
+image + price, cart, checkout form (3 textfields), a shape drawable,
+two themes. Preview sketch: 4 flow files, a `full` scenario (8
+product rows, 3 cart rows, branch pick, 3 field values).
+
+- Build (no dep): exit 0, 26 s, APK 29,450 bytes. Verified clean.
+- Preview: exit 0, 4 screens, all reachable, 13 edges (more than
+  P1's 12), ALL resolved, DIAGS [].
+- Scenario `full`: branch Detail picked "is Loaded" [scenario];
+  all 8 product rows + 3 cart rows with scenario provenance; fields
+  Name "Ana", Address "1 Main St", Card "4242" all applied.
+  Diagnostics: 11× P1009 — exactly one per scenario row (finding 7).
+- Maven stretch: `[deps] maven =
+  ["androidx.recyclerview:recyclerview:1.3.2"]`, Kotlin code only
+  imports the class.
+  - First attempt (Google Maven only, `maven_central` unset):
+    `ccb setup --yes` FAILED after 50 s, exit 3:
+    `error CCB-E3019 [maven]: maven
+    org.jetbrains.kotlin:kotlin-stdlib:1.6.21: POM not found in any
+    configured repository`. The error never suggests Maven Central;
+    the docs troubleshooting section does cover it, but the user
+    must connect the dots themselves (finding 6).
+  - Second attempt with `maven_central = true`: setup exit 0, 45 s,
+    "prefetched 18 artifacts (9 aar, 9 jar)", `ccb.lock` written
+    (committed, as its header instructs).
+  - Build with dep: exit 0, 49 s, APK 3,706,281 bytes. The
+    recyclerview classes ARE present in `classes.dex` (verified via
+    dex strings), so the dep is on the compile classpath AND dexed.
+    (An early `unzip -l | grep recyclerview` check returned 0 —
+    that check was wrong, not the build: APKs contain dex, not
+    class files.)
+
+Verdict: PASS. Build, preview, scenario, and the full Maven
+prefetch → lockfile → compile → dex path all work; the only cost
+was one failed setup round to discover `maven_central`.
+
+## P3 — messy: MEASUREMENT COMPLETE
+
+Deliberately messy flow sketch (4 real screens) exercising seven
+average-user patterns, plus minimal real app code (4 activities).
+
+- Build: exit 0, 25 s, APK 21,185 bytes. Verified clean.
+- Preview: exit 0. 7 screens: 4 real + 3 phantom screens
+  (`openDetail`, `onVarClick`, `onCrossClick` — see below).
+- Real buttons: 13 (Home 8, Detail 3, Form 1, Settings 1).
+  - Resolved edges from real screens: 7 (Home Go→Detail,
+    Share→Settings; Detail Go→Home, Share→Settings, Back→Home;
+    Form Back→Home; Settings Back→Home).
+  - Unknown edges: 1 (Home "Dynamic" → template route, per docs).
+  - Missing edges (button, no edge at all): 5, ALL on Home:
+    Helper nav (helper-function indirection), Cross file
+    (cross-file handler), Var ref (variable-held method ref),
+    Nested (nav inside a nested block), Mystery (missing binding).
+    Only Mystery warns (P1019); the other 4 are completely silent.
+  - Coverage: 8 of 13 buttons have an edge (7 resolved + 1
+    unknown); 5 of 13 (38%) are missing, 4 of them silently.
+  - Phantom-screen edges (not button edges): openDetail→Detail,
+    onVarClick→Form, onCrossClick→Form. The docs say these patterns
+    yield "no edge" for the button — true — but they do NOT clearly
+    say the handler fun itself becomes a screen carrying its own
+    edge. An average user sees three mystery screens (finding 5).
+  - Form is unreachable (P1006): every route to it used a messy
+    pattern (unbound Mystery handler, phantom-screen edges), so no
+    reachable screen navigates to it. The warning is correct given
+    the tree; it is a consequence of the messes, not a separate one.
+  - Diagnostics (8 total): 1× P1019 (Mystery), 4× P1006 (Form +
+    3 phantoms), 3× P1007 (3 phantoms). No P1017 (the P1-style CSS
+    with explicit button/textfield font-size avoids it). The `val h
+    = ::onVarClick` statement produced NO diagnostic at all.
+  - Duplicated labels behave as documented: both "Go" edges survive
+    (Home→Detail, Detail→Home), and the "Share" onClick edge attaches
+    to BOTH screens carrying the label (finding 9).
+- FQCN nav-graph trap (scratch variant, NOT committed): copying P3,
+  adding a nav graph whose destination uses a real Android name
+  (`android:name="com.example.messy.DetailActivity"`, id `fqcn`)
+  and a `navigate(R.id.fqcn)` handler makes preview exit 1 with
+  `CCB-P1005: navigation to unknown screen 'DetailActivity'`. The
+  graph resolves the id to the simple name "DetailActivity", which
+  is not a flow screen. A real Android nav graph — which always uses
+  fully-qualified names — therefore breaks preview with an ERROR.
+  The workaround (simple names in the graph) contradicts Android
+  convention, and the docs do not warn about it (finding 2).
+
+Verdict: MEASUREMENT COMPLETE. The project builds; preview's
+coverage on messy code is honestly measured above (62% of buttons
+edged). The failures are the tool's, not the project's.
+
+## Ranked gaps that most hurt the average user
+
+1. MAJOR — `[preview] resources` silently breaks layout/nav_graph
+   fallback discovery. Docs say `resources` holds Android values
+   files (so the standard value is `src/main/res/values`), but the
+   fallback formula (`<resources>/layout`, `<resources>/navigation`)
+   only yields a real directory if `resources` is the res ROOT.
+   Both cannot hold for the standard layout. Result: XML-onClick
+   handlers become phantom screens, graph navigation stays unknown,
+   screens go unreachable — with exit 0. Repro: take committed P1,
+   delete the explicit `layout` + `nav_graph` keys, run
+   `ccb preview --json`.
+2. MAJOR — Real nav graphs (fully-qualified `android:name`) break
+   preview with P1005 + exit 1. The graph table keeps the class
+   simple name, which never equals a flow screen name unless the
+   user writes non-standard simple names in the graph. Repro: P3
+   scratch variant above (graph + `navigate(R.id.fqcn)`).
+3. HIGH — Every button without an explicit `font-size` triggers
+   P1017, including with the documented `common.css` example (which
+   sets `font-size` only on `text`). Buttons/textfields default to
+   1 row tall, below the 2-row minimum. The reference
+   `examples/preview-sample/` emits P1017 ten times. An average user
+   copying the documented CSS gets "error"-labeled lines on
+   essentially every button on first preview. Workaround (validated
+   in P1/P2/P3): add `font-size: 16px` to the `button` and
+   `textfield` rules.
+4. MEDIUM — Human-mode diagnostics are all labeled "error"
+   regardless of severity. P1017/P1006/P1007 are warnings always per
+   `docs/diagnostics.md` and exit code correctly stays 0, but they
+   print as `error CCB-P1017 ...` on stderr. A user seeing "error"
+   lines with exit 0 cannot tell whether preview failed.
+5. MEDIUM — Handler funs (helper, cross-file, variable-held) become
+   phantom screens carrying their own edges. Docs say "no edge" for
+   the button but do not clearly say the fun becomes a screen; the
+   user gets mystery screens plus P1006/P1007 warnings for each.
+   P3 shows 3 phantoms from 3 ordinary patterns.
+6. MEDIUM — Maven: CCB-E3019 ("POM not found in any configured
+   repository") never suggests `maven_central`, although that is
+   the fix when the missing artifact lives on Central (P2:
+   kotlin-stdlib). Also, a setup prefetch failure exits 3, the code
+   the spec reserves for toolchain problems — confusing for scripts.
+7. MEDIUM — Scenario P1009 clip noise scales with data: every
+   scenario list row warns (P2: 11 warnings for 11 rows; P1: 3 for
+   3). Known chunk-1 quirk (unlaid-out row boxes treated as
+   width-0); on a full scenario it buries real diagnostics.
+8. MINOR — `ccb init --help` prints only the global usage, and init
+   defaults to name "hello" / package `com.example.hello` regardless
+   of the directory name. `ccb version` prints only `ccb 0.1.0`
+   while spec §6.1 promises the supported compileSdk range and
+   embedded tool expectations. Repo `README.md` Status still says
+   "M5 preview: stretch, not started" although preview (slices,
+   scenarios, traces, LSP, tree-live) is shipped.
+9. OBSERVATION (documented, surprising) — XML-onClick derived edges
+   attach to EVERY screen containing a component with the bound
+   label, matched by label regardless of component type. In P1 the
+   Settings screen's title Text("Settings") attracts the button's
+   edge, producing a self-edge. Per docs, but an average user will
+   not expect a title text to attract a button's edge.
+
+Confirmed working (for balance): `init` → `build` → signed, verified
+APK first try on the phone with only `JAVA_HOME` exported; init
+`--package`/`--name`; 4-activity apps with drawables, themes, and
+nav graphs build; `@string`/`@color` resolution works; scenario
+merge (branch picks, arg fills, list rows, field values,
+provenance) works; walk record/replay works exactly per docs (back
+nav not recorded); tree-live renders, moves, shows correct incoming
+edges, quits cleanly; same-target different-button edges are
+preserved; quoted TOML keys with spaces work in scenario args;
+Maven prefetch → lockfile → compile → dex works end to end.
+
+## Overall judgment
+
+Is CCB useful for the average user today? For BUILDING: yes, clearly.
+A docs-following user gets from `ccb init` to a signed, verified APK
+in ~25 seconds on a phone, first try, with no insider knowledge —
+P0, P1, P2, and P3 all built untouched or with ordinary edits, and
+the one Maven stretch worked after a single documented flag fix.
+
+For PREVIEW: not yet, on ordinary Android code. On clean,
+docs-shaped sketches preview is excellent (P0/P1-fixed/P2: every edge
+resolved, scenarios/traces/tree-live all correct). But the moment
+the input looks like a real Android project — a `resources` dir
+plus layouts, a nav graph with fully-qualified names, a handler
+factored into a helper or another file — preview either silently
+produces a wrong tree (finding 1), fails outright (finding 2), or
+fills the tree with phantom screens (finding 5). The tool is honest
+about its scope limits in the docs' outcome table, but the failure
+modes are silent or confusing where they most need to be loud and
+specific.
+
+The single biggest thing missing: preview that stays correct on
+ordinary Android inputs by default — concretely, fix finding 1
+first (the resources/layout/nav_graph fallback contradiction: it is
+the first thing a docs-following user hits when they add
+`@string`/`@color` resolution, and it fails silently), then finding
+2 (FQCN graph names). Until then, preview is a tool for sketches
+that already look like its examples, not yet a tool for the average
+user's existing project.
