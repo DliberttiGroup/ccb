@@ -3,8 +3,8 @@
 [Documentation](docs/index.md) | [Specification](requirement.md) | [LLM docs](llms.txt)
 
 [![CI](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml/badge.svg)](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/DliberttiGroup/ccb)](LICENSE)
-[![Tag](https://img.shields.io/github/v/tag/DliberttiGroup/ccb)](https://github.com/DliberttiGroup/ccb/tags)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![C17](https://img.shields.io/badge/C-C17-blue.svg)](LAUNCH.md#code-rules)
 
 Build headless Android APKs without Gradle. One C binary, no daemon, no
 runtime dependencies. Every build reproducible and explainable
