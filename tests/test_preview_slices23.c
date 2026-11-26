@@ -267,15 +267,12 @@ static int contains(const char *hay, const char *needle) {
 // Returns the malloc'd project dir, or NULL.
 static char *make_scratch2(const char *flow, const char *bindings,
     const char *layout, const char *graph, int flags) {
-  char tmpl[] = "/tmp/ccb-s23-XXXXXX";
-  char *dir = mkdtemp(tmpl);
+  char buf[64];
+  ccb_test_tmpdir(buf, sizeof buf, "s23");
   char *sub = NULL;
   char *path = NULL;
   ccb_str toml;
-  if (dir == NULL) {
-    return NULL;
-  }
-  dir = ccb_xstrdup(dir);
+  char *dir = ccb_xstrdup(buf);
   sub = join2(dir, "flow");
   mkdir(sub, 0777);
   free(sub);

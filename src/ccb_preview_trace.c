@@ -71,6 +71,91 @@ static int tr_opt_str(const ccb_json_value *obj, const char *key,
   return 1;
 }
 
+// The "args" array of a step object: the borrowed string pointers
+// (malloc'd array, NULL when absent/empty) and *nargs_io. Returns
+// 1 on success, 0 with *err set on failure (or unset on OOM).
+static int tr_parse_args(const ccb_json_value *s, const char ***args_io,
+    size_t *nargs_io, char **err) {
+  const ccb_json_value *args_v = ccb_json_obj_get(s, "args");
+  const char **args = NULL;
+  size_t nargs = 0;
+  size_t k = 0;
+  if (args_v == NULL) {
+    return 1;
+  }
+  if (args_v->type != CCB_JSON_ARR) {
+    if (err != NULL) {
+      *err = tr_err("trace step \"args\" must be an array");
+    }
+    return 0;
+  }
+  nargs = args_v->count;
+  if (nargs == 0) {
+    return 1;
+  }
+  args = ccb_xmalloc(nargs * sizeof(*args));
+  if (args == NULL) {
+    return 0;
+  }
+  for (k = 0; k < nargs; k++) {
+    const ccb_json_value *a = args_v->items[k];
+    if (a->type == CCB_JSON_NULL) {
+      args[k] = NULL;
+    } else if (a->type == CCB_JSON_STR) {
+      args[k] = a->str;
+    } else {
+      if (err != NULL) {
+        *err = tr_err("trace step args must be strings or null");
+      }
+      free(args);
+      return 0;
+    }
+  }
+  *args_io = args;
+  *nargs_io = nargs;
+  return 1;
+}
+
+// Parse one step object into the trace. Returns 1 on success, 0
+// with *err set on failure.
+static int tr_parse_step(pv_trace *t, const ccb_json_value *s,
+    char **err) {
+  const ccb_json_value *screen = NULL;
+  const char *edge = NULL;
+  const char *branch = NULL;
+  const char **args = NULL;
+  size_t nargs = 0;
+  int ok = 0;
+  if (s->type != CCB_JSON_OBJ) {
+    if (err != NULL) {
+      *err = tr_err("trace steps must be objects");
+    }
+    return 0;
+  }
+  screen = ccb_json_obj_get(s, "screen");
+  if (screen == NULL || screen->type != CCB_JSON_STR) {
+    if (err != NULL) {
+      *err = tr_err("trace step must carry a \"screen\" string");
+    }
+    return 0;
+  }
+  if (!tr_opt_str(s, "edge", &edge, err)) {
+    return 0;
+  }
+  if (!tr_opt_str(s, "branch", &branch, err)) {
+    return 0;
+  }
+  if (!tr_parse_args(s, &args, &nargs, err)) {
+    return 0;
+  }
+  ok = tr_step_add(t, screen->str, edge, branch, args, nargs);
+  free(args);
+  if (!ok && err != NULL) {
+    *err = tr_err("out of memory");
+  }
+  return ok;
+}
+
 pv_trace *pv_trace_parse(const char *text, char **err) {
   ccb_json_value *doc = NULL;
   const ccb_json_value *steps = NULL;
@@ -128,77 +213,7 @@ pv_trace *pv_trace_parse(const char *text, char **err) {
   }
   memset(t, 0, sizeof(*t));
   for (i = 0; i < steps->count; i++) {
-    const ccb_json_value *s = steps->items[i];
-    const ccb_json_value *screen = NULL;
-    const ccb_json_value *args_v = NULL;
-    const char *edge = NULL;
-    const char *branch = NULL;
-    const char **args = NULL;
-    size_t nargs = 0;
-    size_t k = 0;
-    int ok = 1;
-    if (s->type != CCB_JSON_OBJ) {
-      if (err != NULL) {
-        *err = tr_err("trace steps must be objects");
-      }
-      ok = 0;
-    }
-    if (ok) {
-      screen = ccb_json_obj_get(s, "screen");
-      if (screen == NULL || screen->type != CCB_JSON_STR) {
-        if (err != NULL) {
-          *err = tr_err("trace step must carry a \"screen\" string");
-        }
-        ok = 0;
-      }
-    }
-    if (ok && !tr_opt_str(s, "edge", &edge, err)) {
-      ok = 0;
-    }
-    if (ok && !tr_opt_str(s, "branch", &branch, err)) {
-      ok = 0;
-    }
-    if (ok) {
-      args_v = ccb_json_obj_get(s, "args");
-      if (args_v != NULL && args_v->type != CCB_JSON_ARR) {
-        if (err != NULL) {
-          *err = tr_err("trace step \"args\" must be an array");
-        }
-        ok = 0;
-      } else if (args_v != NULL) {
-        nargs = args_v->count;
-        if (nargs > 0) {
-          args = ccb_xmalloc(nargs * sizeof(*args));
-          if (args == NULL) {
-            ok = 0;
-          } else {
-            for (k = 0; k < nargs; k++) {
-              const ccb_json_value *a = args_v->items[k];
-              if (a->type == CCB_JSON_NULL) {
-                args[k] = NULL;
-              } else if (a->type == CCB_JSON_STR) {
-                args[k] = a->str;
-              } else {
-                if (err != NULL) {
-                  *err = tr_err("trace step args must be "
-                    "strings or null");
-                }
-                ok = 0;
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-    if (ok) {
-      ok = tr_step_add(t, screen->str, edge, branch, args, nargs);
-      if (!ok && err != NULL) {
-        *err = tr_err("out of memory");
-      }
-    }
-    free(args);
-    if (!ok) {
+    if (!tr_parse_step(t, steps->items[i], err)) {
       pv_trace_free(t);
       ccb_json_free(doc);
       return NULL;
@@ -344,6 +359,110 @@ static int tr_edge_in_branch(pv_screen *screen, const char *entry,
   return tr_box_in_branch(screen->root, entry, from);
 }
 
+// Mark the step's branch pick, warning when the entry is missing
+// or names no component with this button's label. The edge is
+// marked taken either way.
+static void tr_apply_branch(pv_project *p, pv_screen *screen,
+    const pv_trace_step *step, size_t nbranch, ccb_diag_list *diags) {
+  ccb_str detail;
+  // The pick is a fact even when the edge match is loose: a
+  // step's branch names the entry that ran.
+  if (pv_rt_mark_branch(p, screen, step->branch,
+      PV_PROV_TRACE) == 0) {
+    ccb_str_init(&detail);
+    ccb_str_append(&detail, "branch entry '");
+    ccb_str_append(&detail, step->branch);
+    ccb_str_append(&detail, "' not found in screen '");
+    ccb_str_append(&detail, screen->name != NULL ?
+      screen->name : "?");
+    ccb_str_append(&detail, "'; edge still marked taken");
+    pv_rt_warn(diags, "CCB-P1023", "trace",
+      detail.buf != NULL ? detail.buf : "");
+    ccb_str_free(&detail);
+  } else if (nbranch == 0) {
+    // The entry exists but names no component with this
+    // button's label: the step's branch context does not
+    // contain the button. The press itself still matched,
+    // so the edge is marked taken anyway.
+    ccb_str_init(&detail);
+    ccb_str_append(&detail, "edge '");
+    ccb_str_append(&detail, step->edge);
+    ccb_str_append(&detail, "' is not under branch entry '");
+    ccb_str_append(&detail, step->branch);
+    ccb_str_append(&detail, "' in screen '");
+    ccb_str_append(&detail, screen->name != NULL ?
+      screen->name : "?");
+    ccb_str_append(&detail, "'; edge still marked taken");
+    pv_rt_warn(diags, "CCB-P1023", "trace",
+      detail.buf != NULL ? detail.buf : "");
+    ccb_str_free(&detail);
+  }
+}
+
+// Apply one step naming an edge: count matches, warn when the
+// branch context does not contain the button, mark matching edges
+// taken and fill their args.
+static void tr_apply_edge(pv_project *p, pv_screen *screen,
+    const pv_trace_step *step, ccb_diag_list *diags) {
+  size_t ei = 0;
+  size_t nfrom = 0;
+  size_t nbranch = 0;
+  ccb_str detail;
+  for (ei = 0; ei < screen->nedges; ei++) {
+    if (screen->edges[ei].from != NULL &&
+        strcmp(screen->edges[ei].from, step->edge) == 0) {
+      nfrom++;
+      if (step->branch == NULL ||
+          tr_edge_in_branch(screen, step->branch,
+            screen->edges[ei].from)) {
+        nbranch++;
+      }
+    }
+  }
+  if (nfrom == 0) {
+    ccb_str_init(&detail);
+    ccb_str_append(&detail, "edge '");
+    ccb_str_append(&detail, step->edge);
+    ccb_str_append(&detail, "' matches no edge in screen '");
+    ccb_str_append(&detail, screen->name != NULL ?
+      screen->name : "?");
+    ccb_str_append(&detail, "'; step skipped");
+    pv_rt_warn(diags, "CCB-P1023", "trace",
+      detail.buf != NULL ? detail.buf : "");
+    ccb_str_free(&detail);
+    return;
+  }
+  if (step->branch != NULL) {
+    tr_apply_branch(p, screen, step, nbranch, diags);
+  }
+  for (ei = 0; ei < screen->nedges; ei++) {
+    pv_edge *e = &screen->edges[ei];
+    size_t k = 0;
+    size_t limit = 0;
+    if (e->from == NULL || strcmp(e->from, step->edge) != 0) {
+      continue;
+    }
+    // Prefer edges under the step's branch; when none is, the
+    // button press itself is still certain, so every edge with
+    // this label is marked taken.
+    if (step->branch != NULL && nbranch > 0 &&
+        !tr_edge_in_branch(screen, step->branch, e->from)) {
+      continue;
+    }
+    e->trace_taken = 1;
+    // Positional fills: step arg k fills edge arg k when that
+    // slot is unknown. Static literals never change, and a
+    // NULL step arg leaves its slot unknown.
+    limit = step->nargs < e->nargs ? step->nargs : e->nargs;
+    for (k = 0; k < limit; k++) {
+      if (step->args[k] != NULL) {
+        (void)pv_rt_fill_arg(p, e, k, step->args[k],
+          PV_PROV_TRACE);
+      }
+    }
+  }
+}
+
 void pv_trace_apply(pv_project *p, const pv_trace *t,
     ccb_diag_list *diags) {
   size_t si = 0;
@@ -396,94 +515,6 @@ void pv_trace_apply(pv_project *p, const pv_trace *t,
       }
       continue;
     }
-    {
-      size_t ei = 0;
-      size_t nfrom = 0;
-      size_t nbranch = 0;
-      for (ei = 0; ei < screen->nedges; ei++) {
-        if (screen->edges[ei].from != NULL &&
-            strcmp(screen->edges[ei].from, step->edge) == 0) {
-          nfrom++;
-          if (step->branch == NULL ||
-              tr_edge_in_branch(screen, step->branch,
-                screen->edges[ei].from)) {
-            nbranch++;
-          }
-        }
-      }
-      if (nfrom == 0) {
-        ccb_str_init(&detail);
-        ccb_str_append(&detail, "edge '");
-        ccb_str_append(&detail, step->edge);
-        ccb_str_append(&detail, "' matches no edge in screen '");
-        ccb_str_append(&detail, screen->name != NULL ?
-          screen->name : "?");
-        ccb_str_append(&detail, "'; step skipped");
-        pv_rt_warn(diags, "CCB-P1023", "trace",
-          detail.buf != NULL ? detail.buf : "");
-        ccb_str_free(&detail);
-        continue;
-      }
-      if (step->branch != NULL) {
-        // The pick is a fact even when the edge match is loose: a
-        // step's branch names the entry that ran.
-        if (pv_rt_mark_branch(p, screen, step->branch,
-            PV_PROV_TRACE) == 0) {
-          ccb_str_init(&detail);
-          ccb_str_append(&detail, "branch entry '");
-          ccb_str_append(&detail, step->branch);
-          ccb_str_append(&detail, "' not found in screen '");
-          ccb_str_append(&detail, screen->name != NULL ?
-            screen->name : "?");
-          ccb_str_append(&detail, "'; edge still marked taken");
-          pv_rt_warn(diags, "CCB-P1023", "trace",
-            detail.buf != NULL ? detail.buf : "");
-          ccb_str_free(&detail);
-        } else if (nbranch == 0) {
-          // The entry exists but names no component with this
-          // button's label: the step's branch context does not
-          // contain the button. The press itself still matched,
-          // so the edge is marked taken anyway.
-          ccb_str_init(&detail);
-          ccb_str_append(&detail, "edge '");
-          ccb_str_append(&detail, step->edge);
-          ccb_str_append(&detail, "' is not under branch entry '");
-          ccb_str_append(&detail, step->branch);
-          ccb_str_append(&detail, "' in screen '");
-          ccb_str_append(&detail, screen->name != NULL ?
-            screen->name : "?");
-          ccb_str_append(&detail, "'; edge still marked taken");
-          pv_rt_warn(diags, "CCB-P1023", "trace",
-            detail.buf != NULL ? detail.buf : "");
-          ccb_str_free(&detail);
-        }
-      }
-      for (ei = 0; ei < screen->nedges; ei++) {
-        pv_edge *e = &screen->edges[ei];
-        size_t k = 0;
-        size_t limit = 0;
-        if (e->from == NULL || strcmp(e->from, step->edge) != 0) {
-          continue;
-        }
-        // Prefer edges under the step's branch; when none is, the
-        // button press itself is still certain, so every edge with
-        // this label is marked taken.
-        if (step->branch != NULL && nbranch > 0 &&
-            !tr_edge_in_branch(screen, step->branch, e->from)) {
-          continue;
-        }
-        e->trace_taken = 1;
-        // Positional fills: step arg k fills edge arg k when that
-        // slot is unknown. Static literals never change, and a
-        // NULL step arg leaves its slot unknown.
-        limit = step->nargs < e->nargs ? step->nargs : e->nargs;
-        for (k = 0; k < limit; k++) {
-          if (step->args[k] != NULL) {
-            (void)pv_rt_fill_arg(p, e, k, step->args[k],
-              PV_PROV_TRACE);
-          }
-        }
-      }
-    }
+    tr_apply_edge(p, screen, step, diags);
   }
 }

@@ -32,8 +32,8 @@ static pv_watch_snapshot *take_ok(const char *cfg, const char *styles,
 }
 
 int main(void) {
-  char tmpl[] = "/tmp/ccb-watch-test-XXXXXX";
-  char *root = mkdtemp(tmpl);
+  char root[64];
+  ccb_test_tmpdir(root, sizeof root, "watch-test");
   char *styles = NULL;
   char *flow = NULL;
   char *sub = NULL;
@@ -50,10 +50,6 @@ int main(void) {
   long long t1 = 0;
   long long t2 = 0;
 
-  CHECK(root != NULL);
-  if (root == NULL) {
-    TEST_MAIN_END();
-  }
   styles = ccb_path_join(root, "styles");
   flow = ccb_path_join(root, "flow");
   sub = ccb_path_join(styles, "sub");

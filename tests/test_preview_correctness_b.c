@@ -248,15 +248,12 @@ static pv_edge *find_edge(pv_screen *screen, const char *from) {
 // none). Returns the project dir; tests join flow/ and ccb.toml
 // onto it themselves.
 static char *mk_proj(const char *bindings) {
-  char tmpl[] = "/tmp/ccb-cb-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "cb");
   char *proj = NULL;
   char *flow = NULL;
   char *toml = NULL;
   ccb_str s;
-  if (scratch == NULL) {
-    return NULL;
-  }
   proj = join2(scratch, "proj");
   flow = join2(proj, "flow");
   toml = join2(proj, "ccb.toml");
@@ -670,15 +667,14 @@ int main(void) {
   {
     char *p3 = p3_dir();
     if (p3 != NULL) {
-      char tmpl[] = "/tmp/ccb-cb-XXXXXX";
-      char *scratch = mkdtemp(tmpl);
+      char scratch[64];
+      ccb_test_tmpdir(scratch, sizeof scratch, "cb");
       char *copy = NULL;
       char *copy_toml = NULL;
       char *cap = NULL;
       pv_project *p = NULL;
       pv_screen *home = NULL;
       pv_edge *e = NULL;
-      CHECK(scratch != NULL);
       copy = join2(scratch, "p3-messy");
       copy_toml = join2(copy, "ccb.toml");
       cap = join2(scratch, "out.txt");

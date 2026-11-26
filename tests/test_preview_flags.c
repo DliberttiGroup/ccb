@@ -290,14 +290,8 @@ int main(void) {
   };
   char *sdir = sample_dir();
   char *gdir = golden_dir();
-  char tmpl[] = "/tmp/ccb-flags-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
-  CHECK(scratch != NULL);
-  if (scratch == NULL) {
-    free(sdir);
-    free(gdir);
-    TEST_MAIN_END();
-  }
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "flags");
 
   // --- JSON carries "version":2, additively, at library level and
   // in the checked-in golden.

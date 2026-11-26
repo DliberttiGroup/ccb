@@ -77,6 +77,21 @@ static char *find_build_tools(const char *sdk_home) {
     if (e->d_name[0] == '.') {
       continue;
     }
+    // Only build-tools CCB accepts (major 34..36): the runner image
+    // ships newer ones (e.g. 37) with no matching platform, and
+    // deriving compile_sdk from them fails config load (CCB-E1005).
+    int major = 0;
+    const char *mp = e->d_name;
+    if (*mp < '0' || *mp > '9') {
+      continue;
+    }
+    while (*mp >= '0' && *mp <= '9') {
+      major = major * 10 + (*mp - '0');
+      mp++;
+    }
+    if (major < 34 || major > 36) {
+      continue;
+    }
     char *cand = ccb_path_join3(bt_dir, e->d_name, "aapt2");
     int ok = access(cand, X_OK) == 0;
     free(cand);
@@ -433,14 +448,19 @@ int main(int argc, char **argv) {
     size_t len = 0;
     CHECK(ccb_read_file(src, &data, &len) == CCB_OK);
     char *trunc = ccb_path_join(BASE, "trunc.dex");
-    CHECK(ccb_write_file(trunc, data, 50) == CCB_OK);
-    free(data);
-    char **missing = NULL;
-    size_t nmissing = 0;
-    char *err = NULL;
-    CHECK(ccb_dexcheck_file(trunc, &missing, &nmissing, &err) == CCB_ERR_BUILD);
-    CHECK(err != NULL);
-    free(err);
+    // The read above can fail (e.g. the build that should have
+    // produced the dex failed); a NULL data must fail the CHECK,
+    // not reach ccb_write_file and segfault.
+    if (data != NULL) {
+      CHECK(ccb_write_file(trunc, data, 50) == CCB_OK);
+      free(data);
+      char **missing = NULL;
+      size_t nmissing = 0;
+      char *err = NULL;
+      CHECK(ccb_dexcheck_file(trunc, &missing, &nmissing, &err) == CCB_ERR_BUILD);
+      CHECK(err != NULL);
+      free(err);
+    }
     free(trunc);
     free(src);
   }

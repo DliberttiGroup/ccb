@@ -295,13 +295,8 @@ static const char *json_file_status(const ccb_json_value *root,
 
 int main(void) {
   char *sdir = sample_dir();
-  char tmpl[] = "/tmp/ccb-diff-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
-  CHECK(scratch != NULL);
-  if (scratch == NULL) {
-    free(sdir);
-    TEST_MAIN_END();
-  }
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "diff");
   {
     ccb_config *cfg = load_cfg(sdir);
     char *snap = join2(scratch, "snap");

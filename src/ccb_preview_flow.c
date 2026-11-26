@@ -222,6 +222,20 @@ static void pv_screen_add(ccb_arena *arena, pv_screen ***screens_io,
   *nscreens_io = n + 1;
 }
 
+// True when two edge arg lists match (same values, same named flags).
+static int pv_args_equal(char **a, int *a_named, char **b, int *b_named,
+    size_t nargs) {
+  for (size_t k = 0; k < nargs; k++) {
+    int same = (a[k] == NULL && b[k] == NULL) ||
+      (a[k] != NULL && b[k] != NULL &&
+       strcmp(a[k], b[k]) == 0 && a_named[k] == b_named[k]);
+    if (!same) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static void pv_edge_add(pv_parser *p, char *from, char *target, int unknown,
     char **args, size_t nargs, int *args_named, int derived, char *branch) {
   pv_screen *screen = p->screen;
@@ -231,20 +245,8 @@ static void pv_edge_add(pv_parser *p, char *from, char *target, int unknown,
       (e->target != NULL && target != NULL && strcmp(e->target, target) == 0);
     int same_branch = (e->branch == NULL && branch == NULL) ||
       (e->branch != NULL && branch != NULL && strcmp(e->branch, branch) == 0);
-    int same_args = e->nargs == nargs;
-    size_t k = 0;
-    if (same_args) {
-      for (k = 0; k < nargs; k++) {
-        int same = (e->args[k] == NULL && args[k] == NULL) ||
-          (e->args[k] != NULL && args[k] != NULL &&
-           strcmp(e->args[k], args[k]) == 0 &&
-           e->args_named[k] == args_named[k]);
-        if (!same) {
-          same_args = 0;
-          break;
-        }
-      }
-    }
+    int same_args = e->nargs == nargs &&
+      pv_args_equal(e->args, e->args_named, args, args_named, nargs);
     if (strcmp(e->from, from) == 0 && same_target && e->unknown == unknown &&
         same_args && same_branch) {
       return;
@@ -342,6 +344,59 @@ static size_t pv_match_brace(pv_parser *p, size_t idx) {
   return (size_t)-1;
 }
 
+// Index past the paren group at idx, when toks[idx] is '('. A token
+// that is not '(' (or past end) is left alone; a broken group, or
+// one running past end, yields end.
+static size_t pv_skip_paren(pv_parser *p, size_t i, size_t end) {
+  if (i >= end || !pv_is_sym(&p->toks[i], '(')) {
+    return i;
+  }
+  size_t close = pv_match_paren(p, i);
+  if (close == (size_t)-1 || close >= end) {
+    return end;
+  }
+  return close + 1;
+}
+
+// Index past the brace block at idx, when toks[idx] is '{'. A token
+// that is not '{' (or past end) is left alone; an unterminated
+// block yields end.
+static size_t pv_skip_brace(pv_parser *p, size_t i, size_t end) {
+  if (i >= end || !pv_is_sym(&p->toks[i], '{')) {
+    return i;
+  }
+  size_t close = pv_match_brace(p, i);
+  if (close == (size_t)-1) {
+    return end;
+  }
+  return close + 1;
+}
+
+// Index of the top-level '->' in [start, end), stopping at a '}'
+// at the top level. (size_t)-1 when there is none.
+static size_t pv_find_arrow(pv_parser *p, size_t start, size_t end) {
+  long paren_depth = 0;
+  long brace_depth = 0;
+  for (size_t i = start; i < end; i++) {
+    pv_token *t = &p->toks[i];
+    if (pv_is_sym(t, '(')) {
+      paren_depth++;
+    } else if (pv_is_sym(t, ')')) {
+      paren_depth--;
+    } else if (pv_is_sym(t, '{')) {
+      brace_depth++;
+    } else if (pv_is_sym(t, '}')) {
+      if (paren_depth == 0 && brace_depth == 0) {
+        break;
+      }
+      brace_depth--;
+    } else if (t->kind == PV_TK_ARROW && paren_depth == 0 && brace_depth == 0) {
+      return i;
+    }
+  }
+  return (size_t)-1;
+}
+
 // Raw text between the parens starting at idx ('('), trimmed. The
 // caller must have verified idx points at '('; on a missing match the
 // result is empty and the parser is marked broken.
@@ -366,6 +421,82 @@ static void pv_tok_push(pv_parser *p, pv_token *tok) {
   p->ntoks++;
 }
 
+// Skip a /* ... */ comment starting at i (past the opener).
+// Returns the index past the comment; marks the parser when
+// unterminated.
+static size_t pv_skip_block_comment(pv_parser *p, size_t i, long *line) {
+  const char *s = p->text;
+  int closed = 0;
+  while (i < p->text_len) {
+    if (s[i] == '\n') {
+      (*line)++;
+    }
+    if (s[i] == '*' && i + 1 < p->text_len && s[i + 1] == '/') {
+      i += 2;
+      closed = 1;
+      break;
+    }
+    i++;
+  }
+  if (!closed) {
+    p->unterminated_string = 1;
+  }
+  return i;
+}
+
+// One backslash escape inside a string literal.
+static void pv_append_escape(ccb_str *decoded, char e) {
+  switch (e) {
+    case 'n': ccb_str_append_c(decoded, '\n'); break;
+    case 't': ccb_str_append_c(decoded, '\t'); break;
+    case 'r': ccb_str_append_c(decoded, '\r'); break;
+    default: ccb_str_append_c(decoded, e); break;
+  }
+}
+
+// Scan a string literal starting at i (the opening quote). Pushes
+// the STRING token and returns the index past the literal. Marks
+// the parser when unterminated.
+static size_t pv_scan_string(pv_parser *p, size_t i, long line) {
+  const char *s = p->text;
+  size_t start = i;
+  i++;
+  ccb_str decoded;
+  ccb_str_init(&decoded);
+  int closed = 0;
+  while (i < p->text_len) {
+    char d = s[i];
+    if (d == '"') {
+      i++;
+      closed = 1;
+      break;
+    }
+    if (d == '\n') {
+      break;
+    }
+    if (d == '\\' && i + 1 < p->text_len && s[i + 1] != '\n') {
+      pv_append_escape(&decoded, s[i + 1]);
+      i += 2;
+      continue;
+    }
+    ccb_str_append_c(&decoded, d);
+    i++;
+  }
+  if (!closed) {
+    p->unterminated_string = 1;
+  }
+  pv_token tok;
+  memset(&tok, 0, sizeof(tok));
+  tok.kind = PV_TK_STRING;
+  tok.start = start;
+  tok.end = i;
+  tok.line = line;
+  tok.text = ccb_arena_strdup(p->arena, decoded.buf != NULL ? decoded.buf : "");
+  ccb_str_free(&decoded);
+  pv_tok_push(p, &tok);
+  return i;
+}
+
 static void pv_tokenize(pv_parser *p) {
   const char *s = p->text;
   size_t i = 0;
@@ -388,67 +519,11 @@ static void pv_tokenize(pv_parser *p) {
       continue;
     }
     if (c == '/' && i + 1 < p->text_len && s[i + 1] == '*') {
-      i += 2;
-      int closed = 0;
-      while (i < p->text_len) {
-        if (s[i] == '\n') {
-          line++;
-        }
-        if (s[i] == '*' && i + 1 < p->text_len && s[i + 1] == '/') {
-          i += 2;
-          closed = 1;
-          break;
-        }
-        i++;
-      }
-      if (!closed) {
-        p->unterminated_string = 1;
-      }
+      i = pv_skip_block_comment(p, i + 2, &line);
       continue;
     }
     if (c == '"') {
-      size_t start = i;
-      long tok_line = line;
-      i++;
-      ccb_str decoded;
-      ccb_str_init(&decoded);
-      int closed = 0;
-      while (i < p->text_len) {
-        char d = s[i];
-        if (d == '"') {
-          i++;
-          closed = 1;
-          break;
-        }
-        if (d == '\n') {
-          break;
-        }
-        if (d == '\\' && i + 1 < p->text_len && s[i + 1] != '\n') {
-          char e = s[i + 1];
-          switch (e) {
-            case 'n': ccb_str_append_c(&decoded, '\n'); break;
-            case 't': ccb_str_append_c(&decoded, '\t'); break;
-            case 'r': ccb_str_append_c(&decoded, '\r'); break;
-            default: ccb_str_append_c(&decoded, e); break;
-          }
-          i += 2;
-          continue;
-        }
-        ccb_str_append_c(&decoded, d);
-        i++;
-      }
-      if (!closed) {
-        p->unterminated_string = 1;
-      }
-      pv_token tok;
-      memset(&tok, 0, sizeof(tok));
-      tok.kind = PV_TK_STRING;
-      tok.start = start;
-      tok.end = i;
-      tok.line = tok_line;
-      tok.text = ccb_arena_strdup(p->arena, decoded.buf != NULL ? decoded.buf : "");
-      ccb_str_free(&decoded);
-      pv_tok_push(p, &tok);
+      i = pv_scan_string(p, i, line);
       continue;
     }
     if (isalpha((unsigned char)c) || c == '_') {
@@ -545,6 +620,22 @@ static char *pv_arg_classify(pv_parser *p, size_t start, size_t end,
 // its args. This is the shared parser for flow-declared navs
 // (pv_nav_at, attributed to the enclosing component) and Slice 1
 // handler navs (attributed to the bound button label).
+// The first segment of a nav call's argument list: a plain string
+// literal is the target.
+static void pv_nav_string_target(pv_parser *p, size_t seg_start, size_t i,
+    char **target, int *unknown) {
+  if (i - seg_start == 1 &&
+      p->toks[seg_start].kind == PV_TK_STRING &&
+      strchr(p->toks[seg_start].text, '$') == NULL) {
+    *target = p->toks[seg_start].text;
+    *unknown = 0;
+  }
+}
+
+// Append one edge argument (defined with pv_handler_navigate).
+static void pv_nav_arg_push(pv_parser *p, char ***args, size_t *nargs,
+    int **args_named, char *arg, int named);
+
 static size_t pv_nav_parse(pv_parser *p, size_t idx, char **target_out,
     int *unknown_out, char ***args_out, size_t *nargs_out,
     int **args_named_out) {
@@ -592,12 +683,7 @@ static size_t pv_nav_parse(pv_parser *p, size_t idx, char **target_out,
       if (target == NULL && unknown == 1 && nargs == 0 &&
           seg_start == idx + 2) {
         // First segment: the target.
-        if (i - seg_start == 1 &&
-            p->toks[seg_start].kind == PV_TK_STRING &&
-            strchr(p->toks[seg_start].text, '$') == NULL) {
-          target = p->toks[seg_start].text;
-          unknown = 0;
-        }
+        pv_nav_string_target(p, seg_start, i, &target, &unknown);
       } else {
         // Later segment: an edge argument. The first-segment test
         // above already consumed segment 0 (whether it resolved
@@ -605,38 +691,14 @@ static size_t pv_nav_parse(pv_parser *p, size_t idx, char **target_out,
         // nargs == 0 guard is only for the very first segment.
         int named = 0;
         char *arg = pv_arg_classify(p, seg_start, i, &named);
-        char **next = NULL;
-        int *next_named = NULL;
-        next = ccb_arena_alloc(p->arena, (nargs + 1) * sizeof(*next));
-        next_named = ccb_arena_alloc(p->arena,
-          (nargs + 1) * sizeof(*next_named));
-        for (size_t k = 0; k < nargs; k++) {
-          next[k] = args[k];
-          next_named[k] = args_named[k];
-        }
-        next[nargs] = arg;
-        next_named[nargs] = named;
-        args = next;
-        args_named = next_named;
-        nargs++;
+        pv_nav_arg_push(p, &args, &nargs, &args_named, arg, named);
       }
     } else if (seg_start == idx + 2 && i == close) {
       // nav() with no arguments: no target, no args.
     } else {
       // An empty later segment (e.g. a trailing comma) is an
       // unknown argument.
-      char **next = ccb_arena_alloc(p->arena, (nargs + 1) * sizeof(*next));
-      int *next_named = ccb_arena_alloc(p->arena,
-        (nargs + 1) * sizeof(*next_named));
-      for (size_t k = 0; k < nargs; k++) {
-        next[k] = args[k];
-        next_named[k] = args_named[k];
-      }
-      next[nargs] = NULL;
-      next_named[nargs] = 0;
-      args = next;
-      args_named = next_named;
-      nargs++;
+      pv_nav_arg_push(p, &args, &nargs, &args_named, NULL, 0);
     }
     seg_start = i + 1;
   }
@@ -848,6 +910,27 @@ static void pv_handler_add(pv_parser *p, char *name) {
 
 // Collect every top-level fun (same shape the main loop accepts:
 // `fun Name(` ... `{` body) with its body brace range.
+// When tokens at j start a fun's parameter list, register the fun
+// (name, brace, close) and return the index past its body, or
+// (size_t)-1 when this is not a well-formed fun.
+static size_t pv_try_fun_add(pv_parser *p, char *name, size_t j) {
+  if (j >= p->ntoks || !pv_is_sym(&p->toks[j], '(')) {
+    return (size_t)-1;
+  }
+  size_t pc = pv_match_paren(p, j);
+  if (pc == (size_t)-1 || pc + 1 >= p->ntoks ||
+      !pv_is_sym(&p->toks[pc + 1], '{')) {
+    return (size_t)-1;
+  }
+  size_t brace = pc + 1;
+  size_t bc = pv_match_brace(p, brace);
+  if (bc == (size_t)-1) {
+    return (size_t)-1;
+  }
+  pv_fun_add(p, name, brace, bc);
+  return bc + 1;
+}
+
 static void pv_collect_funs(pv_parser *p) {
   size_t i = 0;
   long top_depth = 0;
@@ -866,20 +949,10 @@ static void pv_collect_funs(pv_parser *p) {
     }
     if (top_depth == 0 && pv_is_ident(&p->toks[i], "fun") &&
         i + 1 < p->ntoks && p->toks[i + 1].kind == PV_TK_IDENT) {
-      char *name = p->toks[i + 1].text;
-      size_t j = i + 2;
-      if (j < p->ntoks && pv_is_sym(&p->toks[j], '(')) {
-        size_t pc = pv_match_paren(p, j);
-        if (pc != (size_t)-1 && pc + 1 < p->ntoks &&
-            pv_is_sym(&p->toks[pc + 1], '{')) {
-          size_t brace = pc + 1;
-          size_t bc = pv_match_brace(p, brace);
-          if (bc != (size_t)-1) {
-            pv_fun_add(p, name, brace, bc);
-            i = bc + 1;
-            continue;
-          }
-        }
+      size_t after = pv_try_fun_add(p, p->toks[i + 1].text, i + 2);
+      if (after != (size_t)-1) {
+        i = after;
+        continue;
       }
     }
     i++;
@@ -913,6 +986,28 @@ static int pv_refers_to(pv_parser *p, size_t start, size_t end,
 // references from non-handler funs (iterated to a fixed point, so a
 // handler referencing another handler does not by itself keep that
 // handler alive, and mutual references collapse to nothing).
+// True when handler h is referenced via :: from a non-handler fun.
+static int pv_handler_kept(pv_parser *p, size_t h) {
+  for (size_t f = 0; f < p->nfuns; f++) {
+    if (pv_is_handler(p, p->fun_names[f])) {
+      continue;
+    }
+    if (pv_refers_to(p, p->fun_braces[f] + 1, p->fun_closes[f],
+        p->handler_names[h])) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Drop handler h, shifting the names after it down.
+static void pv_handler_drop(pv_parser *p, size_t h) {
+  for (size_t k = h + 1; k < p->nhandlers; k++) {
+    p->handler_names[k - 1] = p->handler_names[k];
+  }
+  p->nhandlers--;
+}
+
 static void pv_collect_handlers(pv_parser *p) {
   size_t f = 0;
   size_t g = 0;
@@ -930,24 +1025,10 @@ static void pv_collect_handlers(pv_parser *p) {
     size_t h = 0;
     changed = 0;
     while (h < p->nhandlers) {
-      int kept = 0;
-      for (f = 0; f < p->nfuns; f++) {
-        if (pv_is_handler(p, p->fun_names[f])) {
-          continue;
-        }
-        if (pv_refers_to(p, p->fun_braces[f] + 1, p->fun_closes[f],
-            p->handler_names[h])) {
-          kept = 1;
-          break;
-        }
-      }
-      if (kept) {
+      if (pv_handler_kept(p, h)) {
         h++;
       } else {
-        for (size_t k = h + 1; k < p->nhandlers; k++) {
-          p->handler_names[k - 1] = p->handler_names[k];
-        }
-        p->nhandlers--;
+        pv_handler_drop(p, h);
         changed = 1;
       }
     }
@@ -1172,6 +1253,16 @@ static void pv_mark_foreign_navs(pv_parser *p, size_t file_idx,
 // site warns exactly once, whatever the scan count, because the
 // sweep is a single pass over the files and attribution is a set.
 // Runs after all files are parsed and before the index is freed;
+// True when the nav call at start in file f was recorded as an edge.
+static int pv_nav_attributed(pv_fun_index *index, size_t f, size_t start) {
+  for (size_t k = 0; k < index->nnav; k++) {
+    if (index->nav_files[k] == f && index->nav_starts[k] == start) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // a NULL index or diag list is a no-op, so index-less parses keep
 // the exact old behavior.
 void pv_sweep_unattributed_navs(pv_fun_index *index,
@@ -1193,19 +1284,10 @@ void pv_sweep_unattributed_navs(pv_fun_index *index,
     q.file = index->labels[f];
     pv_tokenize(&q);
     for (i = 0; i < q.ntoks; i++) {
-      size_t k = 0;
-      int found = 0;
       if (!pv_is_nav_call(q.toks, q.ntoks, i)) {
         continue;
       }
-      for (k = 0; k < index->nnav; k++) {
-        if (index->nav_files[k] == f &&
-            index->nav_starts[k] == q.toks[i].start) {
-          found = 1;
-          break;
-        }
-      }
-      if (!found) {
+      if (!pv_nav_attributed(index, f, q.toks[i].start)) {
         ccb_diag d;
         ccb_diag_init(&d);
         ccb_diag_set_full(&d, "CCB-P1025", "preview",
@@ -1393,6 +1475,20 @@ static int pv_cand_add_name(pv_fun_index *index, pv_cand_pairs *set,
 // lambda blocks. Mode 1 is the handler-body scan: bare calls
 // anywhere (plus :: refs, as in mode 0). Returns 1 when a pair was
 // added.
+// The bare calls inside one listener lambda body: each names a
+// candidate handler for this file's fun.
+static int pv_cand_scan_lambda(pv_parser *q, size_t brace, size_t close,
+    size_t file, char *fun, pv_fun_index *index, pv_cand_pairs *set) {
+  int added = 0;
+  for (size_t j = brace + 1; j < close; j++) {
+    if (pv_cand_is_bare_call(q->toks, q->ntoks, j) &&
+        pv_cand_add_name(index, set, q->toks[j].text, file, fun)) {
+      added = 1;
+    }
+  }
+  return added;
+}
+
 static int pv_cand_scan_body(pv_parser *q, size_t file, char *fun,
     size_t start, size_t end, pv_fun_index *index, pv_cand_pairs *set,
     int mode) {
@@ -1410,10 +1506,9 @@ static int pv_cand_scan_body(pv_parser *q, size_t file, char *fun,
       continue;
     }
     if (mode == 1) {
-      if (pv_cand_is_bare_call(q->toks, q->ntoks, k)) {
-        if (pv_cand_add_name(index, set, q->toks[k].text, file, fun)) {
-          added = 1;
-        }
+      if (pv_cand_is_bare_call(q->toks, q->ntoks, k) &&
+          pv_cand_add_name(index, set, q->toks[k].text, file, fun)) {
+        added = 1;
       }
       continue;
     }
@@ -1421,17 +1516,11 @@ static int pv_cand_scan_body(pv_parser *q, size_t file, char *fun,
         pv_is_ident(&q->toks[k], "onClick")) {
       size_t brace = 0;
       size_t close = 0;
-      size_t j = 0;
       if (!pv_cand_lambda_block(q, k, end, &brace, &close)) {
         continue;
       }
-      for (j = brace + 1; j < close; j++) {
-        if (pv_cand_is_bare_call(q->toks, q->ntoks, j)) {
-          if (pv_cand_add_name(index, set, q->toks[j].text, file,
-              fun)) {
-            added = 1;
-          }
-        }
+      if (pv_cand_scan_lambda(q, brace, close, file, fun, index, set)) {
+        added = 1;
       }
     }
   }
@@ -1445,6 +1534,24 @@ static int pv_cand_scan_body(pv_parser *q, size_t file, char *fun,
 // file's funs in the set join the parser's handler names, so the
 // main loop skips their bodies instead of creating screens. A NULL
 // index keeps the exact per-file behavior.
+// Close one candidate pair under handler-body bare calls:
+// scanning the named fun's body in mode 1 may add new pairs.
+// Returns 1 when it added any.
+static int pv_cand_close_one(pv_parser *q, size_t file, pv_fun_index *index,
+    pv_cand_pairs *set, size_t s) {
+  int changed = 0;
+  for (size_t g = 0; g < q->nfuns; g++) {
+    if (strcmp(q->fun_names[g], set->names[s]) != 0) {
+      continue;
+    }
+    if (pv_cand_scan_body(q, file, q->fun_names[g],
+        q->fun_braces[g] + 1, q->fun_closes[g], index, set, 1)) {
+      changed = 1;
+    }
+  }
+  return changed;
+}
+
 static void pv_collect_index_handlers(pv_parser *p) {
   pv_fun_index *index = p->index;
   pv_cand_file *files = NULL;
@@ -1485,16 +1592,9 @@ static void pv_collect_index_handlers(pv_parser *p) {
     size_t s = 0;
     changed = 0;
     for (s = 0; s < set.n; s++) {
-      pv_parser *q = &files[set.files[s]].q;
-      size_t g = 0;
-      for (g = 0; g < q->nfuns; g++) {
-        if (strcmp(q->fun_names[g], set.names[s]) != 0) {
-          continue;
-        }
-        if (pv_cand_scan_body(q, set.files[s], q->fun_names[g],
-            q->fun_braces[g] + 1, q->fun_closes[g], index, &set, 1)) {
-          changed = 1;
-        }
+      if (pv_cand_close_one(&files[set.files[s]].q, set.files[s],
+          index, &set, s)) {
+        changed = 1;
       }
     }
   }
@@ -1516,25 +1616,31 @@ static void pv_collect_index_handlers(pv_parser *p) {
   free(set.names);
 }
 
+// True when file f defines name.
+static int pv_file_defines(pv_fun_index *index, size_t f, const char *name) {
+  for (size_t i = 0; i < index->nfuns; i++) {
+    if (index->fun_files[i] == f &&
+        strcmp(index->fun_names[i], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // Count distinct files defining name; return the first file index
 // (or (size_t)-1 when absent). Count goes in *count_out.
 static size_t pv_index_lookup(pv_fun_index *index, const char *name,
     size_t *count_out) {
   size_t first = (size_t)-1;
   size_t count = 0;
-  size_t f = 0;
-  size_t i = 0;
-  for (f = 0; f < index->nfiles; f++) {
-    for (i = 0; i < index->nfuns; i++) {
-      if (index->fun_files[i] == f &&
-          strcmp(index->fun_names[i], name) == 0) {
-        if (first == (size_t)-1) {
-          first = f;
-        }
-        count++;
-        break;
-      }
+  for (size_t f = 0; f < index->nfiles; f++) {
+    if (!pv_file_defines(index, f, name)) {
+      continue;
     }
+    if (first == (size_t)-1) {
+      first = f;
+    }
+    count++;
   }
   if (count_out != NULL) {
     *count_out = count;
@@ -1633,13 +1739,7 @@ static size_t pv_skip_stmt(pv_parser *p, size_t i, size_t end) {
   }
   if (pv_is_ident(&p->toks[i], "if")) {
     i++;
-    if (i < end && pv_is_sym(&p->toks[i], '(')) {
-      size_t close = pv_match_paren(p, i);
-      if (close == (size_t)-1 || close >= end) {
-        return end;
-      }
-      i = close + 1;
-    }
+    i = pv_skip_paren(p, i, end);
     i = pv_skip_stmt(p, i, end);
     if (i < end && pv_is_ident(&p->toks[i], "else")) {
       i++;
@@ -1649,46 +1749,20 @@ static size_t pv_skip_stmt(pv_parser *p, size_t i, size_t end) {
   }
   if (pv_is_ident(&p->toks[i], "when")) {
     i++;
-    if (i < end && pv_is_sym(&p->toks[i], '(')) {
-      size_t close = pv_match_paren(p, i);
-      if (close == (size_t)-1 || close >= end) {
-        return end;
-      }
-      i = close + 1;
-    }
-    if (i < end && pv_is_sym(&p->toks[i], '{')) {
-      size_t close = pv_match_brace(p, i);
-      if (close == (size_t)-1) {
-        return end;
-      }
-      return close + 1;
-    }
-    return i;
+    i = pv_skip_paren(p, i, end);
+    return pv_skip_brace(p, i, end);
   }
   if (p->toks[i].kind == PV_TK_IDENT) {
     while (i < end && p->toks[i].kind == PV_TK_IDENT) {
       i++;
-      if (i < end && pv_is_sym(&p->toks[i], '(')) {
-        size_t close = pv_match_paren(p, i);
-        if (close == (size_t)-1 || close >= end) {
-          return end;
-        }
-        i = close + 1;
-      }
+      i = pv_skip_paren(p, i, end);
       if (i < end && pv_is_sym(&p->toks[i], '.')) {
         i++;
         continue;
       }
       break;
     }
-    if (i < end && pv_is_sym(&p->toks[i], '{')) {
-      size_t close = pv_match_brace(p, i);
-      if (close == (size_t)-1) {
-        return end;
-      }
-      return close + 1;
-    }
-    return i;
+    return pv_skip_brace(p, i, end);
   }
   return i + 1;
 }
@@ -1717,6 +1791,53 @@ static char *pv_branch_entry(pv_parser *p, const char *outer,
   out = ccb_arena_strdup(p->arena, s.buf != NULL ? s.buf : "");
   ccb_str_free(&s);
   return out;
+}
+
+// The first comma segment of a navigate() call: a plain string
+// literal is the target; an R.id.<name> resolves through the nav
+// graph (an unlisted id stays unknown, never guessed).
+static void pv_nav_first_segment(pv_parser *p, size_t seg_start, size_t i,
+    char **target, int *unknown) {
+  if (i - seg_start == 1 &&
+      p->toks[seg_start].kind == PV_TK_STRING &&
+      strchr(p->toks[seg_start].text, '$') == NULL) {
+    *target = p->toks[seg_start].text;
+    *unknown = 0;
+    return;
+  }
+  if (i - seg_start != 5 ||
+      !pv_is_ident(&p->toks[seg_start], "R") ||
+      !pv_is_sym(&p->toks[seg_start + 1], '.') ||
+      !pv_is_ident(&p->toks[seg_start + 2], "id") ||
+      !pv_is_sym(&p->toks[seg_start + 3], '.') ||
+      p->toks[seg_start + 4].kind != PV_TK_IDENT) {
+    return;
+  }
+  for (size_t g = 0; g < p->ngraph; g++) {
+    if (strcmp(p->graph_keys[g], p->toks[seg_start + 4].text) == 0) {
+      *target = p->graph_vals[g];
+      *unknown = 0;
+      break;
+    }
+  }
+}
+
+// Append one edge argument (NULL for an empty segment, i.e. a
+// trailing comma), growing the arena arrays.
+static void pv_nav_arg_push(pv_parser *p, char ***args, size_t *nargs,
+    int **args_named, char *arg, int named) {
+  char **next = ccb_arena_alloc(p->arena, (*nargs + 1) * sizeof(*next));
+  int *next_named = ccb_arena_alloc(p->arena,
+    (*nargs + 1) * sizeof(*next_named));
+  for (size_t k = 0; k < *nargs; k++) {
+    next[k] = (*args)[k];
+    next_named[k] = (*args_named)[k];
+  }
+  next[*nargs] = arg;
+  next_named[*nargs] = named;
+  *args = next;
+  *args_named = next_named;
+  (*nargs)++;
 }
 
 // Parse a NavController navigate() call at token idx (ident + '(')
@@ -1771,60 +1892,16 @@ static size_t pv_handler_navigate(pv_parser *p, size_t idx, char *from_label,
     if (seg_start < i) {
       if (first) {
         first = 0;
-        if (i - seg_start == 1 &&
-            p->toks[seg_start].kind == PV_TK_STRING &&
-            strchr(p->toks[seg_start].text, '$') == NULL) {
-          target = p->toks[seg_start].text;
-          unknown = 0;
-        } else if (i - seg_start == 5 &&
-            pv_is_ident(&p->toks[seg_start], "R") &&
-            pv_is_sym(&p->toks[seg_start + 1], '.') &&
-            pv_is_ident(&p->toks[seg_start + 2], "id") &&
-            pv_is_sym(&p->toks[seg_start + 3], '.') &&
-            p->toks[seg_start + 4].kind == PV_TK_IDENT) {
-          // Graph lookup: an unlisted id is unknown, never guessed.
-          size_t g = 0;
-          for (g = 0; g < p->ngraph; g++) {
-            if (strcmp(p->graph_keys[g], p->toks[seg_start + 4].text) == 0) {
-              target = p->graph_vals[g];
-              unknown = 0;
-              break;
-            }
-          }
-        }
+        pv_nav_first_segment(p, seg_start, i, &target, &unknown);
       } else {
         int named = 0;
         char *arg = pv_arg_classify(p, seg_start, i, &named);
-        char **next = ccb_arena_alloc(p->arena,
-          (nargs + 1) * sizeof(*next));
-        int *next_named = ccb_arena_alloc(p->arena,
-          (nargs + 1) * sizeof(*next_named));
-        for (size_t k = 0; k < nargs; k++) {
-          next[k] = args[k];
-          next_named[k] = args_named[k];
-        }
-        next[nargs] = arg;
-        next_named[nargs] = named;
-        args = next;
-        args_named = next_named;
-        nargs++;
+        pv_nav_arg_push(p, &args, &nargs, &args_named, arg, named);
       }
     } else if (!first) {
       // An empty later segment (e.g. a trailing comma) is an
       // unknown argument.
-      char **next = ccb_arena_alloc(p->arena,
-        (nargs + 1) * sizeof(*next));
-      int *next_named = ccb_arena_alloc(p->arena,
-        (nargs + 1) * sizeof(*next_named));
-      for (size_t k = 0; k < nargs; k++) {
-        next[k] = args[k];
-        next_named[k] = args_named[k];
-      }
-      next[nargs] = NULL;
-      next_named[nargs] = 0;
-      args = next;
-      args_named = next_named;
-      nargs++;
+      pv_nav_arg_push(p, &args, &nargs, &args_named, NULL, 0);
     } else {
       first = 0;
     }
@@ -1917,8 +1994,66 @@ static void pv_handle_body(pv_parser *p, const char *receiver,
 // Chunk B: try to consume a bare helper call at token i (defined
 // before pv_scan_handler_branch); returns the index past the call,
 // or 0 when token i is not a followed helper call.
+// Every definition of an ambiguous name gets its navs marked: all
+// of them are reported by P1024, so none is sweep territory.
+static void pv_mark_ambiguous_navs(pv_parser *p, const char *name) {
+  for (size_t f = 0; f < p->index->nfiles; f++) {
+    for (size_t g = 0; g < p->index->nfuns; g++) {
+      if (p->index->fun_files[g] == f &&
+          strcmp(p->index->fun_names[g], name) == 0) {
+        pv_mark_foreign_navs(p, f, name);
+        break;
+      }
+    }
+  }
+}
+
 static size_t pv_try_helper_call(pv_parser *p, size_t i, size_t end,
     char *from_label, char *branch);
+
+// One if/else body: a braced block scanned as a handler branch, or
+// a single nav call / statement. Returns the index past the body,
+// or (size_t)-1 on breakage.
+static size_t pv_scan_if_body(pv_parser *p, size_t i, size_t end,
+    char *from_label, char *label) {
+  if (i < end && pv_is_sym(&p->toks[i], '{')) {
+    size_t close = pv_match_brace(p, i);
+    if (close == (size_t)-1) {
+      return (size_t)-1;
+    }
+    pv_scan_handler_branch(p, i + 1, close, from_label, label);
+    return close + 1;
+  }
+  if (i >= end) {
+    return i;
+  }
+  size_t next = pv_handler_nav_call(p, i, end, from_label, label);
+  if (next == (size_t)-1) {
+    return (size_t)-1;
+  }
+  return next != 0 ? next : pv_skip_stmt(p, i, end);
+}
+
+// One statement at i that is a nav call or a helper call. Returns
+// 1 when consumed (*i_io advanced), 0 when neither applies, -1
+// on breakage.
+static int pv_step_call(pv_parser *p, size_t *i_io, size_t end,
+    char *from_label, char *branch) {
+  size_t next = pv_handler_nav_call(p, *i_io, end, from_label, branch);
+  if (next == (size_t)-1) {
+    return -1;
+  }
+  if (next != 0) {
+    *i_io = next;
+    return 1;
+  }
+  next = pv_try_helper_call(p, *i_io, end, from_label, branch);
+  if (next != 0) {
+    *i_io = next;
+    return 1;
+  }
+  return 0;
+}
 
 // Scan one if/else-if statement whose `if` is at *i_io: the then
 // body (braced or a single braceless statement) and the else chain,
@@ -1928,35 +2063,24 @@ static void pv_scan_if(pv_parser *p, size_t *i_io, size_t end,
     char *from_label, char *outer, int is_else_if) {
   size_t i = *i_io;
   char *cond = ccb_arena_strdup(p->arena, "");
-  char *base = NULL;
-  char *then_label = NULL;
   i++;
   if (i < end && pv_is_sym(&p->toks[i], '(')) {
-    size_t close = pv_match_paren(p, i);
-    if (close == (size_t)-1) {
+    // A group closing at or past end is the same as a broken one
+    // here: either way the if has no body to scan.
+    size_t after = pv_skip_paren(p, i, end);
+    if (after >= end) {
       *i_io = end;
       return;
     }
     cond = pv_paren_text(p, i);
-    i = close + 1;
+    i = after;
   }
-  base = pv_branch_label(p, is_else_if ? "else if" : "if", cond);
-  then_label = pv_branch_entry(p, outer, base, "then");
-  if (i < end && pv_is_sym(&p->toks[i], '{')) {
-    size_t close = pv_match_brace(p, i);
-    if (close == (size_t)-1) {
-      *i_io = end;
-      return;
-    }
-    pv_scan_handler_branch(p, i + 1, close, from_label, then_label);
-    i = close + 1;
-  } else if (i < end) {
-    size_t next = pv_handler_nav_call(p, i, end, from_label, then_label);
-    if (next == (size_t)-1) {
-      *i_io = end;
-      return;
-    }
-    i = next != 0 ? next : pv_skip_stmt(p, i, end);
+  char *base = pv_branch_label(p, is_else_if ? "else if" : "if", cond);
+  char *then_label = pv_branch_entry(p, outer, base, "then");
+  i = pv_scan_if_body(p, i, end, from_label, then_label);
+  if (i == (size_t)-1) {
+    *i_io = end;
+    return;
   }
   if (i < end && pv_is_ident(&p->toks[i], "else")) {
     i++;
@@ -1964,22 +2088,10 @@ static void pv_scan_if(pv_parser *p, size_t *i_io, size_t end,
       pv_scan_if(p, &i, end, from_label, outer, 1);
     } else {
       char *else_label = pv_branch_entry(p, outer, base, "else");
-      if (i < end && pv_is_sym(&p->toks[i], '{')) {
-        size_t close = pv_match_brace(p, i);
-        if (close == (size_t)-1) {
-          *i_io = end;
-          return;
-        }
-        pv_scan_handler_branch(p, i + 1, close, from_label, else_label);
-        i = close + 1;
-      } else if (i < end) {
-        size_t next = pv_handler_nav_call(p, i, end, from_label,
-          else_label);
-        if (next == (size_t)-1) {
-          *i_io = end;
-          return;
-        }
-        i = next != 0 ? next : pv_skip_stmt(p, i, end);
+      i = pv_scan_if_body(p, i, end, from_label, else_label);
+      if (i == (size_t)-1) {
+        *i_io = end;
+        return;
       }
     }
   }
@@ -1991,83 +2103,69 @@ static void pv_scan_if(pv_parser *p, size_t *i_io, size_t end,
 // "when <cond>: <entry>". Advances *i_io past the whole statement,
 // or to end on breakage. A subjectless `when { ... }` labels
 // entries under just "when".
+// One when entry's body after its '->': a braced block scanned as
+// a handler branch, or a single nav call / statement. Returns the
+// index past the body, or close when the body is broken.
+static size_t pv_scan_when_entry(pv_parser *p, size_t pos, size_t close,
+    char *from_label, char *branch) {
+  if (pos < close && pv_is_sym(&p->toks[pos], '{')) {
+    size_t bclose = pv_match_brace(p, pos);
+    if (bclose == (size_t)-1 || bclose > close) {
+      return close;
+    }
+    pv_scan_handler_branch(p, pos + 1, bclose, from_label, branch);
+    return bclose + 1;
+  }
+  if (pos < close && !pv_is_sym(&p->toks[pos], '}')) {
+    size_t next = pv_handler_nav_call(p, pos, close, from_label, branch);
+    if (next == (size_t)-1) {
+      return close;
+    }
+    return next != 0 ? next : pv_skip_stmt(p, pos, close);
+  }
+  return pos;
+}
+
+// The entries of a when body, from pos to the body's closing brace.
+static void pv_scan_when_entries(pv_parser *p, size_t pos, size_t close,
+    char *from_label, char *outer, char *base) {
+  while (pos < close) {
+    size_t start = pos;
+    size_t arrow = pv_find_arrow(p, start, close);
+    if (arrow == (size_t)-1) {
+      break;
+    }
+    char *entry_label = pv_trim_arena(p->arena, p->text,
+      p->toks[start].start, p->toks[arrow].start);
+    char *branch = pv_branch_entry(p, outer, base, entry_label);
+    pos = pv_scan_when_entry(p, arrow + 1, close, from_label, branch);
+  }
+}
+
 static void pv_scan_when(pv_parser *p, size_t *i_io, size_t end,
     char *from_label, char *outer) {
   size_t i = *i_io;
   char *cond = ccb_arena_strdup(p->arena, "");
-  char *base = NULL;
   i++;
   if (i < end && pv_is_sym(&p->toks[i], '(')) {
-    size_t close = pv_match_paren(p, i);
-    if (close == (size_t)-1) {
+    // A group closing at or past end is the same as a broken one
+    // here: either way the when has no body to scan.
+    size_t after = pv_skip_paren(p, i, end);
+    if (after >= end) {
       *i_io = end;
       return;
     }
     cond = pv_paren_text(p, i);
-    i = close + 1;
+    i = after;
   }
-  base = pv_branch_label(p, "when", cond);
+  char *base = pv_branch_label(p, "when", cond);
   if (i < end && pv_is_sym(&p->toks[i], '{')) {
     size_t close = pv_match_brace(p, i);
-    size_t pos = 0;
     if (close == (size_t)-1) {
       *i_io = end;
       return;
     }
-    pos = i + 1;
-    while (pos < close) {
-      size_t start = pos;
-      size_t arrow = (size_t)-1;
-      long paren_depth = 0;
-      long brace_depth = 0;
-      size_t k = pos;
-      char *entry_label = NULL;
-      char *branch = NULL;
-      while (k < close) {
-        pv_token *t = &p->toks[k];
-        if (pv_is_sym(t, '(')) {
-          paren_depth++;
-        } else if (pv_is_sym(t, ')')) {
-          paren_depth--;
-        } else if (pv_is_sym(t, '{')) {
-          brace_depth++;
-        } else if (pv_is_sym(t, '}')) {
-          if (paren_depth == 0 && brace_depth == 0) {
-            break;
-          }
-          brace_depth--;
-        } else if (t->kind == PV_TK_ARROW && paren_depth == 0 &&
-            brace_depth == 0) {
-          arrow = k;
-          break;
-        }
-        k++;
-      }
-      if (arrow == (size_t)-1) {
-        break;
-      }
-      entry_label = pv_trim_arena(p->arena, p->text,
-        p->toks[start].start, p->toks[arrow].start);
-      branch = pv_branch_entry(p, outer, base, entry_label);
-      pos = arrow + 1;
-      if (pos < close && pv_is_sym(&p->toks[pos], '{')) {
-        size_t bclose = pv_match_brace(p, pos);
-        if (bclose == (size_t)-1 || bclose > close) {
-          pos = close;
-          break;
-        }
-        pv_scan_handler_branch(p, pos + 1, bclose, from_label, branch);
-        pos = bclose + 1;
-      } else if (pos < close && !pv_is_sym(&p->toks[pos], '}')) {
-        size_t next = pv_handler_nav_call(p, pos, close, from_label,
-          branch);
-        if (next == (size_t)-1) {
-          pos = close;
-          break;
-        }
-        pos = next != 0 ? next : pv_skip_stmt(p, pos, close);
-      }
-    }
+    pv_scan_when_entries(p, i + 1, close, from_label, outer, base);
     i = close + 1;
   } else if (i < end) {
     i = pv_skip_stmt(p, i, end);
@@ -2248,20 +2346,8 @@ static size_t pv_try_helper_call(pv_parser *p, size_t i, size_t end,
       return close + 1;
     }
     if (count > 1) {
-      size_t f = 0;
-      size_t g = 0;
       pv_warn_ambiguous(p, name, count, p->toks[i].line);
-      // Chunk C: every definition's navs are reported by P1024,
-      // so none of them is sweep territory either.
-      for (f = 0; f < p->index->nfiles; f++) {
-        for (g = 0; g < p->index->nfuns; g++) {
-          if (p->index->fun_files[g] == f &&
-              strcmp(p->index->fun_names[g], name) == 0) {
-            pv_mark_foreign_navs(p, f, name);
-            break;
-          }
-        }
-      }
+      pv_mark_ambiguous_navs(p, name);
       return close + 1;
     }
   }
@@ -2317,22 +2403,12 @@ static void pv_scan_handler_branch(pv_parser *p, size_t start, size_t end,
         i = pv_skip_stmt(p, i + 1, end);
         continue;
       }
-      {
-        size_t next = pv_handler_nav_call(p, i, end, from_label, branch);
-        if (next == (size_t)-1) {
-          return;
-        }
-        if (next != 0) {
-          i = next;
-          continue;
-        }
+      int stepped = pv_step_call(p, &i, end, from_label, branch);
+      if (stepped < 0) {
+        return;
       }
-      {
-        size_t next = pv_try_helper_call(p, i, end, from_label, branch);
-        if (next != 0) {
-          i = next;
-          continue;
-        }
+      if (stepped == 1) {
+        continue;
       }
     }
     i++;
@@ -2424,20 +2500,8 @@ static void pv_handle_named(pv_parser *p, const char *receiver,
       return;
     }
     if (count > 1) {
-      size_t f = 0;
-      size_t i = 0;
       pv_warn_ambiguous(p, hname, count, line);
-      // Chunk C: every definition's navs are reported by P1024,
-      // so none of them is sweep territory either.
-      for (f = 0; f < p->index->nfiles; f++) {
-        for (i = 0; i < p->index->nfuns; i++) {
-          if (p->index->fun_files[i] == f &&
-              strcmp(p->index->fun_names[i], hname) == 0) {
-            pv_mark_foreign_navs(p, f, hname);
-            break;
-          }
-        }
-      }
+      pv_mark_ambiguous_navs(p, hname);
       return;
     }
   }
@@ -2884,17 +2948,77 @@ static char *pv_branch_label(pv_parser *p, const char *keyword, const char *cond
 
 // Parse a when/if statement whose keyword is at p->pos, adding a
 // branch box under parent.
+// Condition text in parens at the cursor, or "" when there is none.
+// Advances past the closing paren (or to the end on breakage).
+static char *pv_take_cond(pv_parser *p) {
+  char *cond = ccb_arena_strdup(p->arena, "");
+  if (!pv_at_sym(p, '(')) {
+    return cond;
+  }
+  size_t open = p->pos;
+  cond = pv_paren_text(p, open);
+  size_t close = pv_match_paren(p, open);
+  p->pos = close == (size_t)-1 ? p->ntoks : close + 1;
+  return cond;
+}
+
+// Skip to (and past) the when body's closing '}', after a broken entry.
+static void pv_skip_to_close_brace(pv_parser *p) {
+  while (p->pos < p->ntoks && !pv_at_sym(p, '}')) {
+    p->pos++;
+  }
+  if (pv_at_sym(p, '}')) {
+    p->pos++;
+  }
+}
+
+// Parse one branch entry's body: a block, or a single statement.
+static void pv_parse_entry_body(pv_parser *p, pv_box *entry) {
+  if (pv_at_sym(p, '{')) {
+    pv_parse_block(p, entry);
+  } else if (p->pos < p->ntoks && !pv_at_sym(p, '}')) {
+    pv_parse_statement(p, entry);
+  }
+}
+
+// One when body: entries of "<label> -> <body>" up to the closing '}'.
+// The cursor is at the '{' on entry; depth is held for the body.
+static void pv_parse_when_body(pv_parser *p, pv_box *branch) {
+  p->pos++;
+  p->depth++;
+  while (p->pos < p->ntoks) {
+    if (pv_at_sym(p, '}')) {
+      p->pos++;
+      break;
+    }
+    size_t start = p->pos;
+    size_t arrow = pv_find_arrow(p, start, p->ntoks);
+    if (arrow == (size_t)-1) {
+      pv_broken(p, pv_cur_line(p));
+      pv_skip_to_close_brace(p);
+      break;
+    }
+    char *entry_label = pv_trim_arena(p->arena, p->text,
+      p->toks[start].start, p->toks[arrow].start);
+    pv_box *entry = pv_box_new(p->arena,
+      ccb_arena_strdup(p->arena, "branch-entry"), entry_label);
+    pv_box_add_child(p->arena, branch, entry);
+    pv_stack_push(p, entry);
+    p->pos = arrow + 1;
+    pv_parse_entry_body(p, entry);
+    pv_stack_pop(p);
+  }
+  if (p->pos >= p->ntoks) {
+    pv_broken(p, pv_cur_line(p));
+  }
+  p->depth--;
+}
+
 static void pv_parse_branch(pv_parser *p, pv_box *parent) {
   char *keyword = p->toks[p->pos].text;
   int is_when = strcmp(keyword, "when") == 0;
   p->pos++;
-  char *cond = ccb_arena_strdup(p->arena, "");
-  if (pv_at_sym(p, '(')) {
-    size_t open = p->pos;
-    cond = pv_paren_text(p, open);
-    size_t close = pv_match_paren(p, open);
-    p->pos = close == (size_t)-1 ? p->ntoks : close + 1;
-  }
+  char *cond = pv_take_cond(p);
   if (p->depth >= PV_MAX_DEPTH) {
     pv_broken(p, pv_cur_line(p));
     if (pv_at_sym(p, '{')) {
@@ -2910,67 +3034,7 @@ static void pv_parse_branch(pv_parser *p, pv_box *parent) {
   p->depth++;
   if (is_when) {
     if (pv_at_sym(p, '{')) {
-      p->pos++;
-      p->depth++;
-      while (p->pos < p->ntoks) {
-        if (pv_at_sym(p, '}')) {
-          p->pos++;
-          break;
-        }
-        // Find the top-level '->' for this entry.
-        size_t start = p->pos;
-        size_t arrow = (size_t)-1;
-        long paren_depth = 0;
-        long brace_depth = 0;
-        size_t i = p->pos;
-        while (i < p->ntoks) {
-          pv_token *t = &p->toks[i];
-          if (pv_is_sym(t, '(')) {
-            paren_depth++;
-          } else if (pv_is_sym(t, ')')) {
-            paren_depth--;
-          } else if (pv_is_sym(t, '{')) {
-            brace_depth++;
-          } else if (pv_is_sym(t, '}')) {
-            if (paren_depth == 0 && brace_depth == 0) {
-              break;
-            }
-            brace_depth--;
-          } else if (t->kind == PV_TK_ARROW && paren_depth == 0 && brace_depth == 0) {
-            arrow = i;
-            break;
-          }
-          i++;
-        }
-        if (arrow == (size_t)-1) {
-          pv_broken(p, pv_cur_line(p));
-          // Skip to the closing brace of the when body, if any.
-          while (p->pos < p->ntoks && !pv_at_sym(p, '}')) {
-            p->pos++;
-          }
-          if (pv_at_sym(p, '}')) {
-            p->pos++;
-          }
-          break;
-        }
-        char *entry_label = pv_trim_arena(p->arena, p->text,
-          p->toks[start].start, p->toks[arrow].start);
-        pv_box *entry = pv_box_new(p->arena,
-          ccb_arena_strdup(p->arena, "branch-entry"), entry_label);
-        pv_box_add_child(p->arena, branch, entry);
-        pv_stack_push(p, entry);
-        p->pos = arrow + 1;
-        if (pv_at_sym(p, '{')) {
-          pv_parse_block(p, entry);
-        } else if (p->pos < p->ntoks && !pv_at_sym(p, '}')) {
-          pv_parse_statement(p, entry);
-        }
-        pv_stack_pop(p);
-      }
-      if (p->pos >= p->ntoks) {
-        pv_broken(p, pv_cur_line(p));
-      }
-      p->depth--;
+      pv_parse_when_body(p, branch);
     }
   } else {
     // if: one "then" entry, then an else chain.
@@ -2979,35 +3043,20 @@ static void pv_parse_branch(pv_parser *p, pv_box *parent) {
       ccb_arena_strdup(p->arena, "then"));
     pv_box_add_child(p->arena, branch, then_entry);
     pv_stack_push(p, then_entry);
-    if (pv_at_sym(p, '{')) {
-      pv_parse_block(p, then_entry);
-    } else if (p->pos < p->ntoks && !pv_at_sym(p, '}')) {
-      pv_parse_statement(p, then_entry);
-    }
+    pv_parse_entry_body(p, then_entry);
     pv_stack_pop(p);
     while (pv_at_ident(p, "else")) {
       p->pos++;
       char *else_label = ccb_arena_strdup(p->arena, "else");
       if (pv_at_ident(p, "if")) {
         p->pos++;
-        char *else_cond = ccb_arena_strdup(p->arena, "");
-        if (pv_at_sym(p, '(')) {
-          size_t open = p->pos;
-          else_cond = pv_paren_text(p, open);
-          size_t close = pv_match_paren(p, open);
-          p->pos = close == (size_t)-1 ? p->ntoks : close + 1;
-        }
-        else_label = pv_branch_label(p, "else if", else_cond);
+        else_label = pv_branch_label(p, "else if", pv_take_cond(p));
       }
       pv_box *else_entry = pv_box_new(p->arena,
         ccb_arena_strdup(p->arena, "branch-entry"), else_label);
       pv_box_add_child(p->arena, branch, else_entry);
       pv_stack_push(p, else_entry);
-      if (pv_at_sym(p, '{')) {
-        pv_parse_block(p, else_entry);
-      } else if (p->pos < p->ntoks && !pv_at_sym(p, '}')) {
-        pv_parse_statement(p, else_entry);
-      }
+      pv_parse_entry_body(p, else_entry);
       pv_stack_pop(p);
     }
   }
@@ -3057,6 +3106,116 @@ ccb_status pv_flow_parse_bindings(ccb_arena *arena, const char *text,
   return pv_flow_parse_full(arena, text, file, diags, screens_io,
     nscreens_io, bind_keys, bind_vals, nbind, NULL, NULL, 0, NULL, NULL,
     0, NULL, NULL);
+}
+
+// Scan an android:onClick method fun's body into the pending list:
+// one pending edge per bound label for the method. The cursor is at
+// the fun's opening brace; the body runs to close.
+static void pv_scan_onclick_handler(pv_parser *p, char *name, size_t close) {
+  if (p->pending_io == NULL) {
+    return;
+  }
+  for (size_t k = 0; k < p->nonclick; k++) {
+    if (strcmp(p->onclick_methods[k], name) != 0) {
+      continue;
+    }
+    pv_screen *scratch = ccb_arena_alloc(p->arena, sizeof(*scratch));
+    pv_screen *saved = p->screen;
+    memset(scratch, 0, sizeof(*scratch));
+    scratch->name = name;
+    p->screen = scratch;
+    pv_scan_handler_body(p, p->pos + 1, close,
+      ccb_arena_strdup(p->arena, p->onclick_labels[k]));
+    p->screen = saved;
+    for (size_t e = 0; e < scratch->nedges; e++) {
+      pv_pending_add(p, p->onclick_methods[k], &scratch->edges[e]);
+    }
+  }
+}
+
+// A top-level fun that is a handler, not a screen: skip its body
+// (scanning onClick bodies into the pending list). Returns 1 when
+// the fun was a handler. On a broken body the cursor is left at
+// the end, so the caller exits the loop either way.
+static int pv_skip_handler_fun(pv_parser *p, char *name, long line) {
+  if (!pv_is_handler(p, name)) {
+    return 0;
+  }
+  size_t close = pv_match_brace(p, p->pos);
+  if (close == (size_t)-1) {
+    pv_broken(p, line);
+    p->pos = p->ntoks;
+    return 1;
+  }
+  pv_scan_onclick_handler(p, name, close);
+  p->pos = close + 1;
+  return 1;
+}
+
+// A top-level fun that is a screen: parse its body into a new screen.
+static void pv_parse_screen_fun(pv_parser *p, ccb_arena *arena,
+    pv_screen ***screens_io, size_t *nscreens_io, char *name) {
+  pv_screen *screen = ccb_arena_alloc(arena, sizeof(*screen));
+  memset(screen, 0, sizeof(*screen));
+  screen->name = name;
+  screen->root = pv_box_new(arena, ccb_arena_strdup(arena, "screen"), NULL);
+  pv_screen_add(arena, screens_io, nscreens_io, screen);
+  p->screen = screen;
+  pv_stack_push(p, screen->root);
+  // Chunk B: a new screen fun starts with an empty val map;
+  // bindings never leak across screens.
+  p->nvals = 0;
+  pv_parse_block(p, screen->root);
+  pv_stack_pop(p);
+  p->screen = NULL;
+}
+
+// One top-level fun at the cursor: parse it as a screen or skip it
+// as a handler. Returns 1 when the cursor was at a fun (handled),
+// 0 when it was not a fun at top level. A broken fun leaves the
+// cursor at the end (or one past a nameless fun), so the caller
+// exits the loop either way.
+static int pv_try_top_fun(pv_parser *p, ccb_arena *arena,
+    pv_screen ***screens_io, size_t *nscreens_io, long top_depth) {
+  if (top_depth != 0 || !pv_is_ident(&p->toks[p->pos], "fun")) {
+    return 0;
+  }
+  if (p->pos + 1 >= p->ntoks || p->toks[p->pos + 1].kind != PV_TK_IDENT) {
+    pv_broken(p, pv_cur_line(p));
+    p->pos++;
+    return 1;
+  }
+  char *name = p->toks[p->pos + 1].text;
+  long line = p->toks[p->pos + 1].line;
+  p->pos += 2;
+  if (pv_at_sym(p, '(')) {
+    // A valid group ending exactly at the end is the same as a
+    // broken one here: either way there is no '{' after it, so
+    // the fun is broken and the loop ends.
+    size_t after = pv_skip_paren(p, p->pos, p->ntoks);
+    if (after >= p->ntoks) {
+      pv_broken(p, line);
+      p->pos = p->ntoks;
+      return 1;
+    }
+    p->pos = after;
+  }
+  if (!pv_at_sym(p, '{')) {
+    pv_broken(p, line);
+    return 1;
+  }
+  // Slice 1: a top-level fun referenced via :: from a screen
+  // body is a handler, not a screen. Skip its body; it is
+  // scanned only when an attachment references it.
+  // Slice 3: the same skip applies to android:onClick method
+  // funs, whose bodies are scanned here into the pending list
+  // (one pending edge per bound label for the method) for the
+  // caller to attach to the screens containing that label.
+  if (pv_skip_handler_fun(p, name, line)) {
+    return 1;
+  }
+  pv_parse_screen_fun(p, arena, screens_io, nscreens_io, name);
+  return 1;
 }
 
 static ccb_status pv_flow_parse_full_inner(ccb_arena *arena,
@@ -3137,78 +3296,7 @@ static ccb_status pv_flow_parse_full_inner(ccb_arena *arena,
       p.pos++;
       continue;
     }
-    if (top_depth == 0 && pv_is_ident(&p.toks[p.pos], "fun")) {
-      if (p.pos + 1 >= p.ntoks || p.toks[p.pos + 1].kind != PV_TK_IDENT) {
-        pv_broken(&p, pv_cur_line(&p));
-        p.pos++;
-        continue;
-      }
-      char *name = p.toks[p.pos + 1].text;
-      long line = p.toks[p.pos + 1].line;
-      p.pos += 2;
-      if (pv_at_sym(&p, '(')) {
-        size_t close = pv_match_paren(&p, p.pos);
-        if (close == (size_t)-1) {
-          pv_broken(&p, line);
-          p.pos = p.ntoks;
-          break;
-        }
-        p.pos = close + 1;
-      }
-      if (!pv_at_sym(&p, '{')) {
-        pv_broken(&p, line);
-        continue;
-      }
-      // Slice 1: a top-level fun referenced via :: from a screen
-      // body is a handler, not a screen. Skip its body; it is
-      // scanned only when an attachment references it.
-      // Slice 3: the same skip applies to android:onClick method
-      // funs, whose bodies are scanned here into the pending list
-      // (one pending edge per bound label for the method) for the
-      // caller to attach to the screens containing that label.
-      if (pv_is_handler(&p, name)) {
-        size_t close = pv_match_brace(&p, p.pos);
-        if (close == (size_t)-1) {
-          pv_broken(&p, line);
-          p.pos = p.ntoks;
-          break;
-        }
-        if (p.pending_io != NULL) {
-          size_t k = 0;
-          for (k = 0; k < p.nonclick; k++) {
-            if (strcmp(p.onclick_methods[k], name) == 0) {
-              pv_screen *scratch = ccb_arena_alloc(arena, sizeof(*scratch));
-              pv_screen *saved = p.screen;
-              size_t e = 0;
-              memset(scratch, 0, sizeof(*scratch));
-              scratch->name = name;
-              p.screen = scratch;
-              pv_scan_handler_body(&p, p.pos + 1, close,
-                ccb_arena_strdup(arena, p.onclick_labels[k]));
-              p.screen = saved;
-              for (e = 0; e < scratch->nedges; e++) {
-                pv_pending_add(&p, p.onclick_methods[k],
-                  &scratch->edges[e]);
-              }
-            }
-          }
-        }
-        p.pos = close + 1;
-        continue;
-      }
-      pv_screen *screen = ccb_arena_alloc(arena, sizeof(*screen));
-      memset(screen, 0, sizeof(*screen));
-      screen->name = name;
-      screen->root = pv_box_new(arena, ccb_arena_strdup(arena, "screen"), NULL);
-      pv_screen_add(arena, screens_io, nscreens_io, screen);
-      p.screen = screen;
-      pv_stack_push(&p, screen->root);
-      // Chunk B: a new screen fun starts with an empty val map;
-      // bindings never leak across screens.
-      p.nvals = 0;
-      pv_parse_block(&p, screen->root);
-      pv_stack_pop(&p);
-      p.screen = NULL;
+    if (pv_try_top_fun(&p, arena, screens_io, nscreens_io, top_depth)) {
       continue;
     }
     p.pos++;
@@ -3346,38 +3434,45 @@ void pv_render_edge_args(ccb_str *out, const pv_edge *e) {
 // branches line and filled args inline in the edge lines, so this
 // covers only the two value classes that have no tree line of their
 // own. Nothing is emitted for screens a scenario does not touch.
+// One list box's scenario rows: `scenario: list "label" = [...]`.
+// Nothing renders when the list has no scenario rows.
+static void pv_render_scenario_list(ccb_str *out, pv_box *box) {
+  size_t nrows = 0;
+  for (size_t i = 0; i < box->nchildren; i++) {
+    if (box->children[i]->from_scenario) {
+      nrows++;
+    }
+  }
+  if (nrows == 0) {
+    return;
+  }
+  int first = 1;
+  ccb_str_append(out, "  scenario: list \"");
+  ccb_str_append(out, box->label != NULL ? box->label : "");
+  ccb_str_append(out, "\" = [");
+  for (size_t i = 0; i < box->nchildren; i++) {
+    if (!box->children[i]->from_scenario) {
+      continue;
+    }
+    if (!first) {
+      ccb_str_append(out, ", ");
+    }
+    ccb_str_append(out, "\"");
+    ccb_str_append(out, box->children[i]->label != NULL ?
+      box->children[i]->label : "");
+    ccb_str_append(out, "\"");
+    first = 0;
+  }
+  ccb_str_append(out, "] [scenario]\n");
+}
+
 static void pv_render_scenario_lines(ccb_str *out, pv_box *box) {
   size_t i = 0;
   if (out == NULL || box == NULL) {
     return;
   }
   if (box->type != NULL && strcmp(box->type, "list") == 0) {
-    size_t nrows = 0;
-    for (i = 0; i < box->nchildren; i++) {
-      if (box->children[i]->from_scenario) {
-        nrows++;
-      }
-    }
-    if (nrows > 0) {
-      int first = 1;
-      ccb_str_append(out, "  scenario: list \"");
-      ccb_str_append(out, box->label != NULL ? box->label : "");
-      ccb_str_append(out, "\" = [");
-      for (i = 0; i < box->nchildren; i++) {
-        if (!box->children[i]->from_scenario) {
-          continue;
-        }
-        if (!first) {
-          ccb_str_append(out, ", ");
-        }
-        ccb_str_append(out, "\"");
-        ccb_str_append(out, box->children[i]->label != NULL ?
-          box->children[i]->label : "");
-        ccb_str_append(out, "\"");
-        first = 0;
-      }
-      ccb_str_append(out, "] [scenario]\n");
-    }
+    pv_render_scenario_list(out, box);
   } else if (box->type != NULL && strcmp(box->type, "textfield") == 0 &&
       box->scenario_text != NULL) {
     ccb_str_append(out, "  scenario: field \"");

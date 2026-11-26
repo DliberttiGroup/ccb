@@ -199,15 +199,12 @@ static int contains(const char *hay, const char *needle) {
 // [preview.bindings] body (NULL means no bindings table). Returns
 // the malloc'd project dir, or NULL.
 static char *make_scratch(const char *flow, const char *bindings) {
-  char tmpl[] = "/tmp/ccb-hand-XXXXXX";
-  char *dir = mkdtemp(tmpl);
+  char buf[64];
+  ccb_test_tmpdir(buf, sizeof buf, "hand");
   char *sub = NULL;
   char *path = NULL;
   ccb_str toml;
-  if (dir == NULL) {
-    return NULL;
-  }
-  dir = ccb_xstrdup(dir);
+  char *dir = ccb_xstrdup(buf);
   sub = join2(dir, "flow");
   mkdir(sub, 0777);
   free(sub);

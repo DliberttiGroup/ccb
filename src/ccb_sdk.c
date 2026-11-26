@@ -254,6 +254,15 @@ static int probe_stat(const char *path, long long *sec, long *nsec, long long *s
   return 1;
 }
 
+static int str_is_digits(const char *s) {
+  for (const char *c = s; *c != '\0'; c++) {
+    if (!isdigit((unsigned char)*c)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 char *ccb_sdk_probe_cache_lookup(const char *build_dir, const char *tool, const char *path) {
   if (build_dir == NULL || tool == NULL || path == NULL) {
     return NULL;
@@ -316,17 +325,8 @@ char *ccb_sdk_probe_cache_lookup(const char *build_dir, const char *tool, const 
       }
       // A java version is digits-only ("17"); anything else is a
       // corrupt entry, not a version worth trusting.
-      if (strcmp(tool, "java") == 0) {
-        int digits = 1;
-        for (const char *c = v->str; *c != '\0'; c++) {
-          if (!isdigit((unsigned char)*c)) {
-            digits = 0;
-            break;
-          }
-        }
-        if (!digits) {
-          continue;
-        }
+      if (strcmp(tool, "java") == 0 && !str_is_digits(v->str)) {
+        continue;
       }
       found = ccb_xstrdup(v->str);
       break;
@@ -345,6 +345,73 @@ typedef struct {
   char *version;
 } probe_entry;
 
+// Loads the cached probe entries for one build dir. A missing or
+// corrupt file starts fresh (count 0). Entries are heap-owned.
+// Validates one cached probe entry and appends it. Silently skips
+// malformed entries: the cache is advisory, the next build probes.
+static void probe_add_entry(probe_entry **entries, size_t *count, size_t *cap,
+    const ccb_json_value *e) {
+  if (e == NULL || e->type != CCB_JSON_OBJ) {
+    return;
+  }
+  const ccb_json_value *t = ccb_json_obj_get(e, "tool");
+  const ccb_json_value *p = ccb_json_obj_get(e, "path");
+  const ccb_json_value *ms = ccb_json_obj_get(e, "mtime_sec");
+  const ccb_json_value *mn = ccb_json_obj_get(e, "mtime_nsec");
+  const ccb_json_value *sz = ccb_json_obj_get(e, "size");
+  const ccb_json_value *v = ccb_json_obj_get(e, "version");
+  if (t == NULL || t->type != CCB_JSON_STR ||
+      p == NULL || p->type != CCB_JSON_STR ||
+      ms == NULL || ms->type != CCB_JSON_NUM ||
+      mn == NULL || mn->type != CCB_JSON_NUM ||
+      sz == NULL || sz->type != CCB_JSON_NUM ||
+      v == NULL || v->type != CCB_JSON_STR) {
+    return;
+  }
+  if (*count == *cap) {
+    *cap = *cap == 0 ? 4 : *cap * 2;
+    *entries = ccb_xrealloc(*entries, *cap * sizeof(**entries));
+  }
+  (*entries)[*count].tool = ccb_xstrdup(t->str);
+  (*entries)[*count].path = ccb_xstrdup(p->str);
+  (*entries)[*count].sec = (long long)ms->num;
+  (*entries)[*count].nsec = (long)mn->num;
+  (*entries)[*count].size = (long long)sz->num;
+  (*entries)[*count].version = ccb_xstrdup(v->str);
+  (*count)++;
+}
+
+static size_t probe_load_entries(const char *cpath, probe_entry **entries_out, size_t *cap_out) {
+  char *text = NULL;
+  size_t len = 0;
+  if (ccb_read_file(cpath, &text, &len) != CCB_OK) {
+    *entries_out = NULL;
+    *cap_out = 0;
+    return 0;
+  }
+  char *err = NULL;
+  ccb_json_value *doc = ccb_json_parse(ccb_slice_from(text), &err);
+  free(err);
+  free(text);
+  probe_entry *entries = NULL;
+  size_t count = 0;
+  size_t cap = 0;
+  if (doc != NULL && doc->type == CCB_JSON_OBJ) {
+    const ccb_json_value *ver = ccb_json_obj_get(doc, "version");
+    const ccb_json_value *probes = ccb_json_obj_get(doc, "probes");
+    if (ver != NULL && ver->type == CCB_JSON_NUM && ver->num == 1 &&
+        probes != NULL && probes->type == CCB_JSON_ARR) {
+      for (size_t i = 0; i < probes->count; i++) {
+        probe_add_entry(&entries, &count, &cap, probes->items[i]);
+      }
+    }
+  }
+  ccb_json_free(doc);
+  *entries_out = entries;
+  *cap_out = cap;
+  return count;
+}
+
 void ccb_sdk_probe_cache_store(const char *build_dir, const char *tool, const char *path, const char *version) {
   if (build_dir == NULL || tool == NULL || path == NULL || version == NULL) {
     return;
@@ -360,53 +427,7 @@ void ccb_sdk_probe_cache_store(const char *build_dir, const char *tool, const ch
   size_t count = 0;
   size_t cap = 0;
   char *cpath = probe_cache_path(build_dir);
-  char *text = NULL;
-  size_t len = 0;
-  if (ccb_read_file(cpath, &text, &len) == CCB_OK) {
-    char *err = NULL;
-    ccb_json_value *doc = ccb_json_parse(ccb_slice_from(text), &err);
-    free(err);
-    free(text);
-    if (doc != NULL && doc->type == CCB_JSON_OBJ) {
-      const ccb_json_value *ver = ccb_json_obj_get(doc, "version");
-      const ccb_json_value *probes = ccb_json_obj_get(doc, "probes");
-      if (ver != NULL && ver->type == CCB_JSON_NUM && ver->num == 1 &&
-          probes != NULL && probes->type == CCB_JSON_ARR) {
-        for (size_t i = 0; i < probes->count; i++) {
-          const ccb_json_value *e = probes->items[i];
-          if (e == NULL || e->type != CCB_JSON_OBJ) {
-            continue;
-          }
-          const ccb_json_value *t = ccb_json_obj_get(e, "tool");
-          const ccb_json_value *p = ccb_json_obj_get(e, "path");
-          const ccb_json_value *ms = ccb_json_obj_get(e, "mtime_sec");
-          const ccb_json_value *mn = ccb_json_obj_get(e, "mtime_nsec");
-          const ccb_json_value *sz = ccb_json_obj_get(e, "size");
-          const ccb_json_value *v = ccb_json_obj_get(e, "version");
-          if (t == NULL || t->type != CCB_JSON_STR ||
-              p == NULL || p->type != CCB_JSON_STR ||
-              ms == NULL || ms->type != CCB_JSON_NUM ||
-              mn == NULL || mn->type != CCB_JSON_NUM ||
-              sz == NULL || sz->type != CCB_JSON_NUM ||
-              v == NULL || v->type != CCB_JSON_STR) {
-            continue;
-          }
-          if (count == cap) {
-            cap = cap == 0 ? 4 : cap * 2;
-            entries = ccb_xrealloc(entries, cap * sizeof(*entries));
-          }
-          entries[count].tool = ccb_xstrdup(t->str);
-          entries[count].path = ccb_xstrdup(p->str);
-          entries[count].sec = (long long)ms->num;
-          entries[count].nsec = (long)mn->num;
-          entries[count].size = (long long)sz->num;
-          entries[count].version = ccb_xstrdup(v->str);
-          count++;
-        }
-      }
-    }
-    ccb_json_free(doc);
-  }
+  count = probe_load_entries(cpath, &entries, &cap);
   // Upsert by (tool, path).
   size_t at = count;
   for (size_t i = 0; i < count; i++) {
@@ -460,12 +481,12 @@ void ccb_sdk_probe_cache_store(const char *build_dir, const char *tool, const ch
   free(cpath);
 }
 
-ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *diags) {
-  *out = NULL;
-  size_t diag_before = diags->count;
-  ccb_sdk *s = ccb_xcalloc(1, sizeof(*s));
+// ---------- resolve: one helper per toolchain ----------
 
-  // SDK home.
+// SDK home: [sdk] home, then ANDROID_HOME, then ANDROID_SDK_ROOT,
+// then ~/Android/Sdk. The only resolver step that aborts the
+// whole resolve: without an SDK home nothing else can run.
+static ccb_status resolve_sdk_home(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
   const char *home = cfg->sdk_home;
   if (home == NULL) {
     home = getenv("ANDROID_HOME");
@@ -484,13 +505,58 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
   if (home == NULL || !ccb_path_is_dir(home)) {
     ccb_sdk_diag(diags, "CCB-E2001", "Android SDK not found: set [sdk] home in ccb.toml or ANDROID_HOME");
     free(default_home);
-    ccb_sdk_free(s);
     return CCB_ERR_TOOLCHAIN;
   }
   s->sdk_home = ccb_xstrdup(home);
   free(default_home);
+  return CCB_OK;
+}
 
-  // Build-tools.
+// One build-tools binary: the SDK copy first, then a runnable copy
+// on PATH for native tools. An override is already resolved (or
+// already diagnosed) by the caller, never overwritten here.
+static void resolve_build_tool(ccb_sdk *s, const char *tool, char **slot,
+    char **source, const char *override, ccb_diag_list *diags) {
+  if (override != NULL) {
+    return;
+  }
+  char *p = ccb_path_join(s->build_tools_dir, tool);
+  // Native tools only: aapt2 and zipalign are host binaries, so
+  // an SDK copy can exist yet not run (x86-64 binary on Termux
+  // aarch64). d8 and apksigner are Java and always run.
+  int is_native = strcmp(tool, "aapt2") == 0 || strcmp(tool, "zipalign") == 0;
+  const char *probe = strcmp(tool, "aapt2") == 0 ? "version" : NULL;
+  if (access(p, X_OK) == 0 && (!is_native || ccb_sdk_tool_runnable(p, probe))) {
+    *slot = p;
+    return;
+  }
+  if (is_native) {
+    // Fall back to a runnable copy on PATH (e.g. a Termux
+    // package). Overrides never fall back: an explicit choice
+    // that is broken fails instead.
+    char *on_path = ccb_sdk_find_on_path(tool);
+    if (on_path != NULL && ccb_sdk_tool_runnable(on_path, probe)) {
+      *slot = on_path;
+      if (source != NULL) {
+        free(*source);
+        *source = ccb_xstrdup("path");
+      }
+      free(p);
+      return;
+    }
+    free(on_path);
+  }
+  if (access(p, X_OK) == 0) {
+    ccb_sdk_diagf(diags, "CCB-E2009", "tool present but cannot run (wrong architecture?)", p);
+  } else {
+    ccb_sdk_diagf(diags, "CCB-E2009", "tool missing or not executable", p);
+  }
+  free(p);
+}
+
+// Build-tools: aapt2/zipalign overrides first, then the default
+// tools in the build-tools directory.
+static void resolve_build_tools(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
   s->build_tools_version = ccb_xstrdup(cfg->build_tools);
   s->build_tools_dir = ccb_path_join3(s->sdk_home, "build-tools", cfg->build_tools);
   // Tool overrides, highest precedence first: [sdk] key, then env var,
@@ -535,263 +601,261 @@ ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *
   }
   if (!ccb_path_is_dir(s->build_tools_dir)) {
     ccb_sdk_diagf(diags, "CCB-E2002", "build-tools not installed", s->build_tools_dir);
+    return;
+  }
+  resolve_build_tool(s, "aapt2", &s->aapt2, &s->aapt2_source, aapt2_override, diags);
+  resolve_build_tool(s, "d8", &s->d8, NULL, NULL, diags);
+  resolve_build_tool(s, "apksigner", &s->apksigner, NULL, NULL, diags);
+  resolve_build_tool(s, "zipalign", &s->zipalign, &s->zipalign_source, zipalign_override, diags);
+}
+
+// Platform android.jar for the configured compile_sdk.
+static void resolve_platform(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  ccb_str plat;
+  ccb_str_init(&plat);
+  ccb_str_append(&plat, s->sdk_home);
+  ccb_str_append(&plat, "/platforms/android-");
+  ccb_str_appendf(&plat, "%ld", cfg->compile_sdk);
+  char *plat_dir = ccb_str_steal(&plat);
+  s->android_jar = ccb_path_join(plat_dir, "android.jar");
+  if (!ccb_path_exists(s->android_jar)) {
+    ccb_sdk_diagf(diags, "CCB-E2003", "platform android.jar not found", s->android_jar);
+  }
+  free(plat_dir);
+}
+
+// One binary under $JAVA_HOME/bin, or NULL when absent / not runnable.
+static char *java_home_tool(const char *java_home, const char *name) {
+  if (java_home == NULL) {
+    return NULL;
+  }
+  char *p = ccb_path_join(java_home, name);
+  if (access(p, X_OK) == 0) {
+    return p;
+  }
+  free(p);
+  return NULL;
+}
+
+// java major version, from the probe cache when the binary is
+// unchanged, else by running java -version. Must be 17+.
+static void resolve_java_version(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  char *cached = ccb_sdk_probe_cache_lookup(cfg->build_dir, "java", s->java);
+  if (cached != NULL) {
+    s->java_major = atoi(cached);
+    free(cached);
+    if (s->java_major < 17) {
+      ccb_sdk_diag(diags, "CCB-E2005", "java must be 17 or newer");
+    }
+    return;
+  }
+  char *argv[] = { s->java, "-version", NULL };
+  ccb_proc_result r;
+  if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
+    s->java_major = ccb_parse_java_major(r.err);
+    if (s->java_major < 17) {
+      ccb_sdk_diag(diags, "CCB-E2005", "java must be 17 or newer");
+    }
+    ccb_proc_result_free(&r);
   } else {
-    static const char *tools[] = { "aapt2", "d8", "apksigner", "zipalign" };
-    char **slots[] = { &s->aapt2, &s->d8, &s->apksigner, &s->zipalign };
-    for (int i = 0; i < 4; i++) {
-      // An overridden tool is already resolved (or already diagnosed)
-      // above; never overwrite it with the default path.
-      if ((strcmp(tools[i], "aapt2") == 0 && aapt2_override != NULL) ||
-          (strcmp(tools[i], "zipalign") == 0 && zipalign_override != NULL)) {
-        continue;
-      }
-      char *p = ccb_path_join(s->build_tools_dir, tools[i]);
-      // Native tools only: aapt2 and zipalign are host binaries, so
-      // an SDK copy can exist yet not run (x86-64 binary on Termux
-      // aarch64). d8 and apksigner are Java and always run.
-      int is_native = strcmp(tools[i], "aapt2") == 0 || strcmp(tools[i], "zipalign") == 0;
-      const char *probe = strcmp(tools[i], "aapt2") == 0 ? "version" : NULL;
-      if (access(p, X_OK) == 0 && (!is_native || ccb_sdk_tool_runnable(p, probe))) {
-        *slots[i] = p;
-        continue;
-      }
-      if (is_native) {
-        // Fall back to a runnable copy on PATH (e.g. a Termux
-        // package). Overrides never fall back: an explicit choice
-        // that is broken fails instead.
-        char *on_path = ccb_sdk_find_on_path(tools[i]);
-        if (on_path != NULL && ccb_sdk_tool_runnable(on_path, probe)) {
-          *slots[i] = on_path;
-          if (strcmp(tools[i], "aapt2") == 0) {
-            free(s->aapt2_source);
-            s->aapt2_source = ccb_xstrdup("path");
-          } else {
-            free(s->zipalign_source);
-            s->zipalign_source = ccb_xstrdup("path");
-          }
-          free(p);
-          continue;
-        }
-        free(on_path);
-      }
-      if (access(p, X_OK) == 0) {
-        ccb_sdk_diagf(diags, "CCB-E2009", "tool present but cannot run (wrong architecture?)", p);
-      } else {
-        ccb_sdk_diagf(diags, "CCB-E2009", "tool missing or not executable", p);
-      }
-      free(p);
-    }
+    ccb_sdk_diag(diags, "CCB-E2005", "could not run java -version");
   }
+}
 
-  // Platform android.jar.
-  {
-    ccb_str plat;
-    ccb_str_init(&plat);
-    ccb_str_append(&plat, s->sdk_home);
-    ccb_str_append(&plat, "/platforms/android-");
-    ccb_str_appendf(&plat, "%ld", cfg->compile_sdk);
-    char *plat_dir = ccb_str_steal(&plat);
-    s->android_jar = ccb_path_join(plat_dir, "android.jar");
-    if (!ccb_path_exists(s->android_jar)) {
-      ccb_sdk_diagf(diags, "CCB-E2003", "platform android.jar not found", s->android_jar);
-    }
-    free(plat_dir);
+// java + javac: $JAVA_HOME/bin first, then PATH.
+static void resolve_java(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  const char *java_home = getenv("JAVA_HOME");
+  s->java = java_home_tool(java_home, "bin/java");
+  if (s->java == NULL) {
+    s->java = ccb_sdk_find_on_path("java");
   }
+  if (s->java == NULL) {
+    ccb_sdk_diag(diags, "CCB-E2005", "java not found: set JAVA_HOME or put java 17+ on PATH");
+  } else {
+    resolve_java_version(cfg, s, diags);
+  }
+  s->javac = java_home_tool(java_home, "bin/javac");
+  if (s->javac == NULL) {
+    s->javac = ccb_sdk_find_on_path("javac");
+  }
+  if (s->javac == NULL) {
+    ccb_sdk_diag(diags, "CCB-E2005", "javac not found: set JAVA_HOME or put javac on PATH");
+  }
+}
 
-  // Java.
-  {
-    const char *java_home = getenv("JAVA_HOME");
-    if (java_home != NULL) {
-      char *p = ccb_path_join(java_home, "bin/java");
-      if (access(p, X_OK) == 0) {
-        s->java = p;
-      } else {
-        free(p);
-      }
+// kotlinc from one home directory: <home>/bin/kotlinc, tolerating
+// the unzip layout where the home points at the parent of the
+// distribution's kotlinc/ directory. Leaves s->kotlinc NULL when
+// neither layout has a runnable kotlinc.
+static void resolve_kotlin_home(const char *kh, ccb_sdk *s) {
+  if (kh == NULL || !ccb_path_is_dir(kh)) {
+    return;
+  }
+  s->kotlin_home = ccb_xstrdup(kh);
+  s->kotlinc = ccb_path_join3(kh, "bin", "kotlinc");
+  if (access(s->kotlinc, X_OK) == 0) {
+    return;
+  }
+  free(s->kotlinc);
+  char *nested = ccb_path_join(kh, "kotlinc");
+  s->kotlinc = ccb_path_join(nested, "bin/kotlinc");
+  if (access(s->kotlinc, X_OK) == 0) {
+    free(s->kotlin_home);
+    s->kotlin_home = nested;
+    return;
+  }
+  free(nested);
+  s->kotlinc = NULL;
+}
+
+// kotlinc version, from the probe cache when the binary is
+// unchanged, else by running kotlinc -version. Must be 2.x.
+static void resolve_kotlin_version(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  char *cached = ccb_sdk_probe_cache_lookup(cfg->build_dir, "kotlinc", s->kotlinc);
+  if (cached != NULL) {
+    s->kotlin_version = cached;
+    if (s->kotlin_version[0] != '2') {
+      ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
     }
-    if (s->java == NULL) {
-      s->java = ccb_sdk_find_on_path("java");
+    return;
+  }
+  char *argv[] = { s->kotlinc, "-version", NULL };
+  ccb_proc_result r;
+  if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
+    s->kotlin_version = ccb_sdk_parse_kotlin_version(r.err);
+    if (s->kotlin_version == NULL || s->kotlin_version[0] != '2') {
+      ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
     }
-    if (s->java == NULL) {
-      ccb_sdk_diag(diags, "CCB-E2005", "java not found: set JAVA_HOME or put java 17+ on PATH");
+    ccb_proc_result_free(&r);
+  } else {
+    ccb_sdk_diag(diags, "CCB-E2004", "could not run kotlinc -version");
+  }
+}
+
+// kotlinc: [sdk] kotlin_home / KOTLIN_HOME, then PATH, then the
+// setup-installed compiler under <sdk-home>/kotlinc.
+static void resolve_kotlin(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  const char *kh = cfg->kotlin_home;
+  if (kh == NULL) {
+    kh = getenv("KOTLIN_HOME");
+  }
+  resolve_kotlin_home(kh, s);
+  if (s->kotlinc == NULL) {
+    s->kotlinc = ccb_sdk_find_on_path("kotlinc");
+  }
+  if (s->kotlinc == NULL && s->sdk_home != NULL) {
+    // Setup-installed compiler: <sdk-home>/kotlinc. Last resort,
+    // after explicit config, KOTLIN_HOME, and PATH.
+    char *installed_home = ccb_path_join(s->sdk_home, "kotlinc");
+    char *installed = ccb_path_join(installed_home, "bin/kotlinc");
+    if (access(installed, X_OK) == 0) {
+      s->kotlin_home = installed_home;
+      s->kotlinc = installed;
     } else {
-      // A cached probe for the unchanged binary skips the JVM spawn.
-      char *cached = ccb_sdk_probe_cache_lookup(cfg->build_dir, "java", s->java);
-      if (cached != NULL) {
-        s->java_major = atoi(cached);
-        free(cached);
-        if (s->java_major < 17) {
-          ccb_sdk_diag(diags, "CCB-E2005", "java must be 17 or newer");
-        }
-      } else {
-        char *argv[] = { s->java, "-version", NULL };
-        ccb_proc_result r;
-        if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
-          s->java_major = ccb_parse_java_major(r.err);
-          if (s->java_major < 17) {
-            ccb_sdk_diag(diags, "CCB-E2005", "java must be 17 or newer");
-          }
-          ccb_proc_result_free(&r);
-        } else {
-          ccb_sdk_diag(diags, "CCB-E2005", "could not run java -version");
-        }
-      }
-    }
-    if (java_home != NULL) {
-      char *p = ccb_path_join(java_home, "bin/javac");
-      if (access(p, X_OK) == 0) {
-        s->javac = p;
-      } else {
-        free(p);
-      }
-    }
-    if (s->javac == NULL) {
-      s->javac = ccb_sdk_find_on_path("javac");
-    }
-    if (s->javac == NULL) {
-      ccb_sdk_diag(diags, "CCB-E2005", "javac not found: set JAVA_HOME or put javac on PATH");
+      free(installed_home);
+      free(installed);
     }
   }
-
-  // Kotlin.
-  {
-    const char *kh = cfg->kotlin_home;
-    if (kh == NULL) {
-      kh = getenv("KOTLIN_HOME");
-    }
-    if (kh != NULL && ccb_path_is_dir(kh)) {
-      s->kotlin_home = ccb_xstrdup(kh);
-      s->kotlinc = ccb_path_join3(kh, "bin", "kotlinc");
-      if (access(s->kotlinc, X_OK) != 0) {
-        // Tolerate the common unzip layout where KOTLIN_HOME points at
-        // the parent of the distribution's kotlinc/ directory.
-        free(s->kotlinc);
-        char *nested = ccb_path_join(kh, "kotlinc");
-        s->kotlinc = ccb_path_join(nested, "bin/kotlinc");
-        if (access(s->kotlinc, X_OK) == 0) {
-          free(s->kotlin_home);
-          s->kotlin_home = nested;
-        } else {
-          free(nested);
-          s->kotlinc = NULL;
-        }
-      }
-    }
-    if (s->kotlinc == NULL) {
-      char *on_path = ccb_sdk_find_on_path("kotlinc");
-      if (on_path != NULL) {
-        s->kotlinc = on_path;
-      }
-    }
-    if (s->kotlinc == NULL && s->sdk_home != NULL) {
-      // Setup-installed compiler: <sdk-home>/kotlinc. Last resort,
-      // after explicit config, KOTLIN_HOME, and PATH.
-      char *installed_home = ccb_path_join(s->sdk_home, "kotlinc");
-      char *installed = ccb_path_join(installed_home, "bin/kotlinc");
-      if (access(installed, X_OK) == 0) {
-        s->kotlin_home = installed_home;
-        s->kotlinc = installed;
-      } else {
-        free(installed_home);
-        free(installed);
-      }
-    }
-    if (s->kotlinc == NULL) {
-      ccb_sdk_diag(diags, "CCB-E2004", "kotlinc not found: set [sdk] kotlin_home in ccb.toml or KOTLIN_HOME");
-    } else {
-      // A cached probe for the unchanged binary skips the JVM spawn.
-      char *cached = ccb_sdk_probe_cache_lookup(cfg->build_dir, "kotlinc", s->kotlinc);
-      if (cached != NULL) {
-        s->kotlin_version = cached;
-        if (s->kotlin_version[0] != '2') {
-          ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
-        }
-      } else {
-        char *argv[] = { s->kotlinc, "-version", NULL };
-        ccb_proc_result r;
-        if (ccb_proc_run(argv, NULL, NULL, &r) == CCB_OK) {
-          s->kotlin_version = ccb_sdk_parse_kotlin_version(r.err);
-          if (s->kotlin_version == NULL || s->kotlin_version[0] != '2') {
-            ccb_sdk_diag(diags, "CCB-E2006", "kotlinc must be 2.x");
-          }
-          ccb_proc_result_free(&r);
-        } else {
-          ccb_sdk_diag(diags, "CCB-E2004", "could not run kotlinc -version");
-        }
-      }
-    }
+  if (s->kotlinc == NULL) {
+    ccb_sdk_diag(diags, "CCB-E2004", "kotlinc not found: set [sdk] kotlin_home in ccb.toml or KOTLIN_HOME");
+  } else {
+    resolve_kotlin_version(cfg, s, diags);
   }
+}
 
-  // r8: explicit [sdk] r8_jar wins; else the setup-managed copy at
-  // <sdk-home>/r8/r8.jar. Absent r8 is not a resolve failure: only
-  // release+minify builds need it, and the build reports that.
+// r8: explicit [sdk] r8_jar wins; else the setup-managed copy at
+// <sdk-home>/r8/r8.jar. Absent r8 is not a resolve failure: only
+// release+minify builds need it, and the build reports that.
+static void resolve_r8(const ccb_config *cfg, ccb_sdk *s) {
   if (cfg->r8_jar != NULL) {
     s->r8_jar = ccb_xstrdup(cfg->r8_jar);
     s->r8_source = ccb_xstrdup("config");
+    return;
+  }
+  char *cand = ccb_path_join3(s->sdk_home, "r8", "r8.jar");
+  if (ccb_path_exists(cand)) {
+    s->r8_jar = cand;
+    s->r8_source = ccb_xstrdup("sdk-home");
   } else {
-    char *cand = ccb_path_join3(s->sdk_home, "r8", "r8.jar");
-    if (ccb_path_exists(cand)) {
-      s->r8_jar = cand;
-      s->r8_source = ccb_xstrdup("sdk-home");
-    } else {
-      free(cand);
-    }
+    free(cand);
   }
-  // NDK (only when the project declares one).
-  if (cfg->has_ndk) {
-    if (cfg->ndk_version == NULL) {
-      ccb_sdk_diag(diags, "CCB-E2007", "ndk section present but sdk.ndk_version is not set");
-    } else {
-      s->ndk_home = ccb_path_join3(s->sdk_home, "ndk", cfg->ndk_version);
-      if (!ccb_path_is_dir(s->ndk_home)) {
-        ccb_sdk_diagf(diags, "CCB-E2007", "NDK not installed", s->ndk_home);
-      } else {
-        char *props = ccb_path_join(s->ndk_home, "source.properties");
-        char *text = NULL;
-        size_t len = 0;
-        int rev_ok = 0;
-        if (ccb_read_file(props, &text, &len) == CCB_OK) {
-          // source.properties writes "Pkg.Revision = 27.0.12077973"
-          // (spaces around '='), so parse the value, don't substring it.
-          const char *m = strstr(text, "Pkg.Revision");
-          if (m != NULL) {
-            const char *eq = strchr(m, '=');
-            if (eq != NULL) {
-              eq++;
-              while (*eq == ' ' || *eq == '\t') {
-                eq++;
-              }
-              size_t vlen = 0;
-              while (eq[vlen] != '\0' && eq[vlen] != '\n' && eq[vlen] != '\r' &&
-                  eq[vlen] != ' ' && eq[vlen] != '\t') {
-                vlen++;
-              }
-              if (strlen(cfg->ndk_version) == vlen &&
-                  strncmp(eq, cfg->ndk_version, vlen) == 0) {
-                rev_ok = 1;
-              }
-            }
-          }
-          free(text);
-        }
-        free(props);
-        if (!rev_ok) {
-          ccb_sdk_diagf(diags, "CCB-E2008", "NDK revision mismatch", s->ndk_home);
-        }
-        ccb_str clang;
-        ccb_str_init(&clang);
-        ccb_str_append(&clang, s->ndk_home);
-        ccb_str_append(&clang, "/toolchains/llvm/prebuilt/");
-        ccb_str_append(&clang, ccb_host_tag());
-        ccb_str_append(&clang, "/bin/clang");
-        s->ndk_clang = ccb_str_steal(&clang);
-        if (access(s->ndk_clang, X_OK) != 0) {
-          ccb_sdk_diagf(diags, "CCB-E2009", "NDK clang missing or not executable", s->ndk_clang);
-        }
-      }
-    }
-  }
+}
 
+// "Pkg.Revision = 27.0.12077973" (spaces around '='): parse the
+// value, don't substring it.
+static int ndk_revision_matches(const char *text, const char *version) {
+  const char *m = strstr(text, "Pkg.Revision");
+  if (m == NULL) {
+    return 0;
+  }
+  const char *eq = strchr(m, '=');
+  if (eq == NULL) {
+    return 0;
+  }
+  eq++;
+  while (*eq == ' ' || *eq == '\t') {
+    eq++;
+  }
+  size_t vlen = 0;
+  while (eq[vlen] != '\0' && eq[vlen] != '\n' && eq[vlen] != '\r' &&
+      eq[vlen] != ' ' && eq[vlen] != '\t') {
+    vlen++;
+  }
+  return strlen(version) == vlen && strncmp(eq, version, vlen) == 0;
+}
+
+// NDK, only when the project declares one.
+static void resolve_ndk(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  if (!cfg->has_ndk) {
+    return;
+  }
+  if (cfg->ndk_version == NULL) {
+    ccb_sdk_diag(diags, "CCB-E2007", "ndk section present but sdk.ndk_version is not set");
+    return;
+  }
+  s->ndk_home = ccb_path_join3(s->sdk_home, "ndk", cfg->ndk_version);
+  if (!ccb_path_is_dir(s->ndk_home)) {
+    ccb_sdk_diagf(diags, "CCB-E2007", "NDK not installed", s->ndk_home);
+    return;
+  }
+  char *props = ccb_path_join(s->ndk_home, "source.properties");
+  char *text = NULL;
+  size_t len = 0;
+  int rev_ok = 0;
+  if (ccb_read_file(props, &text, &len) == CCB_OK) {
+    rev_ok = ndk_revision_matches(text, cfg->ndk_version);
+    free(text);
+  }
+  free(props);
+  if (!rev_ok) {
+    ccb_sdk_diagf(diags, "CCB-E2008", "NDK revision mismatch", s->ndk_home);
+  }
+  ccb_str clang;
+  ccb_str_init(&clang);
+  ccb_str_append(&clang, s->ndk_home);
+  ccb_str_append(&clang, "/toolchains/llvm/prebuilt/");
+  ccb_str_append(&clang, ccb_host_tag());
+  ccb_str_append(&clang, "/bin/clang");
+  s->ndk_clang = ccb_str_steal(&clang);
+  if (access(s->ndk_clang, X_OK) != 0) {
+    ccb_sdk_diagf(diags, "CCB-E2009", "NDK clang missing or not executable", s->ndk_clang);
+  }
+}
+
+ccb_status ccb_sdk_resolve(const ccb_config *cfg, ccb_sdk **out, ccb_diag_list *diags) {
+  *out = NULL;
+  size_t diag_before = diags->count;
+  ccb_sdk *s = ccb_xcalloc(1, sizeof(*s));
+  if (resolve_sdk_home(cfg, s, diags) != CCB_OK) {
+    ccb_sdk_free(s);
+    return CCB_ERR_TOOLCHAIN;
+  }
+  resolve_build_tools(cfg, s, diags);
+  resolve_platform(cfg, s, diags);
+  resolve_java(cfg, s, diags);
+  resolve_kotlin(cfg, s, diags);
+  resolve_r8(cfg, s);
+  resolve_ndk(cfg, s, diags);
   if (diags->count > diag_before) {
     ccb_sdk_free(s);
     return CCB_ERR_TOOLCHAIN;

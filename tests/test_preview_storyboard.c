@@ -148,18 +148,13 @@ static int count_occurrences(const char *hay, const char *needle) {
 }
 
 int main(void) {
-  char tmpl[] = "/tmp/ccb-sb-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "sb");
   char *sdir = sample_dir();
   char *cap_path = NULL;
   char *out_path = NULL;
   char *text = NULL;
   int rc = -1;
-  CHECK(scratch != NULL);
-  if (scratch == NULL) {
-    free(sdir);
-    TEST_MAIN_END();
-  }
   cap_path = join2(scratch, "cap.txt");
   out_path = join2(scratch, "out.txt");
 

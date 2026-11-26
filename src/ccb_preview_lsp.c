@@ -123,6 +123,37 @@ typedef enum {
   PV_LSP_RESOURCES
 } pv_lsp_kind;
 
+// True when path is an .xml under a navigation/layout fallback dir
+// (resources or [paths] res, subdirs navigation/layout).
+static int lsp_under_fallback_xml(const ccb_config *cfg,
+    const char *path) {
+  const char *roots[2];
+  const char *subs[2];
+  size_t r = 0;
+  roots[0] = cfg->preview_resources;
+  roots[1] = cfg->res;
+  subs[0] = "navigation";
+  subs[1] = "layout";
+  // navigation lives under resources/res; layout too. Check both
+  // subdirs under both roots (cheap string compares).
+  for (r = 0; r < 2; r++) {
+    size_t k = 0;
+    if (roots[r] == NULL) {
+      continue;
+    }
+    for (k = 0; k < 2; k++) {
+      char *dir = ccb_path_join(roots[r], subs[k]);
+      int hit = lsp_path_under(path, dir) &&
+        lsp_has_suffix(path, ".xml");
+      free(dir);
+      if (hit) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 static pv_lsp_kind lsp_classify(pv_lsp_server *s, const char *path) {
   if (path == NULL) {
     return PV_LSP_IGNORE;
@@ -175,31 +206,8 @@ static pv_lsp_kind lsp_classify(pv_lsp_server *s, const char *path) {
     // Fallbacks from pv_nav_path/pv_layout_path: resources or [paths]
     // res subdirectories. These mirror load's resolution so an XML
     // change under a fallback dir is classified, not ignored.
-    {
-      const char *roots[2];
-      const char *subs[2];
-      size_t r = 0;
-      roots[0] = s->cfg->preview_resources;
-      roots[1] = s->cfg->res;
-      subs[0] = "navigation";
-      subs[1] = "layout";
-      // navigation lives under resources/res; layout too. Check both
-      // subdirs under both roots (cheap string compares).
-      for (r = 0; r < 2; r++) {
-        size_t k = 0;
-        if (roots[r] == NULL) {
-          continue;
-        }
-        for (k = 0; k < 2; k++) {
-          char *dir = ccb_path_join(roots[r], subs[k]);
-          int hit = lsp_path_under(path, dir) &&
-            lsp_has_suffix(path, ".xml");
-          free(dir);
-          if (hit) {
-            return PV_LSP_XML;
-          }
-        }
-      }
+    if (lsp_under_fallback_xml(s->cfg, path)) {
+      return PV_LSP_XML;
     }
   }
   return PV_LSP_IGNORE;
@@ -405,11 +413,24 @@ static pv_box *lsp_copy_box(ccb_arena *arena, const pv_box *src) {
   return dst;
 }
 
+// Copy one edge's args (and args_named flags) into the arena copy.
+static void lsp_copy_args(ccb_arena *arena, pv_edge *de,
+    const pv_edge *se) {
+  size_t k = 0;
+  de->args = ccb_arena_alloc(arena, se->nargs * sizeof(*de->args));
+  de->args_named = ccb_arena_alloc(arena, se->nargs * sizeof(int));
+  for (k = 0; k < se->nargs; k++) {
+    de->args[k] = se->args[k];
+    de->args_named[k] = se->args_named != NULL ?
+      se->args_named[k] : 0;
+  }
+  de->nargs = se->nargs;
+}
+
 static pv_screen *lsp_copy_screen(ccb_arena *arena,
     const pv_screen *src) {
   pv_screen *dst = NULL;
   size_t i = 0;
-  size_t k = 0;
   if (src == NULL) {
     return NULL;
   }
@@ -432,16 +453,7 @@ static pv_screen *lsp_copy_screen(ccb_arena *arena,
       de->branch = se->branch;
       de->derived = se->derived;
       if (se->nargs > 0) {
-        de->args = ccb_arena_alloc(arena,
-          se->nargs * sizeof(*de->args));
-        de->args_named = ccb_arena_alloc(arena,
-          se->nargs * sizeof(int));
-        for (k = 0; k < se->nargs; k++) {
-          de->args[k] = se->args[k];
-          de->args_named[k] = se->args_named != NULL ?
-            se->args_named[k] : 0;
-        }
-        de->nargs = se->nargs;
+        lsp_copy_args(arena, de, se);
       }
       // args_scenario/args_trace NULL, trace_taken 0: fresh state.
     }
@@ -1059,6 +1071,17 @@ static void lsp_extra_add_inputs(char ***paths_io, size_t *n_io,
 // Diff the extra-file stats against the stored set. Returns 1 when
 // any nav/layout/resources file was added, removed, or modified
 // (and marks the corresponding dirty flags).
+// Mark the dirty flag for one extra input path by kind (XML or
+// resources only).
+static void lsp_mark_extra(pv_lsp_server *s, const char *path) {
+  pv_lsp_kind kind = lsp_classify(s, path);
+  if (kind == PV_LSP_XML) {
+    s->xml_dirty = 1;
+  } else if (kind == PV_LSP_RESOURCES) {
+    s->resources_dirty = 1;
+  }
+}
+
 static int lsp_scan_extra(pv_lsp_server *s) {
   char **paths = NULL;
   size_t npaths = 0;
@@ -1116,54 +1139,29 @@ static int lsp_scan_extra(pv_lsp_server *s) {
       if (s->extra[i].mtime_sec != fresh[j].mtime_sec ||
           s->extra[i].mtime_nsec != fresh[j].mtime_nsec ||
           s->extra[i].size != fresh[j].size) {
-        pv_lsp_kind kind = lsp_classify(s, fresh[j].path);
-        if (kind == PV_LSP_XML) {
-          s->xml_dirty = 1;
-        } else if (kind == PV_LSP_RESOURCES) {
-          s->resources_dirty = 1;
-        }
+        lsp_mark_extra(s, fresh[j].path);
         dirty = 1;
       }
       i++;
       j++;
     } else if (cmp < 0) {
       // Removed.
-      pv_lsp_kind kind = lsp_classify(s, s->extra[i].path);
-      if (kind == PV_LSP_XML) {
-        s->xml_dirty = 1;
-      } else if (kind == PV_LSP_RESOURCES) {
-        s->resources_dirty = 1;
-      }
+      lsp_mark_extra(s, s->extra[i].path);
       dirty = 1;
       i++;
     } else {
       // Added.
-      pv_lsp_kind kind = lsp_classify(s, fresh[j].path);
-      if (kind == PV_LSP_XML) {
-        s->xml_dirty = 1;
-      } else if (kind == PV_LSP_RESOURCES) {
-        s->resources_dirty = 1;
-      }
+      lsp_mark_extra(s, fresh[j].path);
       dirty = 1;
       j++;
     }
   }
   for (; i < s->nextra; i++) {
-    pv_lsp_kind kind = lsp_classify(s, s->extra[i].path);
-    if (kind == PV_LSP_XML) {
-      s->xml_dirty = 1;
-    } else if (kind == PV_LSP_RESOURCES) {
-      s->resources_dirty = 1;
-    }
+    lsp_mark_extra(s, s->extra[i].path);
     dirty = 1;
   }
   for (; j < nfresh; j++) {
-    pv_lsp_kind kind = lsp_classify(s, fresh[j].path);
-    if (kind == PV_LSP_XML) {
-      s->xml_dirty = 1;
-    } else if (kind == PV_LSP_RESOURCES) {
-      s->resources_dirty = 1;
-    }
+    lsp_mark_extra(s, fresh[j].path);
     dirty = 1;
   }
   for (i = 0; i < s->nextra; i++) {
@@ -1174,6 +1172,48 @@ static int lsp_scan_extra(pv_lsp_server *s) {
   s->nextra = nfresh;
   s->capextra = npaths == 0 ? 1 : npaths;
   return dirty;
+}
+
+// Mark one changed file dirty by kind (flow/css/config/xml/
+// resources). An open document wins over disk content: the disk
+// change is invisible until the document closes. Returns 1 when
+// the change marks the project dirty.
+static int lsp_mark_changed(pv_lsp_server *s, const char *path) {
+  pv_lsp_kind kind = lsp_classify(s, path);
+  if (kind == PV_LSP_IGNORE) {
+    return 0;
+  }
+  if (lsp_doc_find(s, path) != NULL) {
+    return 0;
+  }
+  switch (kind) {
+    case PV_LSP_FLOW: {
+      size_t idx = 0;
+      if (lsp_flow_lookup(s, path, &idx)) {
+        s->flow[idx].dirty = 1;
+      }
+      break;
+    }
+    case PV_LSP_CSS: {
+      size_t idx = 0;
+      if (lsp_css_lookup(s, path, &idx)) {
+        s->css[idx].dirty = 1;
+      }
+      break;
+    }
+    case PV_LSP_TOML:
+      s->config_dirty = 1;
+      break;
+    case PV_LSP_XML:
+      s->xml_dirty = 1;
+      break;
+    case PV_LSP_RESOURCES:
+      s->resources_dirty = 1;
+      break;
+    default:
+      break;
+  }
+  return 1;
 }
 
 int pv_lsp_scan_disk(pv_lsp_server *s) {
@@ -1192,43 +1232,9 @@ int pv_lsp_scan_disk(pv_lsp_server *s) {
       s->cfg->preview_flow, s->toml_path, &fresh) == CCB_OK) {
     pv_watch_snapshot_diff(s->watch_snap, fresh, &changed, &nchanged);
     for (i = 0; i < nchanged; i++) {
-      pv_lsp_kind kind = lsp_classify(s, changed[i]);
-      if (kind == PV_LSP_IGNORE) {
-        continue;
+      if (lsp_mark_changed(s, changed[i])) {
+        dirty = 1;
       }
-      // An open document wins over disk content: the disk change
-      // is invisible until the document closes.
-      if (lsp_doc_find(s, changed[i]) != NULL) {
-        continue;
-      }
-      switch (kind) {
-        case PV_LSP_FLOW: {
-          size_t idx = 0;
-          if (lsp_flow_lookup(s, changed[i], &idx)) {
-            s->flow[idx].dirty = 1;
-          }
-          break;
-        }
-        case PV_LSP_CSS: {
-          size_t idx = 0;
-          if (lsp_css_lookup(s, changed[i], &idx)) {
-            s->css[idx].dirty = 1;
-          }
-          break;
-        }
-        case PV_LSP_TOML:
-          s->config_dirty = 1;
-          break;
-        case PV_LSP_XML:
-          s->xml_dirty = 1;
-          break;
-        case PV_LSP_RESOURCES:
-          s->resources_dirty = 1;
-          break;
-        default:
-          break;
-      }
-      dirty = 1;
     }
     pv_watch_snapshot_free(s->watch_snap);
     s->watch_snap = fresh;
@@ -1455,6 +1461,32 @@ static int lsp_reader_more(lsp_reader *r) {
 // malloc'd NUL-terminated body in *body_io, 0 when more input is
 // needed, 2 when a header block without Content-Length was skipped
 // (caller retries immediately for a following message).
+// The Content-Length of one header line [p, line_end): the parsed
+// length, or -1 when the line is not a Content-Length header.
+static long lsp_header_length(const char *buf, size_t p,
+    size_t line_end) {
+  size_t ll = line_end - p;
+  const char *v = NULL;
+  char *end = NULL;
+  long n = 0;
+  if (ll > 0 && buf[p + ll - 1] == '\r') {
+    ll--;
+  }
+  if (ll < 15 || (buf[p] != 'C' && buf[p] != 'c') ||
+      strncasecmp(buf + p, "content-length:", 15) != 0) {
+    return -1;
+  }
+  v = buf + p + 15;
+  while (*v == ' ' || *v == '\t') {
+    v++;
+  }
+  n = strtol(v, &end, 10);
+  if (end == v || n < 0) {
+    return -1;
+  }
+  return n;
+}
+
 static int lsp_reader_next(lsp_reader *r, char **body_io) {
   size_t i = 0;
   size_t hdr_end = 0;
@@ -1487,27 +1519,13 @@ static int lsp_reader_next(lsp_reader *r, char **body_io) {
     size_t p = r->pos;
     while (p < hdr_end) {
       size_t line_end = p;
+      long n = 0;
       while (line_end < hdr_end && r->buf[line_end] != '\n') {
         line_end++;
       }
-      {
-        size_t ll = line_end - p;
-        if (ll > 0 && r->buf[p + ll - 1] == '\r') {
-          ll--;
-        }
-        if (ll >= 15 && (r->buf[p] == 'C' || r->buf[p] == 'c') &&
-            strncasecmp(r->buf + p, "content-length:", 15) == 0) {
-          const char *v = r->buf + p + 15;
-          char *end = NULL;
-          long n = 0;
-          while (*v == ' ' || *v == '\t') {
-            v++;
-          }
-          n = strtol(v, &end, 10);
-          if (end != v && n >= 0) {
-            content_length = n;
-          }
-        }
+      n = lsp_header_length(r->buf, p, line_end);
+      if (n >= 0) {
+        content_length = n;
       }
       p = line_end + 1;
     }
@@ -1766,33 +1784,56 @@ static void lsp_reroot(pv_lsp_server *s, const char *dir) {
 // Pick the initialize root directory: rootUri wins, then the first
 // workspace folder's uri, then rootPath. Returns a malloc'd path or
 // NULL when none was given or usable.
+// A non-empty path for a file:// uri string value, or NULL.
+static char *lsp_uri_path(const char *uri) {
+  char *p = lsp_uri_to_path(uri);
+  if (p != NULL && p[0] != '\0') {
+    return p;
+  }
+  free(p);
+  return NULL;
+}
+
+// The first workspace folder's uri string, or NULL.
+static const char *lsp_first_folder_uri(const ccb_json_value *params) {
+  const ccb_json_value *folders = ccb_json_obj_get(params,
+    "workspaceFolders");
+  const ccb_json_value *f0 = NULL;
+  const ccb_json_value *v = NULL;
+  if (folders == NULL || folders->type != CCB_JSON_ARR ||
+      folders->count == 0) {
+    return NULL;
+  }
+  f0 = folders->items[0];
+  if (f0 == NULL || f0->type != CCB_JSON_OBJ) {
+    return NULL;
+  }
+  v = ccb_json_obj_get(f0, "uri");
+  if (v == NULL || v->type != CCB_JSON_STR || v->str == NULL) {
+    return NULL;
+  }
+  return v->str;
+}
+
 static char *lsp_init_root(const ccb_json_value *params) {
   const ccb_json_value *v = NULL;
-  const ccb_json_value *folders = NULL;
+  const char *folder_uri = NULL;
+  char *p = NULL;
   if (params == NULL || params->type != CCB_JSON_OBJ) {
     return NULL;
   }
   v = ccb_json_obj_get(params, "rootUri");
   if (v != NULL && v->type == CCB_JSON_STR && v->str != NULL) {
-    char *p = lsp_uri_to_path(v->str);
-    if (p != NULL && p[0] != '\0') {
+    p = lsp_uri_path(v->str);
+    if (p != NULL) {
       return p;
     }
-    free(p);
   }
-  folders = ccb_json_obj_get(params, "workspaceFolders");
-  if (folders != NULL && folders->type == CCB_JSON_ARR &&
-      folders->count > 0) {
-    const ccb_json_value *f0 = folders->items[0];
-    if (f0 != NULL && f0->type == CCB_JSON_OBJ) {
-      v = ccb_json_obj_get(f0, "uri");
-      if (v != NULL && v->type == CCB_JSON_STR && v->str != NULL) {
-        char *p = lsp_uri_to_path(v->str);
-        if (p != NULL && p[0] != '\0') {
-          return p;
-        }
-        free(p);
-      }
+  folder_uri = lsp_first_folder_uri(params);
+  if (folder_uri != NULL) {
+    p = lsp_uri_path(folder_uri);
+    if (p != NULL) {
+      return p;
     }
   }
   v = ccb_json_obj_get(params, "rootPath");
@@ -1847,11 +1888,27 @@ static void lsp_json_diagnostics(ccb_str *out, pv_project *p) {
 
 // Incoming edges for a screen: every edge in every screen whose
 // target is this screen's name, including self-edges.
+// Append the edge's ,"args":[...] array (null for NULL args).
+static void lsp_json_args(ccb_str *out, pv_edge *e) {
+  size_t k = 0;
+  ccb_str_append(out, ",\"args\":[");
+  for (k = 0; k < e->nargs; k++) {
+    if (k > 0) {
+      ccb_str_append(out, ",");
+    }
+    if (e->args[k] != NULL) {
+      ccb_json_escape(out, e->args[k]);
+    } else {
+      ccb_str_append(out, "null");
+    }
+  }
+  ccb_str_append(out, "]");
+}
+
 static void lsp_json_incoming(ccb_str *out, pv_project *p,
     const char *name) {
   size_t si = 0;
   size_t ei = 0;
-  size_t k = 0;
   int first = 1;
   ccb_str_append(out, "[");
   if (p == NULL || name == NULL) {
@@ -1884,18 +1941,8 @@ static void lsp_json_incoming(ccb_str *out, pv_project *p,
       ccb_str_append(out, ",\"target\":");
       ccb_json_escape(out, e->target);
       ccb_str_appendf(out, ",\"unknown\":%s", e->unknown ? "true" : "false");
-      ccb_str_append(out, ",\"args\":[");
-      for (k = 0; k < e->nargs; k++) {
-        if (k > 0) {
-          ccb_str_append(out, ",");
-        }
-        if (e->args[k] != NULL) {
-          ccb_json_escape(out, e->args[k]);
-        } else {
-          ccb_str_append(out, "null");
-        }
-      }
-      ccb_str_append(out, "],\"branch\":");
+      lsp_json_args(out, e);
+      ccb_str_append(out, ",\"branch\":");
       if (e->branch != NULL) {
         ccb_json_escape(out, e->branch);
       } else {
@@ -1913,6 +1960,104 @@ static void lsp_json_incoming(ccb_str *out, pv_project *p,
 // exit (exit notification), 0 otherwise. Never rebuilds: handlers
 // only update state; the loop rebuilds when editor_dirty is set or
 // the disk debounce fires, so one rebuild covers a burst.
+// The document uri of a didOpen/didChange/didClose notification's
+// params: the textDocument.uri string, or NULL. The textDocument
+// object is returned in *doc_io (NULL when absent).
+static const char *lsp_doc_uri(const ccb_json_value *params,
+    const ccb_json_value **doc_io) {
+  const ccb_json_value *doc = NULL;
+  const ccb_json_value *uri_v = NULL;
+  if (params == NULL || params->type != CCB_JSON_OBJ) {
+    return NULL;
+  }
+  doc = ccb_json_obj_get(params, "textDocument");
+  if (doc == NULL || doc->type != CCB_JSON_OBJ) {
+    return NULL;
+  }
+  *doc_io = doc;
+  uri_v = ccb_json_obj_get(doc, "uri");
+  if (uri_v == NULL || uri_v->type != CCB_JSON_STR) {
+    return NULL;
+  }
+  return uri_v->str;
+}
+
+// The new document text of a didOpen/didChange notification:
+// didOpen carries it on the document; didChange (full sync) on the
+// last content change. NULL when there is none.
+static const ccb_json_value *lsp_doc_text(const char *method,
+    const ccb_json_value *params, const ccb_json_value *doc) {
+  const ccb_json_value *changes = NULL;
+  const ccb_json_value *last = NULL;
+  if (strcmp(method, "textDocument/didOpen") == 0) {
+    // didOpen carries the text on the document itself.
+    if (doc == NULL) {
+      return NULL;
+    }
+    return ccb_json_obj_get(doc, "text");
+  }
+  if (params == NULL || params->type != CCB_JSON_OBJ) {
+    return NULL;
+  }
+  changes = ccb_json_obj_get(params, "contentChanges");
+  if (changes == NULL || changes->type != CCB_JSON_ARR ||
+      changes->count == 0) {
+    return NULL;
+  }
+  // Full sync: the last change carries the whole text.
+  last = changes->items[changes->count - 1];
+  if (last == NULL || last->type != CCB_JSON_OBJ) {
+    return NULL;
+  }
+  return ccb_json_obj_get(last, "text");
+}
+
+// Handle a textDocument/didOpen, didChange, or didClose
+// notification: sync the document text (or drop it on close).
+static void lsp_handle_doc(pv_lsp_server *s, const char *method,
+    const ccb_json_value *params, int is_close) {
+  const ccb_json_value *doc = NULL;
+  const char *uri = lsp_doc_uri(params, &doc);
+  const ccb_json_value *text_v = NULL;
+  char *path = NULL;
+  if (!is_close) {
+    text_v = lsp_doc_text(method, params, doc);
+  }
+  if (uri == NULL) {
+    return;
+  }
+  path = lsp_uri_to_path(uri);
+  if (path == NULL) {
+    return;
+  }
+  if (is_close) {
+    pv_lsp_did_close(s, path);
+  } else if (text_v != NULL && text_v->type == CCB_JSON_STR &&
+      text_v->str != NULL) {
+    if (strcmp(method, "textDocument/didOpen") == 0) {
+      pv_lsp_did_open(s, path, text_v->str);
+    } else {
+      pv_lsp_did_change(s, path, text_v->str);
+    }
+  }
+  free(path);
+}
+
+// The screen named `name` in project p, or NULL.
+static pv_screen *lsp_find_screen(pv_project *p, const char *name) {
+  size_t i = 0;
+  if (p == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < p->nscreens; i++) {
+    if (p->screens[i]->name != NULL &&
+        strcmp(p->screens[i]->name, name) == 0) {
+      return p->screens[i];
+    }
+  }
+  return NULL;
+}
+
 static int lsp_handle(pv_lsp_server *s, const char *body, int out_fd) {
   ccb_json_value *msg = NULL;
   char *err = NULL;
@@ -1967,58 +2112,8 @@ static int lsp_handle(pv_lsp_server *s, const char *body, int out_fd) {
     if (strcmp(method, "textDocument/didOpen") == 0 ||
         strcmp(method, "textDocument/didChange") == 0 ||
         strcmp(method, "textDocument/didClose") == 0) {
-      const ccb_json_value *doc = NULL;
-      const ccb_json_value *uri_v = NULL;
-      const ccb_json_value *text_v = NULL;
-      const char *uri = NULL;
-      char *path = NULL;
-      int is_close = strcmp(method, "textDocument/didClose") == 0;
-      if (params != NULL && params->type == CCB_JSON_OBJ) {
-        doc = ccb_json_obj_get(params, "textDocument");
-        if (doc != NULL && doc->type == CCB_JSON_OBJ) {
-          uri_v = ccb_json_obj_get(doc, "uri");
-          if (uri_v != NULL && uri_v->type == CCB_JSON_STR) {
-            uri = uri_v->str;
-          }
-        }
-        if (!is_close) {
-          if (strcmp(method, "textDocument/didOpen") == 0) {
-            // didOpen carries the text on the document itself.
-            if (doc != NULL) {
-              text_v = ccb_json_obj_get(doc, "text");
-            }
-          } else {
-            const ccb_json_value *changes =
-              ccb_json_obj_get(params, "contentChanges");
-            if (changes != NULL && changes->type == CCB_JSON_ARR &&
-                changes->count > 0) {
-              // Full sync: the last change carries the whole text.
-              const ccb_json_value *last =
-                changes->items[changes->count - 1];
-              if (last != NULL && last->type == CCB_JSON_OBJ) {
-                text_v = ccb_json_obj_get(last, "text");
-              }
-            }
-          }
-        }
-      }
-      if (uri != NULL) {
-        path = lsp_uri_to_path(uri);
-      }
-      if (path != NULL) {
-        if (is_close) {
-          pv_lsp_did_close(s, path);
-        } else if (text_v != NULL &&
-            text_v->type == CCB_JSON_STR &&
-            text_v->str != NULL) {
-          if (strcmp(method, "textDocument/didOpen") == 0) {
-            pv_lsp_did_open(s, path, text_v->str);
-          } else {
-            pv_lsp_did_change(s, path, text_v->str);
-          }
-        }
-        free(path);
-      }
+      lsp_handle_doc(s, method, params,
+        strcmp(method, "textDocument/didClose") == 0);
       ccb_json_free(msg);
       return 0;
     }
@@ -2070,19 +2165,12 @@ static int lsp_handle(pv_lsp_server *s, const char *body, int out_fd) {
     const ccb_json_value *name_v = NULL;
     pv_project *p = pv_lsp_project(s);
     pv_screen *screen = NULL;
-    size_t i = 0;
     if (params != NULL && params->type == CCB_JSON_OBJ) {
       name_v = ccb_json_obj_get(params, "screen");
     }
     if (name_v != NULL && name_v->type == CCB_JSON_STR &&
-        name_v->str != NULL && p != NULL) {
-      for (i = 0; i < p->nscreens; i++) {
-        if (p->screens[i]->name != NULL &&
-            strcmp(p->screens[i]->name, name_v->str) == 0) {
-          screen = p->screens[i];
-          break;
-        }
-      }
+        name_v->str != NULL) {
+      screen = lsp_find_screen(p, name_v->str);
     }
     if (screen == NULL) {
       lsp_send_error(out_fd, id_v, -32602, "unknown screen");
@@ -2118,6 +2206,30 @@ static int lsp_handle(pv_lsp_server *s, const char *body, int out_fd) {
 
 // ---------- run loop ----------
 
+// Drain stdin messages (non-blocking reads). Returns 1 when the
+// exit notification was handled.
+static int lsp_drain(pv_lsp_server *s, lsp_reader *rd, int out_fd) {
+  for (;;) {
+    char *body = NULL;
+    int pr = lsp_reader_next(rd, &body);
+    if (pr == 0) {
+      if (!lsp_reader_more(rd)) {
+        break;
+      }
+      continue;
+    }
+    if (pr == 2) {
+      continue; // skipped a header block without a length
+    }
+    if (lsp_handle(s, body, out_fd)) {
+      free(body);
+      return 1;
+    }
+    free(body);
+  }
+  return 0;
+}
+
 int pv_lsp_run(pv_lsp_server *s, int in_fd, int out_fd) {
   lsp_reader rd;
   int exit_requested = 0;
@@ -2134,26 +2246,7 @@ int pv_lsp_run(pv_lsp_server *s, int in_fd, int out_fd) {
   pv_watch_install_signals();
   for (;;) {
     // 1. Drain stdin messages (non-blocking reads).
-    for (;;) {
-      char *body = NULL;
-      int pr = lsp_reader_next(&rd, &body);
-      if (pr == 0) {
-        if (!lsp_reader_more(&rd)) {
-          break;
-        }
-        continue;
-      }
-      if (pr == 2) {
-        continue; // skipped a header block without a length
-      }
-      if (lsp_handle(s, body, out_fd)) {
-        exit_requested = 1;
-      }
-      free(body);
-      if (exit_requested) {
-        break;
-      }
-    }
+    exit_requested = lsp_drain(s, &rd, out_fd);
     if (exit_requested || rd.eof || pv_watch_stop) {
       break;
     }

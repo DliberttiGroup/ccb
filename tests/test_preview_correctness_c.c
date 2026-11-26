@@ -209,15 +209,12 @@ static pv_edge *find_edge(pv_screen *screen, const char *from) {
 // none). Returns the project dir; tests join flow/ and ccb.toml
 // onto it themselves.
 static char *mk_proj(const char *bindings) {
-  char tmpl[] = "/tmp/ccb-cc-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "cc");
   char *proj = NULL;
   char *flow = NULL;
   char *toml = NULL;
   ccb_str s;
-  if (scratch == NULL) {
-    return NULL;
-  }
   proj = join2(scratch, "proj");
   flow = join2(proj, "flow");
   toml = join2(proj, "ccb.toml");
@@ -733,13 +730,12 @@ int main(void) {
       fprintf(stderr, "SKIP goldens: real-world dir not found\n");
     }
     for (ni = 0; rw != NULL && ni < 4; ni++) {
-      char tmpl[] = "/tmp/ccb-cc-XXXXXX";
-      char *scratch = mkdtemp(tmpl);
+      char scratch[64];
+      ccb_test_tmpdir(scratch, sizeof scratch, "cc");
       char *src = NULL;
       char *copy = NULL;
       char *copy_toml = NULL;
       pv_project *p = NULL;
-      CHECK(scratch != NULL);
       src = join2(rw, names[ni]);
       copy = join2(scratch, names[ni]);
       copy_toml = join2(copy, "ccb.toml");

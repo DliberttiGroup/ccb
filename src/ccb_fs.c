@@ -120,6 +120,11 @@ ccb_status ccb_read_file(const char *path, char **out, size_t *out_len) {
 }
 
 ccb_status ccb_write_file(const char *path, const void *data, size_t len) {
+  // A NULL buffer with bytes to write is a caller bug, not an empty
+  // file: fwrite(NULL) segfaults. NULL with len 0 still writes empty.
+  if (data == NULL && len > 0) {
+    return CCB_ERR_IO;
+  }
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
     return CCB_ERR_IO;

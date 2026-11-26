@@ -34,9 +34,18 @@ static void test_dir(ccb_str *out) {
 }
 
 static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
+  struct stat st;
+  FILE *f = NULL;
   long size = 0;
   char *buf = NULL;
+  // Only regular files: ftell on a directory stream returns LONG_MAX
+  // on some filesystems, and malloc(size + 1) then wraps to 2^63
+  // and aborts. A directory is not readable content, so fail
+  // cleanly instead of trusting ftell.
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+    return NULL;
+  }
+  f = fopen(path, "rb");
   if (f == NULL) {
     return NULL;
   }
@@ -857,8 +866,8 @@ int main(void) {
       "{\"screen\":\"Detail\",\"edge\":\"Back\",\"branch\":null,"
       "\"args\":[\"42\"]}]}";
     char *sdir = sample_dir();
-    char tmpl[] = "/tmp/ccb-trace-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "trace");
     char *proj = NULL;
     char *toml = NULL;
     ccb_config *cfg = NULL;
@@ -866,133 +875,127 @@ int main(void) {
     pv_project *p = NULL;
     pv_trace *t = NULL;
     char *err = NULL;
-    CHECK(scratch != NULL);
-    if (scratch != NULL) {
-      proj = join2(scratch, "proj");
-      CHECK(copy_tree(sdir, proj) == 0);
-      toml = join2(proj, "ccb.toml");
-      ccb_diag_list_init(&diags);
-      CHECK(ccb_config_load(toml, NULL, &cfg, &diags) == CCB_OK);
-      ccb_diag_list_free(&diags);
-      CHECK(cfg != NULL);
-      if (cfg != NULL) {
-        CHECK(pv_project_load(cfg, 40, 0, 0, NULL, &p) == CCB_OK);
-        CHECK(p != NULL);
-        if (p != NULL) {
-          long errors = 0;
-          t = pv_trace_parse(trace_text, &err);
-          CHECK(t != NULL && err == NULL);
-          free(err);
-          pv_trace_apply(p, t, &p->diags);
-          errors = pv_project_diagnose(p);
-          CHECK(errors == 0);
-          CHECK(diag_count(&p->diags, "CCB-P1023") == 0);
-          {
-            ccb_str out;
-            ccb_str_init(&out);
-            pv_render_logic_tree(&out, p);
-            check_golden_file("trace-walk logic-tree",
-              out.buf != NULL ? out.buf : "",
-              "trace-walk/logic-tree.txt");
-            ccb_str_free(&out);
-          }
-          {
-            ccb_str out;
-            ccb_str_init(&out);
-            pv_project_json(&out, p);
-            check_golden_file("trace-walk preview.json",
-              out.buf != NULL ? out.buf : "",
-              "trace-walk/preview.json");
-            ccb_str_free(&out);
-          }
-          pv_trace_free(t);
-          pv_project_free(p);
+    proj = join2(scratch, "proj");
+    CHECK(copy_tree(sdir, proj) == 0);
+    toml = join2(proj, "ccb.toml");
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_config_load(toml, NULL, &cfg, &diags) == CCB_OK);
+    ccb_diag_list_free(&diags);
+    CHECK(cfg != NULL);
+    if (cfg != NULL) {
+      CHECK(pv_project_load(cfg, 40, 0, 0, NULL, &p) == CCB_OK);
+      CHECK(p != NULL);
+      if (p != NULL) {
+        long errors = 0;
+        t = pv_trace_parse(trace_text, &err);
+        CHECK(t != NULL && err == NULL);
+        free(err);
+        pv_trace_apply(p, t, &p->diags);
+        errors = pv_project_diagnose(p);
+        CHECK(errors == 0);
+        CHECK(diag_count(&p->diags, "CCB-P1023") == 0);
+        {
+          ccb_str out;
+          ccb_str_init(&out);
+          pv_render_logic_tree(&out, p);
+          check_golden_file("trace-walk logic-tree",
+            out.buf != NULL ? out.buf : "",
+            "trace-walk/logic-tree.txt");
+          ccb_str_free(&out);
         }
-        ccb_config_free(cfg);
+        {
+          ccb_str out;
+          ccb_str_init(&out);
+          pv_project_json(&out, p);
+          check_golden_file("trace-walk preview.json",
+            out.buf != NULL ? out.buf : "",
+            "trace-walk/preview.json");
+          ccb_str_free(&out);
+        }
+        pv_trace_free(t);
+        pv_project_free(p);
       }
-      free(toml);
-      free(proj);
+      ccb_config_free(cfg);
     }
+    free(toml);
+    free(proj);
     free(sdir);
   }
   // --- CLI: --trace renders the overlay from a file; conflicts and
   // bad files fail with exit 2.
   {
     char *sdir = sample_dir();
-    char tmpl[] = "/tmp/ccb-trace-cli-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "trace-cli");
     char *proj = NULL;
     char *trace_path = NULL;
     char *cap = NULL;
-    CHECK(scratch != NULL);
-    if (scratch != NULL) {
-      proj = join2(scratch, "proj");
-      CHECK(copy_tree(sdir, proj) == 0);
-      trace_path = join2(proj, "walk.json");
-      cap = join2(scratch, "cap.txt");
-      {
-        static const char *cli_trace =
-          "{\"version\":1,\"steps\":["
-          "{\"screen\":\"Home\",\"edge\":\"Open note\"},"
-          "{\"screen\":\"Detail\",\"edge\":\"Back\","
-          "\"args\":[\"42\"]}]}";
-        CHECK(write_all(trace_path, cli_trace,
-          strlen(cli_trace)) == 0);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--trace", trace_path,
-          NULL };
-        int rc = run_cli(proj, cap, 4, argv);
-        char *out = try_read(cap);
-        CHECK(rc == 0);
-        CHECK(contains(out,
-          "-> Detail(\"note-42\") via \"Open note\" [trace]"));
-        CHECK(contains(out,
-          "-> Home(\"42\" [trace]) via \"Back\" [trace]"));
-        free(out);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--trace", trace_path,
-          "--json", NULL };
-        int rc = run_cli(proj, cap, 5, argv);
-        char *out = try_read(cap);
-        CHECK(rc == 0);
-        CHECK(contains(out, "\"trace\":{\"steps\":2}"));
-        CHECK(contains(out, "\"taken\":true"));
-        free(out);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--trace", trace_path,
-          "--walk", NULL };
-        int rc = run_cli(proj, cap, 5, argv);
-        CHECK(rc == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--record", "x.json",
-          NULL };
-        int rc = run_cli(proj, cap, 4, argv);
-        CHECK(rc == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--trace",
-          "missing.json", NULL };
-        int rc = run_cli(proj, cap, 4, argv);
-        CHECK(rc == 2);
-      }
-      {
-        char *bad_path = join2(proj, "bad.json");
-        char *argv[] = { "ccb", "preview", "--trace", bad_path,
-          NULL };
-        int rc = 0;
-        CHECK(write_all(bad_path, "nope", 4) == 0);
-        rc = run_cli(proj, cap, 4, argv);
-        CHECK(rc == 2);
-        free(bad_path);
-      }
-      free(cap);
-      free(trace_path);
-      free(proj);
+    proj = join2(scratch, "proj");
+    CHECK(copy_tree(sdir, proj) == 0);
+    trace_path = join2(proj, "walk.json");
+    cap = join2(scratch, "cap.txt");
+    {
+      static const char *cli_trace =
+        "{\"version\":1,\"steps\":["
+        "{\"screen\":\"Home\",\"edge\":\"Open note\"},"
+        "{\"screen\":\"Detail\",\"edge\":\"Back\","
+        "\"args\":[\"42\"]}]}";
+      CHECK(write_all(trace_path, cli_trace,
+        strlen(cli_trace)) == 0);
     }
+    {
+      char *argv[] = { "ccb", "preview", "--trace", trace_path,
+        NULL };
+      int rc = run_cli(proj, cap, 4, argv);
+      char *out = try_read(cap);
+      CHECK(rc == 0);
+      CHECK(contains(out,
+        "-> Detail(\"note-42\") via \"Open note\" [trace]"));
+      CHECK(contains(out,
+        "-> Home(\"42\" [trace]) via \"Back\" [trace]"));
+      free(out);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--trace", trace_path,
+        "--json", NULL };
+      int rc = run_cli(proj, cap, 5, argv);
+      char *out = try_read(cap);
+      CHECK(rc == 0);
+      CHECK(contains(out, "\"trace\":{\"steps\":2}"));
+      CHECK(contains(out, "\"taken\":true"));
+      free(out);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--trace", trace_path,
+        "--walk", NULL };
+      int rc = run_cli(proj, cap, 5, argv);
+      CHECK(rc == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--record", "x.json",
+        NULL };
+      int rc = run_cli(proj, cap, 4, argv);
+      CHECK(rc == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--trace",
+        "missing.json", NULL };
+      int rc = run_cli(proj, cap, 4, argv);
+      CHECK(rc == 2);
+    }
+    {
+      char *bad_path = join2(proj, "bad.json");
+      char *argv[] = { "ccb", "preview", "--trace", bad_path,
+        NULL };
+      int rc = 0;
+      CHECK(write_all(bad_path, "nope", 4) == 0);
+      rc = run_cli(proj, cap, 4, argv);
+      CHECK(rc == 2);
+      free(bad_path);
+    }
+    free(cap);
+    free(trace_path);
+    free(proj);
     free(sdir);
   }
   TEST_MAIN_END();

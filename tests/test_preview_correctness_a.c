@@ -299,8 +299,8 @@ static char *p1_dir(void) {
 int main(void) {
   // (1) Fallback existence checks on the path functions directly.
   {
-    char tmpl[] = "/tmp/ccb-ca-XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char dir[64];
+    ccb_test_tmpdir(dir, sizeof dir, "ca");
     char *res = NULL;
     char *layout = NULL;
     char *nav = NULL;
@@ -308,7 +308,6 @@ int main(void) {
     char *res_layout = NULL;
     ccb_config cfg;
     char *p = NULL;
-    CHECK(dir != NULL);
     res = join2(dir, "res");
     layout = join2(res, "layout");
     nav = join2(res, "navigation");
@@ -398,8 +397,8 @@ int main(void) {
   // (3) Graph nodes, fully qualified destinations, manifest
   // exemption, and P1005 still firing for a true unknown.
   {
-    char tmpl[] = "/tmp/ccb-ca-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "ca");
     char *proj = NULL;
     char *toml = NULL;
     char *flowdir = NULL;
@@ -411,7 +410,6 @@ int main(void) {
     pv_screen *extra = NULL;
     pv_edge *e = NULL;
     long errors = 0;
-    CHECK(scratch != NULL);
     proj = join2(scratch, "proj");
     flowdir = join2(proj, "flow");
     stylesdir = join2(proj, "styles");
@@ -558,8 +556,8 @@ int main(void) {
   // a set res root, with no layout/nav_graph keys, must still
   // find the layout onClick and the nav-graph destination.
   {
-    char tmpl[] = "/tmp/ccb-ca-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "ca");
     char *proj = NULL;
     char *toml = NULL;
     char *flowdir = NULL;
@@ -572,7 +570,6 @@ int main(void) {
     pv_screen *home = NULL;
     pv_edge *e = NULL;
     long errors = 0;
-    CHECK(scratch != NULL);
     proj = join2(scratch, "proj");
     flowdir = join2(proj, "flow");
     stylesdir = join2(proj, "styles");
@@ -677,8 +674,8 @@ int main(void) {
   {
     char *p1 = p1_dir();
     char *p1_toml = NULL;
-    char tmpl[] = "/tmp/ccb-ca-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "ca");
     char *copy = NULL;
     char *copy_toml = NULL;
     char *cap = NULL;
@@ -689,8 +686,7 @@ int main(void) {
     long errors_a = 0;
     long errors_b = 0;
     CHECK(p1 != NULL);
-    CHECK(scratch != NULL);
-    if (p1 != NULL && scratch != NULL) {
+    if (p1 != NULL) {
       p1_toml = join2(p1, "ccb.toml");
       copy = join2(scratch, "p1");
       copy_toml = join2(copy, "ccb.toml");

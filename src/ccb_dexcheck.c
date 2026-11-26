@@ -155,6 +155,28 @@ static char *ccb_dex_read_string(const unsigned char *d, size_t len,
   return ccb_xstrndup((const char *)d + start, p - start);
 }
 
+// Appends one owned name to a growing missing list.
+static void ccb_dexcheck_push(char ***missing, size_t *nmissing, size_t *cap, char *name) {
+  if (*nmissing == *cap) {
+    *cap = *cap == 0 ? 16 : *cap * 2;
+    *missing = ccb_xrealloc(*missing, *cap * sizeof(**missing));
+  }
+  (*missing)[(*nmissing)++] = name;
+}
+
+// One referenced class: missing from the dex (and not on the
+// allow-list) means a missing entry. defined is sorted, so the
+// lookup is a binary search, not a linear scan.
+static void ccb_dexcheck_check_ref(char *ref, char **defined, size_t ndefined,
+    char ***missing, size_t *nmissing, size_t *cap) {
+  char *key = ref;
+  int found = bsearch(&key, defined, ndefined,
+    sizeof(*defined), ccb_dexcheck_cmp) != NULL;
+  if (!found && !ccb_dexcheck_allowed(ref)) {
+    ccb_dexcheck_push(missing, nmissing, cap, ccb_dexcheck_dotted(ref));
+  }
+}
+
 ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
     size_t *nmissing_out, char **err_out) {
   *missing_out = NULL;
@@ -261,20 +283,7 @@ ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
       size_t nmissing = 0;
       size_t cap = 0;
       for (size_t i = 0; i < nrefs; i++) {
-        int found = 0;
-        for (size_t j = 0; j < ndefined; j++) {
-          if (strcmp(refs[i], defined[j]) == 0) {
-            found = 1;
-            break;
-          }
-        }
-        if (!found && !ccb_dexcheck_allowed(refs[i])) {
-          if (nmissing == cap) {
-            cap = cap == 0 ? 16 : cap * 2;
-            missing = ccb_xrealloc(missing, cap * sizeof(*missing));
-          }
-          missing[nmissing++] = ccb_dexcheck_dotted(refs[i]);
-        }
+        ccb_dexcheck_check_ref(refs[i], defined, ndefined, &missing, &nmissing, &cap);
       }
       *missing_out = missing;
       *nmissing_out = nmissing;
@@ -343,22 +352,7 @@ ccb_status ccb_dexcheck_dir(const char *dir, char ***missing_out,
       *err_out = err;
     } else {
       for (size_t j = 0; j < nfm; j++) {
-        int seen = 0;
-        for (size_t k = 0; k < nmissing; k++) {
-          if (strcmp(missing[k], fm[j]) == 0) {
-            seen = 1;
-            break;
-          }
-        }
-        if (!seen) {
-          if (nmissing == cap) {
-            cap = cap == 0 ? 16 : cap * 2;
-            missing = ccb_xrealloc(missing, cap * sizeof(*missing));
-          }
-          missing[nmissing++] = fm[j];
-        } else {
-          free(fm[j]);
-        }
+        ccb_dexcheck_push(&missing, &nmissing, &cap, fm[j]);
       }
       free(fm);
     }
@@ -368,6 +362,10 @@ ccb_status ccb_dexcheck_dir(const char *dir, char ***missing_out,
     ccb_free_str_array(missing, nmissing);
     return rc;
   }
+  // One sort + dedup at the end: the per-file lists arrive in
+  // readdir order, so merging them here is what makes the reported
+  // missing classes deterministic (and alphabetical).
+  nmissing = ccb_dexcheck_uniq(missing, nmissing);
   *missing_out = missing;
   *nmissing_out = nmissing;
   return CCB_OK;

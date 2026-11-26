@@ -194,8 +194,8 @@ static pv_edge *find_edge(pv_screen *screen, const char *from) {
 // resources (flow/ too when has_flow). Returns the project dir;
 // tests write the .kt/.xml/flow files into it themselves.
 static char *mk_real_proj(int has_flow) {
-  char tmpl[] = "/tmp/ccb-p2-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "p2");
   char *proj = NULL;
   char *src = NULL;
   char *main = NULL;
@@ -208,9 +208,6 @@ static char *mk_real_proj(int has_flow) {
   char *man = NULL;
   char *toml = NULL;
   ccb_str s;
-  if (scratch == NULL) {
-    return NULL;
-  }
   proj = join2(scratch, "proj");
   src = join2(proj, "src");
   main = join2(src, "main");
@@ -1163,8 +1160,8 @@ int main(void) {
   {
     char *td = test_dir();
     char *rw = join2(td, "../examples/real-world");
-    char tmpl[] = "/tmp/ccb-p2-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "p2");
     char *src = NULL;
     char *copy = NULL;
     char *copy_toml = NULL;
@@ -1173,7 +1170,6 @@ int main(void) {
     pv_edge *e = NULL;
     struct stat st;
     CHECK(stat(rw, &st) == 0 && S_ISDIR(st.st_mode));
-    CHECK(scratch != NULL);
     src = join2(rw, "p1-notes-real");
     copy = join2(scratch, "p1-notes-real");
     copy_toml = join2(copy, "ccb.toml");

@@ -311,12 +311,8 @@ static long count_lines(const char *s) {
 }
 
 int main(void) {
-  char tmpl[] = "/tmp/ccb-gate-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
-  CHECK(scratch != NULL);
-  if (scratch == NULL) {
-    TEST_MAIN_END();
-  }
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "gate");
   g_scratch = scratch;
 
   // --- pv_diag_is_error: the shared error rule, both strict modes.

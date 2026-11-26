@@ -79,6 +79,21 @@ static char *find_build_tools(const char *sdk_home) {
     if (e->d_name[0] == '.') {
       continue;
     }
+    // Only build-tools CCB accepts (major 34..36): the runner image
+    // ships newer ones (e.g. 37) with no matching platform, and
+    // deriving compile_sdk from them fails config load (CCB-E1005).
+    int major = 0;
+    const char *mp = e->d_name;
+    if (*mp < '0' || *mp > '9') {
+      continue;
+    }
+    while (*mp >= '0' && *mp <= '9') {
+      major = major * 10 + (*mp - '0');
+      mp++;
+    }
+    if (major < 34 || major > 36) {
+      continue;
+    }
     char *cand = ccb_path_join3(bt_dir, e->d_name, "aapt2");
     int ok = access(cand, X_OK) == 0;
     free(cand);

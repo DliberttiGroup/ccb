@@ -692,8 +692,7 @@ json_done:
 int main(int argc, char **argv) {
   char *binary = NULL;
   char *sample = NULL;
-  char tmpl[] = "/tmp/ccb-watch-loop-XXXXXX";
-  char *root = NULL;
+  char root[64];
   char *app = NULL;
   char *app_json = NULL;
   char *errpath = NULL;
@@ -712,13 +711,7 @@ int main(int argc, char **argv) {
     free(binary);
     TEST_MAIN_END();
   }
-  root = mkdtemp(tmpl);
-  CHECK(root != NULL);
-  if (root == NULL) {
-    free(sample);
-    free(binary);
-    TEST_MAIN_END();
-  }
+  ccb_test_tmpdir(root, sizeof root, "watch-loop");
   app = ccb_path_join(root, "app");
   app_json = ccb_path_join(root, "app-json");
   errpath = ccb_path_join(root, "human-stderr.log");

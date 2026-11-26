@@ -241,17 +241,12 @@ static int replace_in_file(const char *path, const char *from,
 
 int main(void) {
   char *sdir = sample_dir();
-  char tmpl[] = "/tmp/ccb-gatediff-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "gatediff");
   char *proj = NULL;
   char *snap = NULL;
   char *cap = NULL;
   char *out = NULL;
-  CHECK(scratch != NULL);
-  if (scratch == NULL) {
-    free(sdir);
-    TEST_MAIN_END();
-  }
   proj = join2(scratch, "proj");
   snap = join2(scratch, "snap");
   cap = join2(scratch, "cap.txt");

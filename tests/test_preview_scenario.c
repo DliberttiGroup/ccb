@@ -32,9 +32,18 @@ static void test_dir(ccb_str *out) {
 }
 
 static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
+  struct stat st;
+  FILE *f = NULL;
   long size = 0;
   char *buf = NULL;
+  // Only regular files: ftell on a directory stream returns LONG_MAX
+  // on some filesystems, and malloc(size + 1) then wraps to 2^63
+  // and aborts. A directory is not readable content, so fail
+  // cleanly instead of trusting ftell.
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+    return NULL;
+  }
+  f = fopen(path, "rb");
   if (f == NULL) {
     return NULL;
   }
@@ -455,44 +464,41 @@ int main(void) {
   // each fail the config load (CCB-E1007 / CCB-E1001).
   {
     char *sdir = sample_dir();
-    char tmpl[] = "/tmp/ccb-scenario-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "scenario");
     char *proj = NULL;
     char *toml = NULL;
     ccb_diag_list diags;
     ccb_config *cfg = NULL;
-    CHECK(scratch != NULL);
-    if (scratch != NULL) {
-      proj = join2(scratch, "proj");
-      CHECK(copy_tree(sdir, proj) == 0);
-      toml = join2(proj, "ccb.toml");
-      CHECK(append_all(toml,
-        "[preview.scenario.broken.branches]\n"
-        "Detail = 7\n") == 0);
+    proj = join2(scratch, "proj");
+    CHECK(copy_tree(sdir, proj) == 0);
+    toml = join2(proj, "ccb.toml");
+    CHECK(append_all(toml,
+      "[preview.scenario.broken.branches]\n"
+      "Detail = 7\n") == 0);
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_config_load(toml, NULL, &cfg, &diags) != CCB_OK);
+    CHECK(cfg == NULL);
+    ccb_diag_list_free(&diags);
+    // A fresh copy with an unknown section fails the same way.
+    {
+      char *proj2 = join2(scratch, "proj2");
+      char *toml2 = NULL;
+      CHECK(copy_tree(sdir, proj2) == 0);
+      toml2 = join2(proj2, "ccb.toml");
+      CHECK(append_all(toml2,
+        "[preview.scenario.broken.widgets]\n"
+        "Detail = \"x\"\n") == 0);
       ccb_diag_list_init(&diags);
-      CHECK(ccb_config_load(toml, NULL, &cfg, &diags) != CCB_OK);
+      CHECK(ccb_config_load(toml2, NULL, &cfg, &diags) !=
+        CCB_OK);
       CHECK(cfg == NULL);
       ccb_diag_list_free(&diags);
-      // A fresh copy with an unknown section fails the same way.
-      {
-        char *proj2 = join2(scratch, "proj2");
-        char *toml2 = NULL;
-        CHECK(copy_tree(sdir, proj2) == 0);
-        toml2 = join2(proj2, "ccb.toml");
-        CHECK(append_all(toml2,
-          "[preview.scenario.broken.widgets]\n"
-          "Detail = \"x\"\n") == 0);
-        ccb_diag_list_init(&diags);
-        CHECK(ccb_config_load(toml2, NULL, &cfg, &diags) !=
-          CCB_OK);
-        CHECK(cfg == NULL);
-        ccb_diag_list_free(&diags);
-        free(toml2);
-        free(proj2);
-      }
-      free(toml);
-      free(proj);
+      free(toml2);
+      free(proj2);
     }
+    free(toml);
+    free(proj);
     free(sdir);
   }
   // --- Golden: the sample app rendered with scenario "loaded".
@@ -754,77 +760,74 @@ int main(void) {
   // --- CLI: flag wiring, conflicts, unknown name.
   {
     char *sdir = sample_dir();
-    char tmpl[] = "/tmp/ccb-scencli-XXXXXX";
-    char *scratch = mkdtemp(tmpl);
+    char scratch[64];
+    ccb_test_tmpdir(scratch, sizeof scratch, "scencli");
     char *proj = NULL;
     char *cap = NULL;
-    CHECK(scratch != NULL);
-    if (scratch != NULL) {
-      proj = join2(scratch, "proj");
-      cap = join2(scratch, "cap.txt");
-      CHECK(copy_tree(sdir, proj) == 0);
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          NULL };
-        char *out = NULL;
-        CHECK(run_cli(proj, cap, 4, argv) == 0);
-        out = try_read(cap);
-        CHECK(contains(out, "scenario: list \"notes\""));
-        CHECK(contains(out, "[scenario]"));
-        free(out);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--json", NULL };
-        char *out = NULL;
-        CHECK(run_cli(proj, cap, 5, argv) == 0);
-        out = try_read(cap);
-        CHECK(contains(out, "\"scenario\":\"loaded\""));
-        CHECK(contains(out, "\"provenance\":\"scenario\""));
-        free(out);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--screen", "Home", NULL };
-        char *out = NULL;
-        CHECK(run_cli(proj, cap, 6, argv) == 0);
-        out = try_read(cap);
-        CHECK(contains(out, "Buy milk"));
-        free(out);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "nope",
-          NULL };
-        CHECK(run_cli(proj, cap, 4, argv) == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--walk", NULL };
-        CHECK(run_cli(proj, cap, 5, argv) == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--watch", NULL };
-        CHECK(run_cli(proj, cap, 5, argv) == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--diff", "snap", NULL };
-        CHECK(run_cli(proj, cap, 6, argv) == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--storyboard", "Home", NULL };
-        CHECK(run_cli(proj, cap, 6, argv) == 2);
-      }
-      {
-        char *argv[] = { "ccb", "preview", "--scenario", "loaded",
-          "--update-goldens", NULL };
-        CHECK(run_cli(proj, cap, 5, argv) == 2);
-      }
-      free(cap);
-      free(proj);
+    proj = join2(scratch, "proj");
+    cap = join2(scratch, "cap.txt");
+    CHECK(copy_tree(sdir, proj) == 0);
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        NULL };
+      char *out = NULL;
+      CHECK(run_cli(proj, cap, 4, argv) == 0);
+      out = try_read(cap);
+      CHECK(contains(out, "scenario: list \"notes\""));
+      CHECK(contains(out, "[scenario]"));
+      free(out);
     }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--json", NULL };
+      char *out = NULL;
+      CHECK(run_cli(proj, cap, 5, argv) == 0);
+      out = try_read(cap);
+      CHECK(contains(out, "\"scenario\":\"loaded\""));
+      CHECK(contains(out, "\"provenance\":\"scenario\""));
+      free(out);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--screen", "Home", NULL };
+      char *out = NULL;
+      CHECK(run_cli(proj, cap, 6, argv) == 0);
+      out = try_read(cap);
+      CHECK(contains(out, "Buy milk"));
+      free(out);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "nope",
+        NULL };
+      CHECK(run_cli(proj, cap, 4, argv) == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--walk", NULL };
+      CHECK(run_cli(proj, cap, 5, argv) == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--watch", NULL };
+      CHECK(run_cli(proj, cap, 5, argv) == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--diff", "snap", NULL };
+      CHECK(run_cli(proj, cap, 6, argv) == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--storyboard", "Home", NULL };
+      CHECK(run_cli(proj, cap, 6, argv) == 2);
+    }
+    {
+      char *argv[] = { "ccb", "preview", "--scenario", "loaded",
+        "--update-goldens", NULL };
+      CHECK(run_cli(proj, cap, 5, argv) == 2);
+    }
+    free(cap);
+    free(proj);
     free(sdir);
   }
   TEST_MAIN_END();

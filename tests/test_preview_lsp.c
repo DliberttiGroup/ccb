@@ -187,13 +187,10 @@ static int copy_tree(const char *src, const char *dst) {
 // Scratch copy of the sample project. Returns the project dir (caller
 // frees); the parent scratch dir is left for the OS temp cleanup.
 static char *scratch_sample(void) {
-  char tmpl[] = "/tmp/ccb-lsp-test-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "lsp-test");
   char *sdir = NULL;
   char *proj = NULL;
-  if (scratch == NULL) {
-    return NULL;
-  }
   sdir = sample_dir();
   proj = join2(scratch, "proj");
   if (copy_tree(sdir, proj) != 0) {
@@ -413,15 +410,11 @@ static void test_incremental(void) {
 }
 
 static void test_open_errors(void) {
-  char tmpl[] = "/tmp/ccb-lsp-err-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "lsp-err");
   char *toml = NULL;
   char *err = NULL;
   pv_lsp_server *s = NULL;
-  CHECK(scratch != NULL);
-  if (scratch == NULL) {
-    return;
-  }
   // Nonexistent toml.
   toml = join2(scratch, "missing.toml");
   s = pv_lsp_open(toml, NULL, NULL, &err);
@@ -1164,11 +1157,11 @@ static void test_socket_reroot(void) {
   sock_reader r;
   ccb_str init;
   char *m = NULL;
-  char tmpl[] = "/tmp/ccb-lsp-reroot-XXXXXX";
-  char *scratch = mkdtemp(tmpl);
+  char scratch[64];
+  ccb_test_tmpdir(scratch, sizeof scratch, "lsp-reroot");
   signal(SIGPIPE, SIG_IGN);
-  CHECK(proj_a != NULL && scratch != NULL);
-  if (proj_a == NULL || scratch == NULL) {
+  CHECK(proj_a != NULL);
+  if (proj_a == NULL) {
     free(proj_a);
     return;
   }
