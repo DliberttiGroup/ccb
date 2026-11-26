@@ -123,6 +123,30 @@ static void ccb_argv_pushf(ccb_argv *a, const char *fmt, long num) {
   ccb_argv_push(a, buf);
 }
 
+// Append kotlinc compiler-plugin arguments: -Xplugin=<jar> per
+// resolved plugin jar, then -P plugin:<id>:<key>=<value> per
+// configured option. The option string is "plugin-id:key=value";
+// the "-P plugin:" prefix is added here, so the config never
+// carries kotlinc's flag syntax.
+static void ccb_push_plugin_args(ccb_pipe *p, ccb_argv *av) {
+  for (size_t i = 0; i < p->cfg->kotlin_plugin_jars_count; i++) {
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, "-Xplugin=");
+    ccb_str_append(&s, p->cfg->kotlin_plugin_jars[i]);
+    ccb_argv_push(av, s.buf);
+    ccb_str_free(&s);
+  }
+  for (size_t i = 0; i < p->cfg->kotlin_plugin_options_count; i++) {
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, "-P plugin:");
+    ccb_str_append(&s, p->cfg->kotlin_plugin_options[i]);
+    ccb_argv_push(av, s.buf);
+    ccb_str_free(&s);
+  }
+}
+
 // Key for cache maps: path relative to the project root when possible.
 static char *ccb_rel_key(ccb_pipe *p, const char *path) {
   size_t rl = strlen(p->cfg->project_root);
@@ -179,6 +203,23 @@ static int ccb_fp_add_file(ccb_pipe *p, ccb_fp_builder *b, const char *path) {
   free(key);
   free(hash);
   return 0;
+}
+
+// Record resolved plugin jars (by content hash, when present) and
+// plugin options (by value) in a compile fingerprint, so a plugin
+// change recompiles instead of serving stale classes.
+static void ccb_fp_add_plugins(ccb_pipe *p, ccb_fp_builder *b,
+    int *failed) {
+  for (size_t i = 0; i < p->cfg->kotlin_plugin_jars_count && !*failed; i++) {
+    if (ccb_path_exists(p->cfg->kotlin_plugin_jars[i]) &&
+        ccb_fp_add_file(p, b, p->cfg->kotlin_plugin_jars[i]) != 0) {
+      *failed = 1;
+    }
+  }
+  for (size_t i = 0; i < p->cfg->kotlin_plugin_options_count; i++) {
+    ccb_fp_add(b, "kotlin_plugin_option",
+      p->cfg->kotlin_plugin_options[i]);
+  }
 }
 
 static void ccb_pipe_diag(ccb_pipe *p, const char *code, const char *phase, const char *msg) {
@@ -466,6 +507,21 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     free(mv.aars);
     free(mv.jars);
     ccb_maven_entries_free(mv.entries, mv.entries_count);
+  }
+  // Compiler plugins (cache-only: builds never touch the network).
+  // Resolved jars are passed to kotlinc as -Xplugin=... in the
+  // compile-code step (and the module compile step). A cache miss
+  // fails here, before any stage runs, like a Maven miss.
+  if (p->cfg->kotlin_plugins_count > 0) {
+    char **pjars = NULL;
+    size_t pjars_count = 0;
+    if (ccb_maven_resolve_plugins(p->cfg, 0, p->opts->verbose,
+        p->opts->dry_run || p->opts->explain, &pjars, &pjars_count,
+        p->diags) != CCB_OK) {
+      return CCB_ERR_TOOLCHAIN;
+    }
+    p->cfg->kotlin_plugin_jars = pjars;
+    p->cfg->kotlin_plugin_jars_count = pjars_count;
   }
   // Directories.
   p->intermediates = ccb_path_join(p->cfg->build_dir, "intermediates");
@@ -1240,6 +1296,7 @@ static int ccb_mod_fingerprint(ccb_pipe *p, ccb_module *m, char **fp_out,
       failed = 1;
     }
   }
+  ccb_fp_add_plugins(p, &b, &failed);
   for (size_t j = 0; j < m->depends_count && !failed; j++) {
     ccb_module *d = ccb_pipe_module(p, m->depends[j]);
     if (ccb_mod_fp_dep(p, &b, d) != 0) {
@@ -1429,6 +1486,7 @@ static ccb_status ccb_mod_run_kotlinc(ccb_mod_ctx *c, char *cp_str,
   ccb_argv_push(&av, c->classes_dir);
   ccb_argv_push(&av, "-cp");
   ccb_argv_push(&av, cp_str);
+  ccb_push_plugin_args(p, &av);
   for (size_t i = 0; i < s->nkt; i++) {
     ccb_argv_push(&av, s->kt[i]);
   }
@@ -2096,6 +2154,7 @@ static ccb_status ccb_step_code(ccb_pipe *p) {
         failed = 1;
       }
     }
+    ccb_fp_add_plugins(p, &b, &failed);
     for (size_t i = 0; i < nkt && !failed; i++) {
       if (ccb_fp_add_file(p, &b, kt_files[i]) != 0) {
         failed = 1;
@@ -2169,6 +2228,7 @@ static ccb_status ccb_step_code(ccb_pipe *p) {
       ccb_argv_push(&av, p->classes_dir);
       ccb_argv_push(&av, "-cp");
       ccb_argv_push(&av, cp_str);
+      ccb_push_plugin_args(p, &av);
       for (size_t i = 0; i < nkt; i++) {
         ccb_argv_push(&av, kt_files[i]);
       }

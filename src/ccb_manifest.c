@@ -670,6 +670,147 @@ static void emit_entry(ccb_str *out, const entry *e) {
   ccb_str_append_c(out, '\n');
 }
 
+// Does text use prefix: as an attribute name outside quotes? A
+// match is `prefix:` preceded by whitespace or '<' and followed by
+// a name character, outside any quoted value.
+static int text_uses_prefix(const char *text, const char *prefix) {
+  size_t plen = strlen(prefix);
+  int in_quote = 0;
+  char quote = 0;
+  for (size_t i = 0; text[i] != '\0'; i++) {
+    char ch = text[i];
+    if (in_quote) {
+      if (ch == quote) {
+        in_quote = 0;
+      }
+      continue;
+    }
+    if (ch == '"' || ch == '\'') {
+      in_quote = 1;
+      quote = ch;
+      continue;
+    }
+    if (strncmp(text + i, prefix, plen) == 0 && text[i + plen] == ':' &&
+        is_name_char(text[i + plen + 1]) &&
+        (i == 0 || is_ws(text[i - 1]) || text[i - 1] == '<')) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// The prefix of the first namespaced attribute in text whose prefix
+// is not android:, tools:, or xmlns:, or NULL when there is none.
+// Attribute names are scanned outside quoted values; an attribute
+// name is a name run followed by optional whitespace then '='.
+static char *text_unknown_prefix(const char *text) {
+  int in_quote = 0;
+  char quote = 0;
+  for (size_t i = 0; text[i] != '\0'; i++) {
+    char ch = text[i];
+    if (in_quote) {
+      if (ch == quote) {
+        in_quote = 0;
+      }
+      continue;
+    }
+    if (ch == '"' || ch == '\'') {
+      in_quote = 1;
+      quote = ch;
+      continue;
+    }
+    if (!is_name_start(ch)) {
+      continue;
+    }
+    size_t start = i;
+    while (is_name_char(text[i])) {
+      i++;
+    }
+    size_t j = i;
+    while (is_ws(text[j])) {
+      j++;
+    }
+    if (text[j] != '=') {
+      continue;
+    }
+    const char *colon = memchr(text + start, ':', i - start);
+    if (colon == NULL) {
+      continue;
+    }
+    size_t plen = (size_t)(colon - (text + start));
+    if (plen == 7 && memcmp(text + start, "android", 7) == 0) {
+      continue;
+    }
+    if (plen == 5 && memcmp(text + start, "tools", 5) == 0) {
+      continue;
+    }
+    if (plen == 5 && memcmp(text + start, "xmlns", 5) == 0) {
+      continue;
+    }
+    return ccb_xstrndup(text + start, plen);
+  }
+  return NULL;
+}
+
+// Offset of the '>' closing the root <manifest ...> open tag, or
+// SIZE_MAX when it cannot be found. The scan is quote-aware: a '>'
+// inside an attribute value does not close the tag.
+static size_t manifest_root_tag_end(const char *text) {
+  const char *start = strstr(text, "<manifest");
+  if (start == NULL) {
+    return SIZE_MAX;
+  }
+  size_t i = (size_t)(start - text) + 9;
+  int in_quote = 0;
+  char quote = 0;
+  while (text[i] != '\0') {
+    char ch = text[i];
+    if (in_quote) {
+      if (ch == quote) {
+        in_quote = 0;
+      }
+    } else if (ch == '"' || ch == '\'') {
+      in_quote = 1;
+      quote = ch;
+    } else if (ch == '>') {
+      return i;
+    }
+    i++;
+  }
+  return SIZE_MAX;
+}
+
+// True when needle occurs within text[0..len).
+static int span_has(const char *text, size_t len, const char *needle) {
+  size_t nlen = strlen(needle);
+  if (nlen > len) {
+    return 0;
+  }
+  for (size_t i = 0; i + nlen <= len; i++) {
+    if (memcmp(text + i, needle, nlen) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Build the "unknown namespace prefix" merge error, when the caller
+// wants one.
+static void manifest_merge_prefix_error(char **err_out, const char *aar,
+    const char *prefix) {
+  if (err_out == NULL) {
+    return;
+  }
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "AAR ");
+  ccb_str_append(&s, aar);
+  ccb_str_append(&s, ": manifest entry uses namespace prefix '");
+  ccb_str_append(&s, prefix);
+  ccb_str_append(&s, "' with no known URI");
+  *err_out = ccb_str_steal(&s);
+}
+
 char *ccb_manifest_merge(const char *app_text,
     const char **aar_texts, const char **aar_names, size_t aar_count,
     ccb_manifest_warnings *warns, char **err_out) {
@@ -696,6 +837,10 @@ char *ccb_manifest_merge(const char *app_text,
   entry **comps = NULL;
   size_t ncomps = 0;
   size_t capcomps = 0;
+  // Whether any accepted entry uses the tools: prefix: the merged
+  // manifest must then declare xmlns:tools on its root, or aapt2
+  // rejects it with "unbound prefix".
+  int needs_tools = 0;
   // First-wins tracking for AAR-vs-AAR conflicts: accepted entries only.
   typedef struct {
     const entry *e;
@@ -828,6 +973,21 @@ char *ccb_manifest_merge(const char *app_text,
       seen[nseen].e = kept;
       seen[nseen].aar = aar_names[ai];
       nseen++;
+      // Namespaced attributes travel with the entry text, so the
+      // merged manifest must declare the namespace. tools: is the
+      // only other prefix real AAR manifests use; anything else has
+      // no known URI and fails the merge with a clear error instead
+      // of emitting an invalid manifest for aapt2 to reject.
+      if (text_uses_prefix(kept->text, "tools")) {
+        needs_tools = 1;
+      }
+      char *unknown = text_unknown_prefix(kept->text);
+      if (unknown != NULL) {
+        manifest_merge_prefix_error(err_out, aar_names[ai], unknown);
+        free(unknown);
+        manifest_free(lib);
+        goto done;
+      }
     }
     manifest_free(lib);
   }
@@ -850,6 +1010,16 @@ char *ccb_manifest_merge(const char *app_text,
     ccb_str out;
     ccb_str_init(&out);
     size_t pos = 0;
+    if (needs_tools) {
+      size_t root_end = manifest_root_tag_end(app_text);
+      if (root_end != SIZE_MAX &&
+          !span_has(app_text, root_end, "xmlns:tools=")) {
+        ccb_str_append_n(&out, app_text, root_end);
+        ccb_str_append(&out,
+          " xmlns:tools=\"http://schemas.android.com/tools\"");
+        pos = root_end;
+      }
+    }
     if (nuses > 0) {
       ccb_str_append_n(&out, app_text + pos, app->uses_insert - pos);
       for (size_t i = 0; i < nuses; i++) {

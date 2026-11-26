@@ -23,6 +23,8 @@ static char BASE[256];
 #define USER_OUT B("userclasses")
 #define USER_JAR B("user.jar")
 #define USER_DEX B("userdex")
+#define MISSING_DEX B("missingdex")
+#define MULTI_DEX B("multidex")
 #define APP_DEX B("appdex")
 
 static void write_text(const char *path, const char *text) {
@@ -504,6 +506,65 @@ int main(int argc, char **argv) {
     char *apk = ccb_path_join(NEG_PROJ, "build/outputs/debug/app.apk");
     CHECK(access(apk, R_OK) != 0);
     free(apk);
+  }
+
+  // 7. Multidex: User's dex references Missing, Missing's dex
+  // defines it. A directory holding both must report nothing
+  // missing — a class defined in classes2.dex satisfies a
+  // reference from classes.dex. The single-file dir still reports
+  // it (the per-file API is unchanged).
+  mkdir_or_fail(MISSING_DEX);
+  mkdir_or_fail(MULTI_DEX);
+  {
+    char *mclass = ccb_path_join(USER_OUT, "com/example/Missing.class");
+    char *args[] = { d8, "--min-api", "26", "--lib", android_jar,
+      "--output", MISSING_DEX, mclass, NULL };
+    ccb_proc_result r;
+    CHECK(run_cmd(args, BASE, env, &r));
+    if (r.exit_code != 0) {
+      fprintf(stderr, "d8 on Missing failed:\n%s\n%s\n", r.out, r.err);
+    }
+    ccb_proc_result_free(&r);
+    free(mclass);
+  }
+  {
+    char *src = ccb_path_join(USER_DEX, "classes.dex");
+    char *data = NULL;
+    size_t len = 0;
+    CHECK(ccb_read_file(src, &data, &len) == CCB_OK);
+    char *dst = ccb_path_join(MULTI_DEX, "classes.dex");
+    CHECK(ccb_write_file(dst, data, len) == CCB_OK);
+    free(data);
+    free(src);
+    free(dst);
+    src = ccb_path_join(MISSING_DEX, "classes.dex");
+    CHECK(ccb_read_file(src, &data, &len) == CCB_OK);
+    dst = ccb_path_join(MULTI_DEX, "classes2.dex");
+    CHECK(ccb_write_file(dst, data, len) == CCB_OK);
+    free(data);
+    free(src);
+    free(dst);
+  }
+  {
+    char **missing = NULL;
+    size_t nmissing = 0;
+    char *err = NULL;
+    CHECK(ccb_dexcheck_dir(MULTI_DEX, &missing, &nmissing, &err) == CCB_OK);
+    CHECK(err == NULL);
+    CHECK(nmissing == 0);
+    ccb_free_str_array(missing, nmissing);
+  }
+  {
+    char **missing = NULL;
+    size_t nmissing = 0;
+    char *err = NULL;
+    CHECK(ccb_dexcheck_dir(USER_DEX, &missing, &nmissing, &err) == CCB_OK);
+    CHECK(err == NULL);
+    CHECK(nmissing == 1);
+    if (nmissing == 1) {
+      CHECK_STR_EQ(missing[0], "com.example.Missing");
+    }
+    ccb_free_str_array(missing, nmissing);
   }
 
   free(bin);

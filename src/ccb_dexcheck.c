@@ -6,6 +6,10 @@
 // primitives dropped — and then compared against the defined classes
 // (class_defs). Normalizing before comparing matters: a reference
 // to [Lcom/example/Foo; only counts when Foo itself is undefined.
+// Over a directory the defined and referenced sets merge across all
+// dex files before comparing: d8 splits large apps over classes.dex,
+// classes2.dex, ..., and a class referenced in one file but defined
+// in another is present, not missing.
 //
 // A type that is only referenced from an annotation or a generic
 // signature still counts: d8 keeps it in type_ids, and if the class
@@ -19,10 +23,16 @@
 // Platform packages: --lib inputs, never in the dex, never a bug.
 // Keep this list small and explicit. L-kotlin/ and L-androidx/ are
 // deliberately NOT here: the stdlib and AAR classes are program
-// inputs, so their absence is a real bug.
+// inputs, so their absence is a real bug. Two exceptions:
+// L-androidx/window/extensions/ and L-androidx/window/sidecar/ are
+// OEM extension APIs the window library loads reflectively from the
+// device (WindowExtensionsProvider / SidecarProvider); no Maven
+// artifact provides them. L-org/xmlpull/ is in android.jar, the
+// --lib input, like L-org/xml/.
 static const char *ccb_dexcheck_allow[] = {
   "Ljava/", "Landroid/", "Ljavax/", "Ldalvik/", "Lsun/",
-  "Lcom/android/", "Lorg/xml/", "Lorg/w3c/",
+  "Lcom/android/", "Lorg/xml/", "Lorg/w3c/", "Lorg/xmlpull/",
+  "Landroidx/window/extensions/", "Landroidx/window/sidecar/",
 };
 
 static int ccb_dexcheck_cmp(const void *a, const void *b) {
@@ -177,10 +187,16 @@ static void ccb_dexcheck_check_ref(char *ref, char **defined, size_t ndefined,
   }
 }
 
-ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
-    size_t *nmissing_out, char **err_out) {
-  *missing_out = NULL;
-  *nmissing_out = 0;
+// Parse one dex file into owned defined + referenced descriptor
+// arrays (dotted names are made later, only for missing classes).
+// On a malformed file returns CCB_ERR_BUILD with *err_out set.
+static ccb_status ccb_dexcheck_collect(const char *path,
+    char ***defined_out, size_t *ndefined_out, char ***refs_out,
+    size_t *nrefs_out, char **err_out) {
+  *defined_out = NULL;
+  *ndefined_out = 0;
+  *refs_out = NULL;
+  *nrefs_out = 0;
   *err_out = NULL;
   char *data = NULL;
   size_t len = 0;
@@ -252,18 +268,17 @@ ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
         why = "class_defs table out of bounds";
         break;
       }
-      defined[ndefined++] = types[cidx];
+      defined[ndefined++] = ccb_xstrdup(types[cidx]);
     }
   }
   if (why == NULL) {
-    // Sort only: entries are borrowed from strs, so the dedup
-    // in ccb_dexcheck_uniq (which frees duplicates) must not
-    // run on this array. Duplicates are harmless for lookup.
+    // defined holds owned copies, sorted for binary search.
+    // Duplicates are harmless for lookup.
     if (ndefined > 1) {
       qsort(defined, ndefined, sizeof(*defined), ccb_dexcheck_cmp);
     }
-    // Referenced types, normalized first, then compared: an array
-    // reference only counts when its element class is undefined.
+    // Referenced types, normalized first: an array reference only
+    // counts when its element class is undefined.
     char **refs = ccb_xcalloc(type_n == 0 ? 1 : type_n, sizeof(*refs));
     size_t nrefs = 0;
     for (uint32_t i = 0; i < type_n && why == NULL; i++) {
@@ -279,26 +294,31 @@ ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
     }
     if (why == NULL) {
       nrefs = ccb_dexcheck_uniq(refs, nrefs);
-      char **missing = NULL;
-      size_t nmissing = 0;
-      size_t cap = 0;
+      *defined_out = defined;
+      *ndefined_out = ndefined;
+      *refs_out = refs;
+      *nrefs_out = nrefs;
+      defined = NULL;
+      refs = NULL;
+    } else {
       for (size_t i = 0; i < nrefs; i++) {
-        ccb_dexcheck_check_ref(refs[i], defined, ndefined, &missing, &nmissing, &cap);
+        free(refs[i]);
       }
-      *missing_out = missing;
-      *nmissing_out = nmissing;
+      free(refs);
     }
-    for (size_t i = 0; i < nrefs; i++) {
-      free(refs[i]);
-    }
-    free(refs);
   }
-  // strs own the strings; types/defined only borrow them.
+  // strs own the strings; types only borrows them. defined/refs are
+  // owned copies, handed out on success, freed here on failure.
   for (uint32_t i = 0; i < str_n; i++) {
     free(strs[i]);
   }
   free(strs);
   free(types);
+  if (why != NULL) {
+    for (size_t i = 0; i < ndefined; i++) {
+      free(defined[i]);
+    }
+  }
   free(defined);
   free(data);
   if (why != NULL) {
@@ -311,6 +331,35 @@ ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
     *err_out = ccb_str_steal(&m);
     return CCB_ERR_BUILD;
   }
+  return CCB_OK;
+}
+
+ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
+    size_t *nmissing_out, char **err_out) {
+  *missing_out = NULL;
+  *nmissing_out = 0;
+  *err_out = NULL;
+  char **defined = NULL;
+  size_t ndefined = 0;
+  char **refs = NULL;
+  size_t nrefs = 0;
+  ccb_status rc = ccb_dexcheck_collect(path, &defined, &ndefined, &refs,
+    &nrefs, err_out);
+  if (rc != CCB_OK) {
+    return rc;
+  }
+  char **missing = NULL;
+  size_t nmissing = 0;
+  size_t cap = 0;
+  for (size_t i = 0; i < nrefs; i++) {
+    ccb_dexcheck_check_ref(refs[i], defined, ndefined, &missing,
+      &nmissing, &cap);
+  }
+  ccb_free_str_array(defined, ndefined);
+  ccb_free_str_array(refs, nrefs);
+  nmissing = ccb_dexcheck_uniq(missing, nmissing);
+  *missing_out = missing;
+  *nmissing_out = nmissing;
   return CCB_OK;
 }
 
@@ -339,29 +388,68 @@ ccb_status ccb_dexcheck_dir(const char *dir, char ***missing_out,
     ccb_free_str_array(files, nfiles);
     return CCB_ERR_BUILD;
   }
-  char **missing = NULL;
-  size_t nmissing = 0;
-  size_t cap = 0;
+  // Collect defined + referenced across ALL dex files first: d8
+  // splits large apps over classes.dex, classes2.dex, ..., and a
+  // class referenced in one file but defined in another is present,
+  // not missing. Comparing per file reports it falsely.
+  char **defined = NULL;
+  size_t ndefined = 0;
+  size_t defined_cap = 0;
+  char **refs = NULL;
+  size_t nrefs = 0;
+  size_t refs_cap = 0;
   ccb_status rc = CCB_OK;
   for (size_t i = 0; i < nfiles && rc == CCB_OK; i++) {
-    char **fm = NULL;
-    size_t nfm = 0;
+    char **fdef = NULL;
+    size_t nfdef = 0;
+    char **fref = NULL;
+    size_t nfref = 0;
     char *err = NULL;
-    rc = ccb_dexcheck_file(files[i], &fm, &nfm, &err);
+    rc = ccb_dexcheck_collect(files[i], &fdef, &nfdef, &fref, &nfref,
+      &err);
     if (rc != CCB_OK) {
       *err_out = err;
     } else {
-      for (size_t j = 0; j < nfm; j++) {
-        ccb_dexcheck_push(&missing, &nmissing, &cap, fm[j]);
+      for (size_t j = 0; j < nfdef; j++) {
+        if (ndefined == defined_cap) {
+          defined_cap = defined_cap == 0 ? 64 : defined_cap * 2;
+          defined = ccb_xrealloc(defined,
+            defined_cap * sizeof(*defined));
+        }
+        defined[ndefined++] = fdef[j];
       }
-      free(fm);
+      free(fdef);
+      for (size_t j = 0; j < nfref; j++) {
+        if (nrefs == refs_cap) {
+          refs_cap = refs_cap == 0 ? 64 : refs_cap * 2;
+          refs = ccb_xrealloc(refs, refs_cap * sizeof(*refs));
+        }
+        refs[nrefs++] = fref[j];
+      }
+      free(fref);
     }
   }
   ccb_free_str_array(files, nfiles);
   if (rc != CCB_OK) {
-    ccb_free_str_array(missing, nmissing);
+    ccb_free_str_array(defined, ndefined);
+    ccb_free_str_array(refs, nrefs);
     return rc;
   }
+  // One global compare: a referenced class is missing only when no
+  // dex file in the directory defines it.
+  if (ndefined > 1) {
+    qsort(defined, ndefined, sizeof(*defined), ccb_dexcheck_cmp);
+  }
+  nrefs = ccb_dexcheck_uniq(refs, nrefs);
+  char **missing = NULL;
+  size_t nmissing = 0;
+  size_t cap = 0;
+  for (size_t i = 0; i < nrefs; i++) {
+    ccb_dexcheck_check_ref(refs[i], defined, ndefined, &missing,
+      &nmissing, &cap);
+  }
+  ccb_free_str_array(defined, ndefined);
+  ccb_free_str_array(refs, nrefs);
   // One sort + dedup at the end: the per-file lists arrive in
   // readdir order, so merging them here is what makes the reported
   // missing classes deterministic (and alphabetical).

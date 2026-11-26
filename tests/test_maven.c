@@ -183,6 +183,134 @@ static void dep_xml(ccb_str *s, const char *group, const char *artifact,
   ccb_str_append(s, "</dependency>");
 }
 
+// Write an artifact-level maven-metadata.xml into the fixture repo.
+static void put_metadata(const char *group, const char *artifact,
+    const char *versions_xml, const char *latest, const char *release) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, REPO);
+  ccb_str_append_c(&s, '/');
+  for (const char *p = group; *p != '\0'; p++) {
+    ccb_str_append_c(&s, *p == '.' ? '/' : *p);
+  }
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, artifact);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, "maven-metadata.xml");
+  char *path = ccb_str_steal(&s);
+  char *dir = ccb_dirname(path);
+  CHECK(ccb_mkdir_p(dir) == CCB_OK);
+  free(dir);
+  ccb_str m;
+  ccb_str_init(&m);
+  ccb_str_append(&m, "<metadata><groupId>");
+  ccb_str_append(&m, group);
+  ccb_str_append(&m, "</groupId><artifactId>");
+  ccb_str_append(&m, artifact);
+  ccb_str_append(&m, "</artifactId><versioning>");
+  if (latest != NULL) {
+    ccb_str_append(&m, "<latest>");
+    ccb_str_append(&m, latest);
+    ccb_str_append(&m, "</latest>");
+  }
+  if (release != NULL) {
+    ccb_str_append(&m, "<release>");
+    ccb_str_append(&m, release);
+    ccb_str_append(&m, "</release>");
+  }
+  ccb_str_append(&m, "<versions>");
+  ccb_str_append(&m, versions_xml);
+  ccb_str_append(&m, "</versions></versioning></metadata>");
+  write_text(path, m.buf);
+  ccb_str_free(&m);
+  free(path);
+}
+
+// Write a -SNAPSHOT artifact: the snapshot maven-metadata.xml plus
+// the timestamped POM and jar it points at. version is
+// "1.0-SNAPSHOT"; the concrete version is
+// "1.0-<timestamp>-<build>".
+static void put_snapshot(const char *group, const char *artifact,
+    const char *version, const char *timestamp, const char *build) {
+  ccb_str base;
+  ccb_str_init(&base);
+  ccb_str_append_n(&base, version, strlen(version) - 9);
+  char *base_v = ccb_str_steal(&base);
+  ccb_str conc;
+  ccb_str_init(&conc);
+  ccb_str_append(&conc, base_v);
+  ccb_str_append_c(&conc, '-');
+  ccb_str_append(&conc, timestamp);
+  ccb_str_append_c(&conc, '-');
+  ccb_str_append(&conc, build);
+  char *concrete = ccb_str_steal(&conc);
+  ccb_str mp;
+  ccb_str_init(&mp);
+  ccb_str_append(&mp, REPO);
+  ccb_str_append_c(&mp, '/');
+  for (const char *p = group; *p != '\0'; p++) {
+    ccb_str_append_c(&mp, *p == '.' ? '/' : *p);
+  }
+  ccb_str_append_c(&mp, '/');
+  ccb_str_append(&mp, artifact);
+  ccb_str_append_c(&mp, '/');
+  ccb_str_append(&mp, version);
+  ccb_str_append_c(&mp, '/');
+  ccb_str_append(&mp, "maven-metadata.xml");
+  char *meta_path = ccb_str_steal(&mp);
+  char *dir = ccb_dirname(meta_path);
+  CHECK(ccb_mkdir_p(dir) == CCB_OK);
+  free(dir);
+  ccb_str m;
+  ccb_str_init(&m);
+  ccb_str_append(&m, "<metadata><groupId>");
+  ccb_str_append(&m, group);
+  ccb_str_append(&m, "</groupId><artifactId>");
+  ccb_str_append(&m, artifact);
+  ccb_str_append(&m, "</artifactId><version>");
+  ccb_str_append(&m, version);
+  ccb_str_append(&m, "</version><versioning><snapshot><timestamp>");
+  ccb_str_append(&m, timestamp);
+  ccb_str_append(&m, "</timestamp><buildNumber>");
+  ccb_str_append(&m, build);
+  ccb_str_append(&m, "</buildNumber></snapshot></versioning></metadata>");
+  write_text(meta_path, m.buf);
+  ccb_str_free(&m);
+  free(meta_path);
+  ccb_str pom;
+  ccb_str_init(&pom);
+  ccb_str_append(&pom, "<project><modelVersion>4.0.0</modelVersion>");
+  ccb_str_append(&pom, "<groupId>");
+  ccb_str_append(&pom, group);
+  ccb_str_append(&pom, "</groupId><artifactId>");
+  ccb_str_append(&pom, artifact);
+  ccb_str_append(&pom, "</artifactId><version>");
+  ccb_str_append(&pom, version);
+  ccb_str_append(&pom, "</version><packaging>jar</packaging></project>");
+  ccb_str leaf;
+  ccb_str_init(&leaf);
+  ccb_str_append(&leaf, artifact);
+  ccb_str_append_c(&leaf, '-');
+  ccb_str_append(&leaf, concrete);
+  ccb_str_append(&leaf, ".pom");
+  char *pom_path = repo_leaf_path(group, artifact, version, leaf.buf);
+  ccb_str_free(&leaf);
+  write_text(pom_path, pom.buf);
+  ccb_str_free(&pom);
+  free(pom_path);
+  ccb_str_init(&leaf);
+  ccb_str_append(&leaf, artifact);
+  ccb_str_append_c(&leaf, '-');
+  ccb_str_append(&leaf, concrete);
+  ccb_str_append(&leaf, ".jar");
+  char *jar_path = repo_leaf_path(group, artifact, version, leaf.buf);
+  ccb_str_free(&leaf);
+  write_text(jar_path, "fake-artifact-bytes");
+  free(jar_path);
+  free(base_v);
+  free(concrete);
+}
+
 static int has_code(ccb_diag_list *diags, const char *code) {
   for (size_t i = 0; i < diags->count; i++) {
     if (strcmp(diags->items[i].code, code) == 0) {
@@ -932,12 +1060,11 @@ static void test_config_validation(void) {
   static const char *bad[] = {
     "com.example:lib",
     "com.example:lib:1.0:extra",
-    "com.example:lib:[1.0,2.0)",
-    "com.example:lib:1.0-SNAPSHOT",
-    "com.example:lib:LATEST",
-    "com.example:lib:RELEASE",
     "com.example:lib:",
     "com.example::1.0",
+    "com.example:lib:[1.0,2.0",
+    "com.example:lib:1.0)",
+    "com.example:lib:[,]",
   };
   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
     write_cfg_toml(bad[i]);
@@ -949,14 +1076,24 @@ static void test_config_validation(void) {
     CHECK(has_code(&diags, "CCB-E1005"));
     ccb_diag_list_free(&diags);
   }
-  write_cfg_toml("com.example:lib:1.0");
-  {
+  // Version specs are valid coordinates now: ranges, LATEST,
+  // RELEASE, and -SNAPSHOT all load.
+  static const char *good[] = {
+    "com.example:lib:1.0",
+    "com.example:lib:[1.0,2.0)",
+    "com.example:lib:[1.0]",
+    "com.example:lib:1.0-SNAPSHOT",
+    "com.example:lib:LATEST",
+    "com.example:lib:RELEASE",
+  };
+  for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+    write_cfg_toml(good[i]);
     ccb_config *cfg = NULL;
     ccb_diag_list diags;
     ccb_diag_list_init(&diags);
     CHECK(ccb_config_load(B("proj_cfg/ccb.toml"), NULL, &cfg, &diags) == CCB_OK);
     CHECK(cfg != NULL && cfg->maven_count == 1);
-    CHECK_STR_EQ(cfg->maven[0], "com.example:lib:1.0");
+    CHECK_STR_EQ(cfg->maven[0], good[i]);
     ccb_config_free(cfg);
     ccb_diag_list_free(&diags);
   }
@@ -1851,6 +1988,784 @@ static void test_e2e_parents(int argc, char **argv) {
   free(jarsigner);
 }
 
+// ---------- version ranges, LATEST/RELEASE, snapshots ----------
+
+static void test_ranges(void) {
+  // Published versions for com.example:ranged, with latest/release
+  // tags in the metadata. 2.0-SNAPSHOT in the list checks that a
+  // snapshot sorts below its release in range selection.
+  put_metadata("com.example", "ranged",
+    "<version>1.0</version><version>1.5</version>"
+    "<version>2.0-alpha1</version><version>2.0-SNAPSHOT</version>"
+    "<version>2.0</version><version>2.0.1</version>"
+    "<version>3.0-alpha1</version>",
+    "3.0-alpha1", "2.0.1");
+  pom_simple("com.example", "ranged", "1.0", "jar", NULL);
+  pom_simple("com.example", "ranged", "1.5", "jar", NULL);
+  pom_simple("com.example", "ranged", "2.0-alpha1", "jar", NULL);
+  pom_simple("com.example", "ranged", "2.0-SNAPSHOT", "jar", NULL);
+  pom_simple("com.example", "ranged", "2.0", "jar", NULL);
+  pom_simple("com.example", "ranged", "2.0.1", "jar", NULL);
+  pom_simple("com.example", "ranged", "3.0-alpha1", "jar", NULL);
+  static const char *specs[][2] = {
+    { "com.example:ranged:[1.0,2.0)", "2.0-SNAPSHOT" },
+    { "com.example:ranged:[1.0,2.0]", "2.0" },
+    { "com.example:ranged:[1.0]", "1.0" },
+    { "com.example:ranged:(,1.5]", "1.5" },
+    { "com.example:ranged:[2.0,)", "3.0-alpha1" },
+    { "com.example:ranged:LATEST", "3.0-alpha1" },
+    { "com.example:ranged:RELEASE", "2.0.1" },
+  };
+  for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+    const char *coords[] = { specs[i][0] };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(out.entries_count == 1);
+    if (out.entries_count == 1) {
+      CHECK_STR_EQ(out.entries[0].version, specs[i][1]);
+    }
+    ccb_str leaf;
+    ccb_str_init(&leaf);
+    ccb_str_append(&leaf, "ranged-");
+    ccb_str_append(&leaf, specs[i][1]);
+    ccb_str_append(&leaf, ".jar");
+    char *leaf_s = ccb_str_steal(&leaf);
+    CHECK(result_has(&out, leaf_s));
+    free(leaf_s);
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // "1.0" == "1.0.0": a [1.0] range matches a published 1.0.0.
+  put_metadata("com.example", "eq", "<version>1.0.0</version>",
+    "1.0.0", "1.0.0");
+  pom_simple("com.example", "eq", "1.0.0", "jar", NULL);
+  {
+    const char *coords[] = { "com.example:eq:[1.0]" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(out.entries_count == 1);
+    if (out.entries_count == 1) {
+      CHECK_STR_EQ(out.entries[0].version, "1.0.0");
+    }
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // A range no published version satisfies fails with CCB-E3019.
+  {
+    const char *coords[] = { "com.example:ranged:[9.0,10.0)" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Metadata without a <latest> tag cannot resolve LATEST.
+  put_metadata("com.example", "nolat", "<version>1.0</version>", NULL, NULL);
+  {
+    const char *coords[] = { "com.example:nolat:LATEST" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+static void test_snapshots(void) {
+  put_snapshot("com.example", "snap", "1.0-SNAPSHOT", "20261126.123456",
+    "3");
+  {
+    const char *coords[] = { "com.example:snap:1.0-SNAPSHOT" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "snap-1.0-20261126.123456-3.jar"));
+    CHECK(out.entries_count == 1);
+    if (out.entries_count == 1) {
+      CHECK_STR_EQ(out.entries[0].version, "1.0-20261126.123456-3");
+    }
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Cache-only re-resolve uses the cached snapshot metadata and
+  // finds the same timestamped build.
+  {
+    const char *coords[] = { "com.example:snap:1.0-SNAPSHOT" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 0, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "snap-1.0-20261126.123456-3.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // A snapshot with no snapshot metadata fails with CCB-E3019.
+  {
+    const char *coords[] = { "com.example:nosnap:1.0-SNAPSHOT" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- parent <dependencies> inheritance ----------
+
+static void test_parent_deps(void) {
+  pom_simple("com.example", "pdep-parentdep", "1.0", "jar", NULL);
+  pom_simple("com.example", "pdep-parentdep", "2.0", "jar", NULL);
+  pom_simple("com.example", "pdep-managed", "9.9", "jar", NULL);
+  pom_simple("com.example", "pdep-owndep", "1.0", "jar", NULL);
+  put_artifact("com.example", "pdep-parent", "1.0", "pom",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>pdep-parent</artifactId>"
+    "<version>1.0</version><packaging>pom</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>pdep-managed</artifactId>"
+    "<version>9.9</version></dependency></dependencies>"
+    "</dependencyManagement>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>pdep-parentdep</artifactId><version>1.0</version>"
+    "</dependency></dependencies></project>",
+    CHK_NONE);
+  put_artifact("com.example", "pdep-child", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>pdep-child</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<parent><groupId>com.example</groupId><artifactId>pdep-parent</artifactId>"
+    "<version>1.0</version></parent>"
+    "<dependencies>"
+    "<dependency><groupId>com.example</groupId><artifactId>pdep-owndep</artifactId>"
+    "<version>1.0</version></dependency>"
+    "<dependency><groupId>com.example</groupId><artifactId>pdep-managed</artifactId>"
+    "</dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:pdep-child:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "pdep-child-1.0.jar"));
+    CHECK(result_has(&out, "pdep-owndep-1.0.jar"));
+    CHECK(result_has(&out, "pdep-parentdep-1.0.jar"));
+    CHECK(result_has(&out, "pdep-managed-9.9.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // A child's own declaration of the same artifact wins over the
+  // parent's inherited one.
+  put_artifact("com.example", "pdep-child2", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>pdep-child2</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<parent><groupId>com.example</groupId><artifactId>pdep-parent</artifactId>"
+    "<version>1.0</version></parent>"
+    "<dependencies>"
+    "<dependency><groupId>com.example</groupId><artifactId>pdep-parentdep</artifactId>"
+    "<version>2.0</version></dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:pdep-child2:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "pdep-parentdep-2.0.jar"));
+    CHECK(!result_has(&out, "pdep-parentdep-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- profiles ----------
+
+// Build a manual config carrying coordinates plus an explicit
+// profile list.
+static ccb_config *manual_cfg_profiles(const char **coords, size_t count,
+    const char **profiles, size_t pcount) {
+  ccb_config *c = manual_cfg(coords, count);
+  c->maven_profiles = ccb_xmalloc((pcount == 0 ? 1 : pcount) *
+    sizeof(*c->maven_profiles));
+  for (size_t i = 0; i < pcount; i++) {
+    c->maven_profiles[i] = ccb_xstrdup(profiles[i]);
+  }
+  c->maven_profiles_count = pcount;
+  return c;
+}
+
+static ccb_status resolve_profiles_here(const char **coords, size_t count,
+    const char **profiles, size_t pcount, int prefetch,
+    ccb_maven_result *out, ccb_diag_list *diags) {
+  ccb_config *c = manual_cfg_profiles(coords, count, profiles, pcount);
+  ccb_status rc = ccb_maven_resolve(c, prefetch, 0, 0, out, diags);
+  ccb_config_free(c);
+  return rc;
+}
+
+static void test_profiles(void) {
+  pom_simple("com.example", "extra", "1.0", "jar", NULL);
+  pom_simple("com.example", "optin", "1.0", "jar", NULL);
+  pom_simple("com.example", "managed2", "7.7", "jar", NULL);
+  put_artifact("com.example", "profapp", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>profapp</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<profiles>"
+    "<profile><id>with-extra</id>"
+    "<activation><activeByDefault>true</activeByDefault></activation>"
+    "<properties><extraver>1.0</extraver></properties>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>extra</artifactId><version>${extraver}</version>"
+    "</dependency></dependencies></profile>"
+    "<profile><id>opt-in</id>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>managed2</artifactId>"
+    "<version>7.7</version></dependency></dependencies>"
+    "</dependencyManagement>"
+    "<dependencies>"
+    "<dependency><groupId>com.example</groupId><artifactId>optin</artifactId>"
+    "<version>1.0</version></dependency>"
+    "<dependency><groupId>com.example</groupId><artifactId>managed2</artifactId>"
+    "</dependency></dependencies></profile>"
+    "</profiles></project>",
+    CHK_NONE);
+  // Default: the activeByDefault profile applies (its property
+  // resolves the version); the unactivated profile contributes
+  // nothing.
+  {
+    const char *coords[] = { "com.example:profapp:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "extra-1.0.jar"));
+    CHECK(!result_has(&out, "optin-1.0.jar"));
+    CHECK(!result_has(&out, "managed2-7.7.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Explicit activation: the named profile applies (including its
+  // dependencyManagement), and activeByDefault profiles go quiet.
+  {
+    const char *coords[] = { "com.example:profapp:1.0" };
+    const char *profs[] = { "opt-in" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_profiles_here(coords, 1, profs, 1, 1, &out,
+      &diags) == CCB_OK);
+    CHECK(result_has(&out, "optin-1.0.jar"));
+    CHECK(result_has(&out, "managed2-7.7.jar"));
+    CHECK(!result_has(&out, "extra-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // An unknown profile id activates nothing and fails nothing.
+  {
+    const char *coords[] = { "com.example:profapp:1.0" };
+    const char *profs[] = { "no-such-profile" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_profiles_here(coords, 1, profs, 1, 1, &out,
+      &diags) == CCB_OK);
+    CHECK(!result_has(&out, "extra-1.0.jar"));
+    CHECK(!result_has(&out, "optin-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- private repositories (config-based auth) ----------
+
+#define REPO_AUTH B("repo_auth")
+
+static void test_private_repos(void) {
+  // The auth repo lives at REPO_AUTH and is reachable only through
+  // [deps] maven_repos: the main REPO is behind CCB_MAVEN_REPOS,
+  // which this test unsets so the config's own repositories apply.
+  {
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, REPO_AUTH);
+    ccb_str_append(&s, "/com/example/auth/1.0/auth-1.0.pom");
+    char *pom_path = ccb_str_steal(&s);
+    char *dir = ccb_dirname(pom_path);
+    CHECK(ccb_mkdir_p(dir) == CCB_OK);
+    free(dir);
+    ccb_str pom;
+    ccb_str_init(&pom);
+    ccb_str_append(&pom, "<project><modelVersion>4.0.0</modelVersion>");
+    ccb_str_append(&pom, "<groupId>com.example</groupId>");
+    ccb_str_append(&pom, "<artifactId>auth</artifactId>");
+    ccb_str_append(&pom, "<version>1.0</version>");
+    ccb_str_append(&pom, "<packaging>jar</packaging></project>");
+    write_text(pom_path, pom.buf);
+    ccb_str_free(&pom);
+    free(pom_path);
+    ccb_str_init(&s);
+    ccb_str_append(&s, REPO_AUTH);
+    ccb_str_append(&s, "/com/example/auth/1.0/auth-1.0.jar");
+    char *jar_path = ccb_str_steal(&s);
+    write_text(jar_path, "fake-artifact-bytes");
+    free(jar_path);
+  }
+  const char *old_repos = getenv("CCB_MAVEN_REPOS");
+  char *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
+  // Unset the override so the config's own repositories apply.
+  unsetenv("CCB_MAVEN_REPOS");
+  ccb_str entry;
+  ccb_str_init(&entry);
+  ccb_str_append(&entry, "file://");
+  ccb_str_append(&entry, REPO_AUTH);
+  ccb_str_append(&entry, " alice env:CCB_TEST_REPO_PASS");
+  char *repo_entry = ccb_str_steal(&entry);
+  const char *pass = "s3cr3t-test-pass";
+  setenv("CCB_TEST_REPO_PASS", pass, 1);
+  {
+    const char *coords[] = { "com.example:auth:1.0" };
+    ccb_config *c = manual_cfg(coords, 1);
+    c->maven_repos = ccb_xmalloc(sizeof(*c->maven_repos));
+    c->maven_repos[0] = ccb_xstrdup(repo_entry);
+    c->maven_repos_count = 1;
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_maven_resolve(c, 1, 0, 0, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "auth-1.0.jar"));
+    // The password never appears in any diagnostic.
+    for (size_t i = 0; i < diags.count; i++) {
+      CHECK(strstr(diags.items[i].message, pass) == NULL);
+    }
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(c);
+  }
+  // A missing credential variable fails with CCB-E3019 naming the
+  // variable (not the password: there is none to leak).
+  unsetenv("CCB_TEST_REPO_PASS");
+  {
+    const char *coords[] = { "com.example:auth:1.0" };
+    ccb_config *c = manual_cfg(coords, 1);
+    c->maven_repos = ccb_xmalloc(sizeof(*c->maven_repos));
+    c->maven_repos[0] = ccb_xstrdup(repo_entry);
+    c->maven_repos_count = 1;
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_maven_resolve(c, 1, 0, 0, &out, &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    int names_var = 0;
+    for (size_t i = 0; i < diags.count; i++) {
+      if (strstr(diags.items[i].message, "CCB_TEST_REPO_PASS") != NULL) {
+        names_var = 1;
+      }
+    }
+    CHECK(names_var);
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(c);
+  }
+  free(repo_entry);
+  if (saved_repos != NULL) {
+    setenv("CCB_MAVEN_REPOS", saved_repos, 1);
+    free(saved_repos);
+  } else {
+    unsetenv("CCB_MAVEN_REPOS");
+  }
+}
+
+// ---------- compiler-plugin resolution ----------
+
+static ccb_config *manual_plugin_cfg(const char **coords, size_t count) {
+  ccb_config *c = ccb_xcalloc(1, sizeof(*c));
+  c->kotlin_plugins = ccb_xmalloc((count == 0 ? 1 : count) *
+    sizeof(*c->kotlin_plugins));
+  for (size_t i = 0; i < count; i++) {
+    c->kotlin_plugins[i] = ccb_xstrdup(coords[i]);
+  }
+  c->kotlin_plugins_count = count;
+  return c;
+}
+
+static void test_plugins(void) {
+  pom_simple("com.example", "plug", "1.0", "jar", NULL);
+  pom_simple("com.example", "plugaar", "1.0", "aar", NULL);
+  put_artifact("com.example", "plugpom", "1.0", "pom",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>plugpom</artifactId>"
+    "<version>1.0</version><packaging>pom</packaging></project>",
+    CHK_NONE);
+  // A jar plugin resolves to its cached jar, prefetch and cache-only.
+  {
+    const char *coords[] = { "com.example:plug:1.0" };
+    ccb_config *c = manual_plugin_cfg(coords, 1);
+    char **jars = NULL;
+    size_t njars = 0;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_maven_resolve_plugins(c, 1, 0, 0, &jars, &njars,
+      &diags) == CCB_OK);
+    CHECK(njars == 1);
+    if (njars == 1) {
+      const char *base = strrchr(jars[0], '/');
+      CHECK(base != NULL && strcmp(base + 1, "plug-1.0.jar") == 0);
+    }
+    ccb_free_str_array(jars, njars);
+    ccb_diag_list_free(&diags);
+    ccb_diag_list_init(&diags);
+    jars = NULL;
+    njars = 0;
+    CHECK(ccb_maven_resolve_plugins(c, 0, 0, 0, &jars, &njars,
+      &diags) == CCB_OK);
+    CHECK(njars == 1);
+    ccb_free_str_array(jars, njars);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(c);
+  }
+  // An aar plugin is not a compiler plugin.
+  {
+    const char *coords[] = { "com.example:plugaar:1.0" };
+    ccb_config *c = manual_plugin_cfg(coords, 1);
+    char **jars = NULL;
+    size_t njars = 0;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_maven_resolve_plugins(c, 1, 0, 0, &jars, &njars,
+      &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    ccb_free_str_array(jars, njars);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(c);
+  }
+  // A pom-packaging plugin has no jar to pass to kotlinc.
+  {
+    const char *coords[] = { "com.example:plugpom:1.0" };
+    ccb_config *c = manual_plugin_cfg(coords, 1);
+    char **jars = NULL;
+    size_t njars = 0;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_maven_resolve_plugins(c, 1, 0, 0, &jars, &njars,
+      &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    ccb_free_str_array(jars, njars);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(c);
+  }
+  // A plugin never prefetched fails cache-only with CCB-E3021.
+  {
+    const char *coords[] = { "com.example:neverthere:1.0" };
+    ccb_config *c = manual_plugin_cfg(coords, 1);
+    char **jars = NULL;
+    size_t njars = 0;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_maven_resolve_plugins(c, 0, 0, 0, &jars, &njars,
+      &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3021"));
+    ccb_free_str_array(jars, njars);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(c);
+  }
+}
+
+#define PROJ_E2E_COMPOSE B("proj_e2e_compose")
+#define CACHE_E2E_COMPOSE B("cache_e2e_compose")
+#define APK_E2E_COMPOSE B("proj_e2e_compose/build/outputs/debug/app.apk")
+
+// Minimal Compose sample: a ComponentActivity whose setContent block
+// exercises the compiler plugin (a remembered counter state), plus
+// the real Compose libraries from Google Maven and the embeddable
+// compiler plugin from Maven Central.
+static void write_e2e_compose_project(void) {
+  mkdir_or_fail(B("proj_e2e_compose/src/main/kotlin/com/example/compose"));
+  mkdir_or_fail(B("proj_e2e_compose/src/main/res/values"));
+  write_text(B("proj_e2e_compose/ccb.toml"),
+    "ccb_version = 1\n"
+    "\n"
+    "[project]\n"
+    "name = \"compose\"\n"
+    "package = \"com.example.compose\"\n"
+    "version = \"1.0\"\n"
+    "version_code = 1\n"
+    "min_sdk = 24\n"
+    "target_sdk = 35\n"
+    "compile_sdk = 35\n"
+    "\n"
+    "[paths]\n"
+    "manifest = \"src/main/AndroidManifest.xml\"\n"
+    "res = \"src/main/res\"\n"
+    "kotlin = \"src/main/kotlin\"\n"
+    "\n"
+    "[build]\n"
+    "kotlin_plugins = [\"org.jetbrains.kotlin:kotlin-compose-compiler-plugin:2.4.21\"]\n"
+    "\n"
+    "[deps]\n"
+    "maven_central = true\n"
+    "maven = [\"androidx.compose.runtime:runtime:1.13.0\", \"androidx.compose.ui:ui:1.13.0\", \"androidx.compose.foundation:foundation-layout:1.13.0\", \"androidx.compose.material3:material3:1.5.0\", \"androidx.activity:activity-compose:1.13.0\", \"androidx.core:core-ktx:1.18.0\", \"androidx.activity:activity-ktx:1.13.0\", \"androidx.lifecycle:lifecycle-runtime-ktx:2.10.0\", \"androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0\", \"androidx.savedstate:savedstate:1.5.0\", \"androidx.savedstate:savedstate-compose-android:1.5.0\", \"androidx.savedstate:savedstate-ktx:1.5.0\"]\n"
+    "maven_exclude = [\"androidx.compose.animation:animation-core\"]\n");
+  write_text(B("proj_e2e_compose/src/main/AndroidManifest.xml"),
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
+    "  package=\"com.example.compose\">\n"
+    "  <application android:label=\"@string/app_name\" android:theme=\"@style/AppTheme\">\n"
+    "    <activity android:name=\".MainActivity\" android:exported=\"true\">\n"
+    "      <intent-filter>\n"
+    "        <action android:name=\"android.intent.action.MAIN\" />\n"
+    "        <category android:name=\"android.intent.category.LAUNCHER\" />\n"
+    "      </intent-filter>\n"
+    "    </activity>\n"
+    "  </application>\n"
+    "</manifest>\n");
+  write_text(B("proj_e2e_compose/src/main/kotlin/com/example/compose/MainActivity.kt"),
+    "package com.example.compose\n"
+    "\n"
+    "import android.os.Bundle\n"
+    "import androidx.activity.ComponentActivity\n"
+    "import androidx.activity.compose.setContent\n"
+    "import androidx.compose.foundation.layout.Column\n"
+    "import androidx.compose.material3.Button\n"
+    "import androidx.compose.material3.Text\n"
+    "import androidx.compose.runtime.getValue\n"
+    "import androidx.compose.runtime.mutableStateOf\n"
+    "import androidx.compose.runtime.remember\n"
+    "import androidx.compose.runtime.setValue\n"
+    "\n"
+    "class MainActivity : ComponentActivity() {\n"
+    "  override fun onCreate(savedInstanceState: Bundle?) {\n"
+    "    super.onCreate(savedInstanceState)\n"
+    "    setContent {\n"
+    "      var count by remember { mutableStateOf(0) }\n"
+    "      Column {\n"
+    "        Text(\"Hello Compose\")\n"
+    "        Button(onClick = { count++ }) {\n"
+    "          Text(\"Count: $count\")\n"
+    "        }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "}\n");
+  write_text(B("proj_e2e_compose/src/main/res/values/strings.xml"),
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<resources>\n"
+    "  <string name=\"app_name\">compose</string>\n"
+    "</resources>\n");
+  write_text(B("proj_e2e_compose/src/main/res/values/themes.xml"),
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+    "<resources>\n"
+    "  <style name=\"AppTheme\" parent=\"android:Theme.Material\" />\n"
+    "</resources>\n");
+}
+
+static int entry_present(const ccb_maven_result *out, const char *group,
+    const char *artifact, const char *version) {
+  for (size_t i = 0; i < out->entries_count; i++) {
+    if (strcmp(out->entries[i].group, group) == 0 &&
+        strcmp(out->entries[i].artifact, artifact) == 0 &&
+        strcmp(out->entries[i].version, version) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void test_jvm_variants(void) {
+  pom_simple("com.example", "multi-jvm", "1.0", "jar", NULL);
+  pom_simple("com.example", "multi-android", "1.0", "aar", NULL);
+  pom_simple("com.example", "plain-jvm", "1.0", "jar", NULL);
+  pom_simple("com.example", "multi-jvm", "2.0", "jar", NULL);
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  const char *coords[] = {"com.example:multi-jvm:1.0",
+    "com.example:multi-android:1.0", "com.example:plain-jvm:1.0"};
+  CHECK(resolve_here(coords, 3, 1, &out, &diags) == CCB_OK);
+  CHECK(out.entries_count == 2);
+  CHECK(!entry_present(&out, "com.example", "multi-jvm", "1.0"));
+  CHECK(entry_present(&out, "com.example", "multi-android", "1.0"));
+  CHECK(entry_present(&out, "com.example", "plain-jvm", "1.0"));
+  // The dropped variant leaves the jars/aars arrays too, or dex
+  // still sees the duplicate class.
+  CHECK(out.jars_count == 1);
+  CHECK(strstr(out.jars[0], "plain-jvm-1.0.jar") != NULL);
+  CHECK(out.aars_count == 1);
+  CHECK(strstr(out.aars[0], "multi-android-1.0.aar") != NULL);
+  ccb_maven_result_free(&out);
+  // A `-jvm` artifact whose `-android` sibling is a different
+  // version is kept: the sibling rule needs the same version.
+  const char *coords2[] = {"com.example:multi-jvm:2.0",
+    "com.example:multi-android:1.0"};
+  CHECK(resolve_here(coords2, 2, 1, &out, &diags) == CCB_OK);
+  CHECK(out.entries_count == 2);
+  CHECK(entry_present(&out, "com.example", "multi-jvm", "2.0"));
+  CHECK(entry_present(&out, "com.example", "multi-android", "1.0"));
+  ccb_maven_result_free(&out);
+}
+
+static void test_e2e_compose(int argc, char **argv) {
+  char *bin = find_binary(argc, argv);
+  char *sdk_home = tool_home("ANDROID_HOME", "android-sdk");
+  char *java_home = tool_home("JAVA_HOME", "jdk17");
+  char *kotlin_home = tool_home("KOTLIN_HOME", "kotlin-2.4.21");
+  char *aapt2 = sdk_home == NULL ? NULL
+    : ccb_path_join3(sdk_home, "build-tools/35.0.0", "aapt2");
+  char *jarsigner = java_home == NULL ? NULL : ccb_path_join(java_home, "bin/jarsigner");
+  if (bin == NULL || aapt2 == NULL || access(aapt2, X_OK) != 0 ||
+      jarsigner == NULL || access(jarsigner, X_OK) != 0) {
+    fprintf(stderr, "note: no runnable SDK toolchain, skipping compose e2e\n");
+    free(bin);
+    free(sdk_home);
+    free(java_home);
+    free(kotlin_home);
+    free(aapt2);
+    free(jarsigner);
+    return;
+  }
+  write_e2e_compose_project();
+  // The Compose libraries and the compiler plugin come from the real
+  // repositories, so the fixture override must be off for this test.
+  const char *old_repos = getenv("CCB_MAVEN_REPOS");
+  const char *old_cache = getenv("CCB_MAVEN_CACHE");
+  char *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
+  char *saved_cache = old_cache != NULL ? ccb_xstrdup(old_cache) : NULL;
+  unsetenv("CCB_MAVEN_REPOS");
+  setenv("CCB_MAVEN_CACHE", CACHE_E2E_COMPOSE, 1);
+  // Prefetch in-process from the project config. A prefetch failure
+  // (network, upstream) skips the test: the pinned exact coordinates
+  // are already covered by the fast fixture tests, so a network
+  // hiccup must not false-red CI.
+  int prefetched = 0;
+  {
+    ccb_config *cfg = NULL;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    if (ccb_config_load(B("proj_e2e_compose/ccb.toml"), NULL, &cfg,
+        &diags) == CCB_OK) {
+      ccb_maven_result mv;
+      char **pjars = NULL;
+      size_t npjars = 0;
+      if (ccb_maven_resolve(cfg, 1, 0, 0, &mv, &diags) == CCB_OK &&
+          ccb_maven_resolve_plugins(cfg, 1, 0, 0, &pjars, &npjars,
+            &diags) == CCB_OK) {
+        prefetched = 1;
+        ccb_free_str_array(pjars, npjars);
+        ccb_maven_result_free(&mv);
+      }
+    }
+    if (!prefetched) {
+      fprintf(stderr, "note: compose prefetch failed, skipping compose e2e\n");
+      for (size_t i = 0; i < diags.count; i++) {
+        fprintf(stderr, "  %s\n", diags.items[i].message);
+      }
+    }
+    ccb_config_free(cfg);
+    ccb_diag_list_free(&diags);
+  }
+  if (!prefetched) {
+    goto restore;
+  }
+  // Child environment for check/build runs. CCB_MAVEN_REPOS stays
+  // unset (inherited from this process), so the child resolves from
+  // the real repositories too.
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, "ANDROID_HOME=");
+  ccb_str_append(&s, sdk_home);
+  char *sdk_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "JAVA_HOME=");
+  ccb_str_append(&s, java_home);
+  char *java_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "KOTLIN_HOME=");
+  ccb_str_append(&s, kotlin_home);
+  char *kotlin_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "CCB_MAVEN_CACHE=");
+  ccb_str_append(&s, CACHE_E2E_COMPOSE);
+  char *cache_env = ccb_str_steal(&s);
+  ccb_str_init(&s);
+  ccb_str_append(&s, "HOME=");
+  ccb_str_append(&s, B("home"));
+  char *home_env = ccb_str_steal(&s);
+  char *const env_extra[] = { sdk_env, java_env, kotlin_env, cache_env,
+    home_env, NULL };
+  {
+    char *args[] = { bin, "check", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, PROJ_E2E_COMPOSE, env_extra, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(strstr(r.out, "kotlin plugins:") != NULL);
+    ccb_proc_result_free(&r);
+  }
+  {
+    char *args[] = { bin, "build", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, PROJ_E2E_COMPOSE, env_extra, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    CHECK(ccb_path_exists(APK_E2E_COMPOSE));
+    ccb_proc_result_free(&r);
+  }
+  // Negative control: an empty cache makes the same build fail with
+  // CCB-E3021 before any stage runs.
+  {
+    char *empty_cache = ccb_path_join(BASE, "cache_empty_compose");
+    CHECK(ccb_mkdir_p(empty_cache) == CCB_OK);
+    ccb_str ce;
+    ccb_str_init(&ce);
+    ccb_str_append(&ce, "CCB_MAVEN_CACHE=");
+    ccb_str_append(&ce, empty_cache);
+    char *cache_empty_env = ccb_str_steal(&ce);
+    char *const env_empty[] = { sdk_env, java_env, kotlin_env,
+      cache_empty_env, home_env, NULL };
+    char *args[] = { bin, "build", NULL };
+    ccb_proc_result r;
+    CHECK(ccb_proc_run(args, PROJ_E2E_COMPOSE, env_empty, &r) == CCB_OK);
+    CHECK(r.exit_code != 0);
+    CHECK(strstr(r.err, "CCB-E3021") != NULL);
+    ccb_proc_result_free(&r);
+    free(cache_empty_env);
+    free(empty_cache);
+  }
+  free(sdk_env);
+  free(java_env);
+  free(kotlin_env);
+  free(cache_env);
+  free(home_env);
+restore:
+  if (saved_repos != NULL) {
+    setenv("CCB_MAVEN_REPOS", saved_repos, 1);
+    free(saved_repos);
+  } else {
+    unsetenv("CCB_MAVEN_REPOS");
+  }
+  if (saved_cache != NULL) {
+    setenv("CCB_MAVEN_CACHE", saved_cache, 1);
+    free(saved_cache);
+  } else {
+    unsetenv("CCB_MAVEN_CACHE");
+  }
+  free(bin);
+  free(sdk_home);
+  free(java_home);
+  free(kotlin_home);
+  free(aapt2);
+  free(jarsigner);
+}
+
 static void test_e2e(int argc, char **argv) {
   char *bin = find_binary(argc, argv);
   char *sdk_home = tool_home("ANDROID_HOME", "android-sdk");
@@ -2015,8 +2930,16 @@ int main(int argc, char **argv) {
   test_exclusions();
   test_exclusion_config();
   test_lockfile();
+  test_ranges();
+  test_snapshots();
+  test_parent_deps();
+  test_profiles();
+  test_private_repos();
+  test_plugins();
+  test_jvm_variants();
   test_e2e(argc, argv);
   test_e2e_parents(argc, argv);
+  test_e2e_compose(argc, argv);
   if (saved_repos != NULL) {
     setenv("CCB_MAVEN_REPOS", saved_repos, 1);
     free(saved_repos);

@@ -111,17 +111,47 @@ typedef struct {
   // seconds before the daemon shuts itself down (default 300).
   int kotlinc_daemon;
   long kotlinc_daemon_idle_seconds;
+  // [build] kotlin_plugins: exact "group:artifact:version" coordinates
+  // of kotlinc compiler-plugin jars, resolved via Maven (setup
+  // prefetches, builds read the cache) and passed to kotlinc as
+  // -Xplugin=<jar>. kotlin_plugin_options: "plugin-id:key=value"
+  // strings, passed as -P plugin:<id>:<key>=<value>. Plugin
+  // coordinates must be exact versions: a compiler plugin has to
+  // match the kotlinc version, so ranges and snapshots are rejected.
+  char **kotlin_plugins;
+  size_t kotlin_plugins_count;
+  char **kotlin_plugin_options;
+  size_t kotlin_plugin_options_count;
+  // Resolved plugin jar paths, filled in by the pipeline's stage 0
+  // (cache-only resolve) and consumed by the kotlinc step. Owned by
+  // the config once filled; freed by ccb_config_free.
+  char **kotlin_plugin_jars;
+  size_t kotlin_plugin_jars_count;
   // [deps]
   char **jars;
   size_t jars_count;
   char **aars;
   size_t aars_count;
   // [deps] maven: raw "group:artifact:version" coordinates, validated
-  // at load (exact versions only) but resolved to cache paths later:
+  // at load (exact versions, version ranges, LATEST, RELEASE, and
+  // -SNAPSHOT are all accepted) but resolved to cache paths later:
   // builds and checks read the cache, `ccb setup` prefetches it.
   char **maven;
   size_t maven_count;
   int maven_central; // [deps] maven_central: also search Maven Central
+  // [deps] maven_repos: extra repositories, searched after Google
+  // Maven (and Maven Central when enabled), in declared order. Each
+  // entry is "url" or "url username password-source", where the
+  // password source is "env:VAR" (read from the environment at
+  // resolve time) or a literal password. Credentials never appear in
+  // logs or diagnostics.
+  char **maven_repos;
+  size_t maven_repos_count;
+  // [deps] maven_profiles: profile ids activated explicitly (like
+  // mvn -P). A profile with <activeByDefault> is active only when
+  // this list is empty.
+  char **maven_profiles;
+  size_t maven_profiles_count;
   // [deps] maven_exclude: "group:artifact" (every version) or
   // "group:artifact:version" (that version only). An excluded artifact
   // never resolves, even transitively; excluding a direct dependency

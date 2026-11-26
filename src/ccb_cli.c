@@ -1870,6 +1870,30 @@ static int ccb_setup_prefetch_maven(ccb_args *a, ccb_config *cfg) {
   return 0;
 }
 
+// Compiler-plugin prefetch: the same network step setup owns for
+// [build] kotlin_plugins. Plugin jars are not in ccb.lock (the exact
+// coordinate in ccb.toml pins them); a failure stops setup like a
+// Maven prefetch failure. Returns 0, or 3.
+static int ccb_setup_prefetch_plugins(ccb_args *a, ccb_config *cfg) {
+  ccb_diag_list diags;
+  char **jars = NULL;
+  size_t count = 0;
+  if (cfg == NULL || cfg->kotlin_plugins_count <= 0) {
+    return 0;
+  }
+  ccb_diag_list_init(&diags);
+  if (ccb_maven_resolve_plugins(cfg, 1, a->verbose, 0, &jars, &count,
+      &diags) != CCB_OK) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    return 3;
+  }
+  fprintf(stderr, "maven: prefetched %zu compiler plugin jars\n", count);
+  ccb_free_str_array(jars, count);
+  ccb_diag_list_free(&diags);
+  return 0;
+}
+
 // Prints the "SDK ready" line, plus the env exports with
 // --print-env.
 static void ccb_setup_print_java_home(void) {
@@ -1982,6 +2006,10 @@ static int ccb_cmd_setup(ccb_args *a) {
     rc = 3;
     goto out;
   }
+  if (ccb_setup_prefetch_plugins(a, ctx.cfg) != 0) {
+    rc = 3;
+    goto out;
+  }
   ccb_setup_final_pass(ctx.cfg, ctx.compile_sdk, ctx.build_tools);
   ccb_setup_print_ready(a, &ctx);
 out:
@@ -2066,6 +2094,22 @@ static int ccb_cmd_check(ccb_args *a) {
     have_maven = 1;
     ccb_maven_result_free(&mv);
   }
+  // Compiler plugins (cache-only): same treatment as Maven deps.
+  size_t nplugins = 0;
+  int have_plugins = 0;
+  if (cfg->kotlin_plugins_count > 0) {
+    char **pjars = NULL;
+    if (ccb_maven_resolve_plugins(cfg, 0, a->verbose, 0, &pjars,
+        &nplugins, &diags) != CCB_OK) {
+      ccb_print_diags(a, &diags);
+      ccb_sdk_free(sdk);
+      ccb_config_free(cfg);
+      ccb_diag_list_free(&diags);
+      return 3;
+    }
+    have_plugins = 1;
+    ccb_free_str_array(pjars, nplugins);
+  }
   // Preview build gate (opt-in): runs after toolchain validation so a
   // failing gate does not mask a broken toolchain, and a broken
   // toolchain does not mask gate failures either way — the gate only
@@ -2129,6 +2173,9 @@ static int ccb_cmd_check(ccb_args *a) {
     if (have_maven) {
       printf("  maven: %zu artifacts (%zu aar, %zu jar)\n",
         mv_aars + mv_jars, mv_aars, mv_jars);
+    }
+    if (have_plugins) {
+      printf("  kotlin plugins: %zu jars\n", nplugins);
     }
     if (have_maven && cfg->maven_exclude_count > 0) {
       printf("  maven: excluded ");

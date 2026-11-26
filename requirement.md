@@ -88,7 +88,6 @@ Gradle is the wrong tool for small, agent-driven Android work:
 - No annotation processing (kapt/KSP). Apps using Dagger, Hilt, or Room
   codegen are out of scope for v1; CCB must fail with a clear message if it
   detects them, not a cryptic compiler error.
-- No Jetpack Compose compiler plugin in v1 (listed as a v2 candidate).
 - AAB output: `ccb build --aab` produces a base-module-only bundle (see
   §5.10). Split APK generation, asset packs, and dynamic feature
   modules remain out of scope.
@@ -299,6 +298,14 @@ version.
 - Kotlin compiler location: `$KOTLIN_HOME`, then `PATH`, then TOML
   `[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error, not a Stage 2
   surprise.
+- Compiler plugins: when `[build] kotlin_plugins` is set, kotlinc gets
+  `-Xplugin=<jar>` per resolved plugin jar plus
+  `-P plugin:<id>:<key>=<value>` per `[build] kotlin_plugin_options`
+  entry; plugin jars and options join the compile fingerprint. The
+  Compose compiler plugin path is
+  `org.jetbrains.kotlin:kotlin-compose-compiler-plugin:<kotlin-version>`
+  (the plain artifact, not the `-embeddable` variant, which is built
+  for Gradle's embedded compiler — see §5.4).
 
 ### 5.4 Stage 3 — Dependencies (local files + remote Maven)
 
@@ -311,19 +318,28 @@ version.
   sources. No silent shadowing.
 - Remote dependencies: `[deps] maven = ["group:artifact:version", ...]`
   resolves through Google Maven (plus Maven Central when
-  `[deps] maven_central = true`) into the local Maven cache
+  `[deps] maven_central = true`, plus extra repositories from
+  `[deps] maven_repos`, including authenticated ones via
+  `env:VAR` credentials) into the local Maven cache
   (`~/.cache/ccb/maven2`), and the resolved AARs/JARs feed this stage
-  exactly like local files. Exact versions only; packaging comes from
-  the POM; transitive resolution is breadth-first nearest-wins over
-  compile + runtime scopes. Parent POMs are fetched from the same
-  repositories and contribute properties and dependencyManagement
-  (child entries win, nearest ancestor wins among parents; chains
-  capped at 10 ancestors, cycles fail with `CCB-E3024`).
-  `[deps] maven_exclude` suppresses
+  exactly like local files. Versions may be exact, ranges
+  (`[1.0,2.0)`), `LATEST`, `RELEASE`, or `-SNAPSHOT` (resolved from
+  `maven-metadata.xml`; the lockfile records the concrete version);
+  packaging comes from the POM; transitive resolution is breadth-first
+  nearest-wins over compile + runtime scopes. Parent POMs are fetched
+  from the same repositories and contribute properties,
+  dependencyManagement, `<dependencies>`, and profiles (child entries
+  win, nearest ancestor wins among parents; chains capped at 10
+  ancestors, cycles fail with `CCB-E3024`). Profiles activate by id
+  (`[deps] maven_profiles`) or `<activeByDefault>` when no ids are
+  listed. `[deps] maven_exclude` suppresses
   artifacts (`group:artifact` for every version, or
   `group:artifact:version` for one version), checked before
   nearest-wins; excluding a direct dependency is a config error.
-  `ccb setup` prefetches the cache and writes the resolved tree to
+  Compiler plugins declared in `[build] kotlin_plugins` resolve via
+  Maven the same way (exact versions only, no transitive walk, not in
+  the lockfile) and are wired into kotlinc in §5.3. `ccb setup`
+  prefetches the cache and writes the resolved tree to
   `ccb.lock` in the project root; builds and `ccb check` resolve
   cache-only, fail with `CCB-E3021` on a miss, and fail with
   `CCB-E3023` on any deviation from a present lockfile. Full rules
@@ -996,9 +1012,17 @@ crashes on input it does not understand, and never silently guesses.
    transitive nearest-wins, checksum-verified cache, setup-time
    prefetch, cache-only builds) — see §5.4 and `docs/maven.md`.
    Follow-ups implemented: dependency exclusions (`maven_exclude`)
-   and a `ccb.lock` lockfile (setup writes, check/build enforce).
-3. **Compose?** Add the Compose compiler plugin path in v2, or declare
-   Compose out of scope?
+   and a `ccb.lock` lockfile (setup writes, check/build enforce);
+   kotlinc compiler plugins (`[build] kotlin_plugins`, exact versions,
+   no transitive walk); version ranges, `LATEST`/`RELEASE`, and
+   `-SNAPSHOT` handling; parent-POM `<dependencies>` and profile
+   inheritance; profile support (by id or `<activeByDefault>`);
+   authenticated/private repositories (`[deps] maven_repos`).
+3. **Compose?** Implemented: the Compose compiler plugin path —
+   `[build] kotlin_plugins` with
+   `org.jetbrains.kotlin:kotlin-compose-compiler-plugin:<kotlin-version>`;
+   a minimal Compose sample builds with `ccb build` — see §5.3 and
+   `docs/maven.md`.
 4. **Manifest merging?** Implemented: the AAR manifest merge subset
    (components, permissions, features; app-wins conflicts) — see §5.2.
 5. **Windows?** v2 platform, or Linux/macOS only by design?

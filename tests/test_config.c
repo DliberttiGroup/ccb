@@ -4,6 +4,7 @@
 #include "ccb_fs.h"
 #include "ccb_diag.h"
 #include "ccb_config.h"
+#include "ccb_str.h"
 
 static const char *VALID =
   "ccb_version = 1\n"
@@ -207,6 +208,88 @@ int main(void) {
     CHECK(ccb_config_load(B("sdk36/bad.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
     CHECK(has_code(&diags, "CCB-E1005"));
     ccb_diag_list_free(&diags);
+  }
+
+  // New Maven/plugin keys: valid forms load, invalid forms fail
+  // with CCB-E1005.
+  {
+    const char *good =
+      "ccb_version = 1\n"
+      "[project]\n"
+      "name = \"x\"\n"
+      "package = \"com.x\"\n"
+      "version = \"1.0\"\n"
+      "min_sdk = 26\n"
+      "target_sdk = 35\n"
+      "compile_sdk = 35\n"
+      "[paths]\n"
+      "manifest = \"src/main/AndroidManifest.xml\"\n"
+      "[build]\n"
+      "kotlin_plugins = [\"org.jetbrains.kotlin:kotlin-compose-compiler-plugin:2.4.21\"]\n"
+      "kotlin_plugin_options = [\"androidx.compose.compiler.plugins.kotlin:generateFunctionKeyMetaClasses=true\"]\n"
+      "[deps]\n"
+      "maven = [\"com.example:lib:[1.0,2.0)\"]\n"
+      "maven_repos = [\"https://repo.example.com/maven2\", \"https://priv.example.com/m2 alice env:PRIV_PASS\"]\n"
+      "maven_profiles = [\"opt-in\"]\n";
+    CHECK(ccb_mkdir_p(B("newkeys/src/main")) == CCB_OK);
+    CHECK(ccb_write_file(B("newkeys/src/main/AndroidManifest.xml"), "<manifest/>", 11) == CCB_OK);
+    CHECK(ccb_write_file(B("newkeys/ccb.toml"), good, strlen(good)) == CCB_OK);
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    ccb_config *c = NULL;
+    CHECK(ccb_config_load(B("newkeys/ccb.toml"), NULL, &c, &diags) == CCB_OK);
+    CHECK(c != NULL);
+    CHECK(c->kotlin_plugins_count == 1);
+    CHECK_STR_EQ(c->kotlin_plugins[0],
+      "org.jetbrains.kotlin:kotlin-compose-compiler-plugin:2.4.21");
+    CHECK(c->kotlin_plugin_options_count == 1);
+    CHECK_STR_EQ(c->kotlin_plugin_options[0],
+      "androidx.compose.compiler.plugins.kotlin:generateFunctionKeyMetaClasses=true");
+    CHECK(c->maven_count == 1);
+    CHECK_STR_EQ(c->maven[0], "com.example:lib:[1.0,2.0)");
+    CHECK(c->maven_repos_count == 2);
+    CHECK(c->maven_profiles_count == 1);
+    CHECK_STR_EQ(c->maven_profiles[0], "opt-in");
+    ccb_config_free(c);
+    ccb_diag_list_free(&diags);
+    static const char *bad_keys[] = {
+      // Plugin coordinates must be exact versions.
+      "[build]\nkotlin_plugins = [\"com.example:plug:[1.0,2.0)\"]\n",
+      "[build]\nkotlin_plugins = [\"com.example:plug:1.0-SNAPSHOT\"]\n",
+      // Plugin options must be plugin-id:key=value.
+      "[build]\nkotlin_plugin_options = [\"some.plugin:key\"]\n",
+      "[build]\nkotlin_plugin_options = [\"some.plugin:=value\"]\n",
+      // Repo entries: 1 or 3 fields, http(s)/file URL, no userinfo.
+      "[deps]\nmaven_repos = [\"https://repo.example.com/m2 alice\"]\n",
+      "[deps]\nmaven_repos = [\"ftp://repo.example.com/m2\"]\n",
+      "[deps]\nmaven_repos = [\"https://alice:secret@repo.example.com/m2\"]\n",
+      "[deps]\nmaven_repos = [\"https://repo.example.com/m2 alice env:\"]\n",
+    };
+    for (size_t i = 0; i < sizeof(bad_keys) / sizeof(bad_keys[0]); i++) {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t,
+        "ccb_version = 1\n"
+        "[project]\n"
+        "name = \"x\"\n"
+        "package = \"com.x\"\n"
+        "version = \"1.0\"\n"
+        "min_sdk = 26\n"
+        "target_sdk = 35\n"
+        "compile_sdk = 35\n"
+        "[paths]\n"
+        "manifest = \"src/main/AndroidManifest.xml\"\n");
+      ccb_str_append(&t, bad_keys[i]);
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("newkeys/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list_init(&diags);
+      c = NULL;
+      CHECK(ccb_config_load(B("newkeys/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+      CHECK(c == NULL);
+      CHECK(has_code(&diags, "CCB-E1005"));
+      ccb_diag_list_free(&diags);
+    }
   }
 
   ccb_remove_recursive(base);

@@ -110,6 +110,16 @@ static char *mv_coord_str(ccb_arena *a, const char *group, const char *artifact,
 #define MV_GOOGLE_MAVEN "https://dl.google.com/dl/android/maven2/"
 #define MV_MAVEN_CENTRAL "https://repo.maven.apache.org/maven2/"
 
+// One repository: a normalized base URL plus optional Basic-auth
+// credentials. The password lives only in arena memory and travels
+// only in a curl argv; it never appears in a URL, a log line, or a
+// diagnostic.
+typedef struct {
+  char *base;
+  char *user; // NULL: no auth
+  char *pass; // NULL when user is NULL
+} mv_repo;
+
 static char *mv_norm_base(ccb_arena *a, const char *base) {
   // Trim surrounding whitespace, then ensure exactly one trailing '/'.
   while (*base == ' ' || *base == '\t' || *base == '\n' || *base == '\r') {
@@ -135,11 +145,58 @@ static char *mv_norm_base(ccb_arena *a, const char *base) {
   return norm;
 }
 
+// Parse one [deps] maven_repos entry ("url" or
+// "url username password-source") into *repo. Returns 0 on success,
+// -1 with a diagnostic on a missing environment variable for an
+// "env:VAR" password source. Config load validates the shape, so a
+// malformed entry here is skipped by the caller; only the env
+// failure is a resolve-time error, because the variable is only
+// read when the repository is actually used.
+static int mv_parse_repo_entry(ccb_arena *a, const char *entry,
+    mv_repo *repo, ccb_diag_list *diags) {
+  const char *sp1 = strchr(entry, ' ');
+  size_t url_len = sp1 != NULL ? (size_t)(sp1 - entry) : strlen(entry);
+  char *raw = ccb_arena_strndup(a, entry, url_len);
+  repo->base = mv_norm_base(a, raw);
+  repo->user = NULL;
+  repo->pass = NULL;
+  if (sp1 == NULL) {
+    return 0;
+  }
+  const char *user = sp1 + 1;
+  const char *sp2 = strchr(user, ' ');
+  repo->user = ccb_arena_strndup(a, user, (size_t)(sp2 - user));
+  const char *pw = sp2 + 1;
+  if (memcmp(pw, "env:", 4) == 0) {
+    const char *val = getenv(pw + 4);
+    if (val == NULL) {
+      ccb_str m;
+      ccb_str_init(&m);
+      ccb_str_append(&m, "repository ");
+      ccb_str_append(&m, repo->base);
+      ccb_str_append(&m,
+        " needs credentials from environment variable ");
+      ccb_str_append(&m, pw + 4);
+      ccb_str_append(&m, ", which is not set");
+      mv_diag(diags, "CCB-E3019", NULL, m.buf);
+      ccb_str_free(&m);
+      return -1;
+    }
+    repo->pass = ccb_arena_strdup(a, val);
+    return 0;
+  }
+  repo->pass = ccb_arena_strdup(a, pw);
+  return 0;
+}
+
 // Repository list: CCB_MAVEN_REPOS (comma-separated, replaces the
 // defaults; the test seam for fixture file:// repos) or Google Maven
-// plus Maven Central when the project opts in.
-static char **mv_repos(ccb_arena *a, const ccb_config *cfg, size_t *count) {
-  char **repos = NULL;
+// plus Maven Central when the project opts in, plus the project's
+// [deps] maven_repos entries in declared order. Returns NULL with a
+// diagnostic on a missing credential environment variable.
+static mv_repo *mv_repos(ccb_arena *a, const ccb_config *cfg,
+    size_t *count, ccb_diag_list *diags) {
+  mv_repo *repos = NULL;
   size_t n = 0;
   size_t cap = 0;
   const char *env = getenv("CCB_MAVEN_REPOS");
@@ -155,18 +212,41 @@ static char **mv_repos(ccb_arena *a, const ccb_config *cfg, size_t *count) {
       }
       if (t < len) {
         char *raw = ccb_arena_strndup(a, p + t, len - t);
-        MV_GROW(a, repos, n, cap, char *);
-        repos[n++] = mv_norm_base(a, raw);
+        MV_GROW(a, repos, n, cap, mv_repo);
+        repos[n].base = mv_norm_base(a, raw);
+        repos[n].user = NULL;
+        repos[n].pass = NULL;
+        n++;
       }
       p = comma != NULL ? comma + 1 : p + len;
     }
   }
   if (n == 0) {
-    MV_GROW(a, repos, n, cap, char *);
-    repos[n++] = mv_norm_base(a, MV_GOOGLE_MAVEN);
+    MV_GROW(a, repos, n, cap, mv_repo);
+    repos[n].base = mv_norm_base(a, MV_GOOGLE_MAVEN);
+    repos[n].user = NULL;
+    repos[n].pass = NULL;
+    n++;
     if (cfg->maven_central) {
-      MV_GROW(a, repos, n, cap, char *);
-      repos[n++] = mv_norm_base(a, MV_MAVEN_CENTRAL);
+      MV_GROW(a, repos, n, cap, mv_repo);
+      repos[n].base = mv_norm_base(a, MV_MAVEN_CENTRAL);
+      repos[n].user = NULL;
+      repos[n].pass = NULL;
+      n++;
+    }
+    for (size_t i = 0; i < cfg->maven_repos_count; i++) {
+      // A malformed entry is skipped: config load validates the
+      // list, so resolve never sees one through a real config.
+      const char *e = cfg->maven_repos[i];
+      const char *sp1 = strchr(e, ' ');
+      if (sp1 != NULL && strchr(sp1 + 1, ' ') == NULL) {
+        continue;
+      }
+      MV_GROW(a, repos, n, cap, mv_repo);
+      if (mv_parse_repo_entry(a, e, &repos[n], diags) != 0) {
+        return NULL;
+      }
+      n++;
     }
   }
   *count = n;
@@ -284,7 +364,8 @@ static int mv_read_checksum(const char *path, char *out, size_t out_size) {
 // in a sidecar), 1 on mismatch. Downloads go to a temp sibling path
 // that is always removed here.
 static int mv_verify_downloaded(ccb_arena *a, const char *tmp_path,
-    const char *url, char *sha256_hex) {
+    const char *url, const char *user, const char *pass,
+    char *sha256_hex) {
   if (ccb_sha256_file(tmp_path, sha256_hex) != CCB_OK) {
     return 1;
   }
@@ -302,7 +383,7 @@ static int mv_verify_downloaded(ccb_arena *a, const char *tmp_path,
     ccb_str_append(&ts, ".checksum");
     char *chk_path = ccb_arena_strdup(a, ts.buf);
     ccb_str_free(&ts);
-    int dl = ccb_net_download(curl_url, chk_path);
+    int dl = ccb_net_download_auth(curl_url, chk_path, user, pass);
     if (dl != 0) {
       // No checksum file at this suffix: try the next one, or accept
       // the download as checksum-less.
@@ -399,6 +480,25 @@ typedef struct {
   char *val;
 } mv_prop;
 
+// One <profile>: id, <activeByDefault> activation, and the
+// properties, dependencies, and dependencyManagement it contributes
+// when active. Other activation forms (jdk, os, property, file)
+// are parsed nowhere: a profile using them is inactive unless its
+// id is listed in [deps] maven_profiles.
+typedef struct {
+  char *id;
+  int active_default;
+  mv_prop *props;
+  size_t props_count;
+  size_t props_cap;
+  mv_dep *deps;
+  size_t deps_count;
+  size_t deps_cap;
+  mv_dep *mgmt;
+  size_t mgmt_count;
+  size_t mgmt_cap;
+} mv_profile;
+
 typedef struct {
   char *packaging;
   char *group;
@@ -416,6 +516,9 @@ typedef struct {
   mv_dep *mgmt;
   size_t mgmt_count;
   size_t mgmt_cap;
+  mv_profile *profiles;
+  size_t profiles_count;
+  size_t profiles_cap;
 } mv_pom;
 
 typedef struct {
@@ -426,7 +529,11 @@ typedef struct {
   int depth;
   mv_pom *pom;
   mv_dep *cur;
-  int cur_mgmt;
+  // Which list the open <dependency> belongs to: 0 plain
+  // dependencies, 1 dependencyManagement, 2 profile dependencies,
+  // 3 profile dependencyManagement.
+  int cur_where;
+  mv_profile *cur_profile;
   int failed;
 } mv_parser;
 
@@ -620,21 +727,49 @@ static void mv_text(mv_parser *x, const char *text, size_t len) {
     pom->props[pom->props_count].key = ccb_arena_strdup(x->a, x->stack[2]);
     pom->props[pom->props_count].val = val;
     pom->props_count++;
+  } else if (mv_path_is(x, "project", "profiles", "profile", "id", NULL)) {
+    if (x->cur_profile != NULL) {
+      mv_set_field(&x->cur_profile->id, val);
+    }
+  } else if (mv_path_is(x, "project", "profiles", "profile", "activation",
+      "activeByDefault")) {
+    if (x->cur_profile != NULL) {
+      x->cur_profile->active_default = strcmp(val, "true") == 0;
+    }
+  } else if (x->depth == 5 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "profiles") == 0 &&
+      strcmp(x->stack[2], "profile") == 0 &&
+      strcmp(x->stack[3], "properties") == 0) {
+    // A direct child of a profile's <properties>: same first-wins
+    // rule as the POM's own properties.
+    if (x->cur_profile != NULL) {
+      mv_profile *prof = x->cur_profile;
+      int seen = 0;
+      for (size_t i = 0; i < prof->props_count; i++) {
+        if (strcmp(prof->props[i].key, x->stack[4]) == 0) {
+          seen = 1;
+          break;
+        }
+      }
+      if (!seen) {
+        MV_GROW(x->a, prof->props, prof->props_count, prof->props_cap,
+          mv_prop);
+        prof->props[prof->props_count].key =
+          ccb_arena_strdup(x->a, x->stack[4]);
+        prof->props[prof->props_count].val = val;
+        prof->props_count++;
+      }
+    }
   } else if (x->cur != NULL) {
     // Text arrives with the field element still on the stack, so a
-    // dependency field sits at depth 4 (plain) or 5 (managed).
-    const char *field = NULL;
-    if (x->depth == 4 && strcmp(x->stack[0], "project") == 0 &&
-        strcmp(x->stack[1], "dependencies") == 0 &&
-        strcmp(x->stack[2], "dependency") == 0) {
-      field = x->stack[3];
-    } else if (x->depth == 5 && strcmp(x->stack[0], "project") == 0 &&
-        strcmp(x->stack[1], "dependencyManagement") == 0 &&
-        strcmp(x->stack[2], "dependencies") == 0 &&
-        strcmp(x->stack[3], "dependency") == 0) {
-      field = x->stack[4];
-    }
-    if (field != NULL) {
+    // dependency field sits exactly one level below its container:
+    // depth 4 (plain), 5 (managed), 6 (profile), or 7 (profile
+    // managed). Anything deeper (e.g. text inside <exclusions>) is
+    // not a dependency field and is ignored.
+    int field_depth = x->cur_where == 0 ? 4 : x->cur_where == 1 ? 5 :
+      x->cur_where == 2 ? 6 : 7;
+    if (x->depth == field_depth) {
+      const char *field = x->stack[x->depth - 1];
       if (strcmp(field, "groupId") == 0) {
         mv_set_field(&x->cur->group, val);
       } else if (strcmp(field, "artifactId") == 0) {
@@ -692,16 +827,71 @@ static void mv_open(mv_parser *x, const char *name) {
   }
   memcpy(x->stack[x->depth], name, strlen(name) + 1);
   x->depth++;
-  if (mv_path_is(x, "project", "dependencies", "dependency", NULL, NULL)) {
+  if (mv_path_is(x, "project", "profiles", "profile", NULL, NULL)) {
+    x->cur_profile = ccb_arena_alloc(x->a, sizeof(*x->cur_profile));
+    memset(x->cur_profile, 0, sizeof(*x->cur_profile));
+  } else if (mv_path_is(x, "project", "dependencies", "dependency", NULL, NULL)) {
     x->cur = ccb_arena_alloc(x->a, sizeof(*x->cur));
     memset(x->cur, 0, sizeof(*x->cur));
-    x->cur_mgmt = 0;
+    x->cur_where = 0;
   } else if (mv_path_is(x, "project", "dependencyManagement", "dependencies",
       "dependency", NULL)) {
     x->cur = ccb_arena_alloc(x->a, sizeof(*x->cur));
     memset(x->cur, 0, sizeof(*x->cur));
-    x->cur_mgmt = 1;
+    x->cur_where = 1;
+  } else if (mv_path_is(x, "project", "profiles", "profile", "dependencies",
+      "dependency")) {
+    x->cur = ccb_arena_alloc(x->a, sizeof(*x->cur));
+    memset(x->cur, 0, sizeof(*x->cur));
+    x->cur_where = 2;
   }
+  // mv_path_is only matches five levels, so the profile-managed
+  // dependency (project/profiles/profile/dependencyManagement/
+  // dependencies/dependency, depth 6) is matched by hand.
+  if (x->depth == 6 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "profiles") == 0 &&
+      strcmp(x->stack[2], "profile") == 0 &&
+      strcmp(x->stack[3], "dependencyManagement") == 0 &&
+      strcmp(x->stack[4], "dependencies") == 0 &&
+      strcmp(x->stack[5], "dependency") == 0) {
+    x->cur = ccb_arena_alloc(x->a, sizeof(*x->cur));
+    memset(x->cur, 0, sizeof(*x->cur));
+    x->cur_where = 3;
+  }
+}
+
+// True when the element now closing is a <dependency> in one of the
+// four containers (plain, managed, profile, profile-managed).
+// mv_path_is only matches five levels, so the six-level
+// profile-managed path is matched by hand.
+static int mv_is_dep_close(mv_parser *x) {
+  if (x->depth == 3 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "dependencies") == 0 &&
+      strcmp(x->stack[2], "dependency") == 0) {
+    return 1;
+  }
+  if (x->depth == 4 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "dependencyManagement") == 0 &&
+      strcmp(x->stack[2], "dependencies") == 0 &&
+      strcmp(x->stack[3], "dependency") == 0) {
+    return 1;
+  }
+  if (x->depth == 5 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "profiles") == 0 &&
+      strcmp(x->stack[2], "profile") == 0 &&
+      strcmp(x->stack[3], "dependencies") == 0 &&
+      strcmp(x->stack[4], "dependency") == 0) {
+    return 1;
+  }
+  if (x->depth == 6 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "profiles") == 0 &&
+      strcmp(x->stack[2], "profile") == 0 &&
+      strcmp(x->stack[3], "dependencyManagement") == 0 &&
+      strcmp(x->stack[4], "dependencies") == 0 &&
+      strcmp(x->stack[5], "dependency") == 0) {
+    return 1;
+  }
+  return 0;
 }
 
 static void mv_close(mv_parser *x, const char *name) {
@@ -709,20 +899,32 @@ static void mv_close(mv_parser *x, const char *name) {
     x->failed = 1;
     return;
   }
-  if (x->cur != NULL &&
-      ((mv_path_is(x, "project", "dependencies", "dependency", NULL, NULL) &&
-        !x->cur_mgmt) ||
-      (mv_path_is(x, "project", "dependencyManagement", "dependencies",
-        "dependency", NULL) && x->cur_mgmt))) {
+  if (x->cur != NULL && mv_is_dep_close(x)) {
     mv_pom *pom = x->pom;
-    if (x->cur_mgmt) {
-      MV_GROW(x->a, pom->mgmt, pom->mgmt_count, pom->mgmt_cap, mv_dep);
-      pom->mgmt[pom->mgmt_count++] = *x->cur;
-    } else {
+    if (x->cur_where == 0) {
       MV_GROW(x->a, pom->deps, pom->deps_count, pom->deps_cap, mv_dep);
       pom->deps[pom->deps_count++] = *x->cur;
+    } else if (x->cur_where == 1) {
+      MV_GROW(x->a, pom->mgmt, pom->mgmt_count, pom->mgmt_cap, mv_dep);
+      pom->mgmt[pom->mgmt_count++] = *x->cur;
+    } else if (x->cur_where == 2 && x->cur_profile != NULL) {
+      mv_profile *prof = x->cur_profile;
+      MV_GROW(x->a, prof->deps, prof->deps_count, prof->deps_cap, mv_dep);
+      prof->deps[prof->deps_count++] = *x->cur;
+    } else if (x->cur_where == 3 && x->cur_profile != NULL) {
+      mv_profile *prof = x->cur_profile;
+      MV_GROW(x->a, prof->mgmt, prof->mgmt_count, prof->mgmt_cap, mv_dep);
+      prof->mgmt[prof->mgmt_count++] = *x->cur;
     }
     x->cur = NULL;
+  }
+  if (x->cur_profile != NULL &&
+      mv_path_is(x, "project", "profiles", "profile", NULL, NULL)) {
+    mv_pom *pom = x->pom;
+    MV_GROW(x->a, pom->profiles, pom->profiles_count, pom->profiles_cap,
+      mv_profile);
+    pom->profiles[pom->profiles_count++] = *x->cur_profile;
+    x->cur_profile = NULL;
   }
   x->depth--;
 }
@@ -1008,10 +1210,10 @@ static char *mv_cache_dir_for(ccb_arena *a, const char *cache, const char *group
 // 2 (checksum mismatch), 3 (cached file corrupt), 4 (cache-only
 // miss), 5 (cannot store the download). prefetch != 0 may download;
 // prefetch == 0 never touches the network.
-static int mv_fetch(ccb_arena *a, const char *cache, char **repos,
+static int mv_fetch(ccb_arena *a, const char *cache, mv_repo *repos,
     size_t repos_count, const char *group, const char *artifact,
-    const char *version, const char *ext, int prefetch, int readonly,
-    char **final_out) {
+    const char *version, const char *dir_version, const char *ext,
+    int prefetch, int readonly, char **final_out) {
   char *leaf = mv_leaf(a, artifact, version, ext);
   char *final_path = mv_cache_file(a, cache, group, artifact, version, leaf);
   if (ccb_path_exists(final_path)) {
@@ -1044,13 +1246,18 @@ static int mv_fetch(ccb_arena *a, const char *cache, char **repos,
   char *tmp = ccb_arena_strdup(a, ts.buf);
   ccb_str_free(&ts);
   for (size_t i = 0; i < repos_count; i++) {
-    char *url = mv_url(a, repos[i], group, artifact, version, leaf);
-    if (ccb_net_download(url, tmp) != 0) {
+    // The remote directory is the declared version: a snapshot's
+    // timestamped files live under its -SNAPSHOT directory, while
+    // the leaf and the cache path use the concrete version.
+    char *url = mv_url(a, repos[i].base, group, artifact, dir_version,
+      leaf);
+    if (ccb_net_download_auth(url, tmp, repos[i].user, repos[i].pass) != 0) {
       remove(tmp);
       continue;
     }
     char sha256_hex[65];
-    int vr = mv_verify_downloaded(a, tmp, url, sha256_hex);
+    int vr = mv_verify_downloaded(a, tmp, url, repos[i].user,
+      repos[i].pass, sha256_hex);
     if (vr != 0) {
       remove(tmp);
       return 2;
@@ -1066,12 +1273,638 @@ static int mv_fetch(ccb_arena *a, const char *cache, char **repos,
   return 1;
 }
 
+// Forward: mv_fetch_fail is defined in the resolution section
+// below; the metadata helpers need it for missing/stale metadata.
+static ccb_status mv_fetch_fail(ccb_diag_list *diags, int rc,
+    const char *coord, const char *what);
+
+// ---------- version metadata, ranges, snapshots ----------
+//
+// Version specs beyond an exact version resolve through
+// maven-metadata.xml: artifact-level metadata lists every published
+// version plus <latest>/<release>; snapshot metadata under a
+// -SNAPSHOT version directory carries the timestamp/buildNumber of
+// the newest snapshot build. Prefetch (setup) always re-downloads
+// metadata fresh, so ranges and snapshots float; cache-only builds
+// use the cached copy, so a build never downloads and a range pins
+// to whatever setup last resolved (the lockfile records the concrete
+// version). A range or snapshot that resolves to a concrete version
+// behaves exactly like an exact version from there on: cache layout,
+// checksums, and the lockfile all key on the concrete version.
+
+// Text of the first <tag>...</tag> in an XML document, trimmed, as
+// an arena string; NULL when the tag is absent or empty.
+static char *mv_xml_tag(ccb_arena *a, const char *text, size_t len,
+    const char *tag) {
+  ccb_str open;
+  ccb_str_init(&open);
+  ccb_str_append_c(&open, '<');
+  ccb_str_append(&open, tag);
+  ccb_str_append_c(&open, '>');
+  ccb_str close;
+  ccb_str_init(&close);
+  ccb_str_append(&close, "</");
+  ccb_str_append(&close, tag);
+  ccb_str_append_c(&close, '>');
+  const char *start = NULL;
+  const char *end = text + len;
+  for (const char *p = text; p + open.len <= end; p++) {
+    if (memcmp(p, open.buf, open.len) == 0) {
+      start = p + open.len;
+      break;
+    }
+  }
+  char *out = NULL;
+  if (start != NULL) {
+    const char *stop = NULL;
+    for (const char *p = start; p + close.len <= end; p++) {
+      if (memcmp(p, close.buf, close.len) == 0) {
+        stop = p;
+        break;
+      }
+    }
+    if (stop != NULL && stop > start) {
+      char *raw = ccb_arena_strndup(a, start, (size_t)(stop - start));
+      char *trimmed = mv_trim(raw);
+      if (trimmed[0] != '\0') {
+        out = trimmed;
+      }
+    }
+  }
+  ccb_str_free(&open);
+  ccb_str_free(&close);
+  return out;
+}
+
+// Every <tag>...</tag> text in a document, in order (arena strings).
+static void mv_xml_tag_all(ccb_arena *a, const char *text, size_t len,
+    const char *tag, char ***out, size_t *count) {
+  ccb_str open;
+  ccb_str_init(&open);
+  ccb_str_append_c(&open, '<');
+  ccb_str_append(&open, tag);
+  ccb_str_append_c(&open, '>');
+  ccb_str close;
+  ccb_str_init(&close);
+  ccb_str_append(&close, "</");
+  ccb_str_append(&close, tag);
+  ccb_str_append_c(&close, '>');
+  char **vals = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  const char *end = text + len;
+  const char *p = text;
+  while (p + open.len <= end) {
+    if (memcmp(p, open.buf, open.len) != 0) {
+      p++;
+      continue;
+    }
+    const char *start = p + open.len;
+    const char *stop = NULL;
+    for (const char *q = start; q + close.len <= end; q++) {
+      if (memcmp(q, close.buf, close.len) == 0) {
+        stop = q;
+        break;
+      }
+    }
+    if (stop == NULL) {
+      break;
+    }
+    if (stop > start) {
+      char *raw = ccb_arena_strndup(a, start, (size_t)(stop - start));
+      char *trimmed = mv_trim(raw);
+      if (trimmed[0] != '\0') {
+        MV_GROW(a, vals, n, cap, char *);
+        vals[n++] = trimmed;
+      }
+    }
+    p = stop + close.len;
+  }
+  ccb_str_free(&open);
+  ccb_str_free(&close);
+  *out = vals;
+  *count = n;
+}
+
+static char *mv_metadata_path(ccb_arena *a, const char *cache,
+    const char *group, const char *artifact, const char *version) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, cache);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, mv_group_path(a, group));
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, artifact);
+  ccb_str_append_c(&s, '/');
+  if (version != NULL) {
+    ccb_str_append(&s, version);
+    ccb_str_append_c(&s, '/');
+  }
+  ccb_str_append(&s, "maven-metadata.xml");
+  char *out = ccb_arena_strdup(a, s.buf);
+  ccb_str_free(&s);
+  return out;
+}
+
+static char *mv_metadata_url(ccb_arena *a, const char *base,
+    const char *group, const char *artifact, const char *version) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, base);
+  ccb_str_append(&s, mv_group_path(a, group));
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, artifact);
+  ccb_str_append_c(&s, '/');
+  if (version != NULL) {
+    ccb_str_append(&s, version);
+    ccb_str_append_c(&s, '/');
+  }
+  ccb_str_append(&s, "maven-metadata.xml");
+  char *out = ccb_arena_strdup(a, s.buf);
+  ccb_str_free(&s);
+  return out;
+}
+
+// Fetch maven-metadata.xml for an artifact (version == NULL) or for
+// a snapshot version directory. Return codes mirror mv_fetch: 0
+// usable (*path_out set), 1 not found anywhere, 3 cached file
+// corrupt, 4 cache-only miss, 5 cannot store. Prefetch always
+// re-downloads fresh (ranges and snapshots float at setup time);
+// cache-only never touches the network.
+static int mv_fetch_metadata(ccb_arena *a, const char *cache,
+    mv_repo *repos, size_t repos_count, const char *group,
+    const char *artifact, const char *version, int prefetch,
+    int readonly, char **path_out) {
+  char *final_path = mv_metadata_path(a, cache, group, artifact, version);
+  if (!prefetch) {
+    if (!ccb_path_exists(final_path)) {
+      return 4;
+    }
+    if (!mv_cache_file_ok(final_path, readonly)) {
+      return 3;
+    }
+    *path_out = final_path;
+    return 0;
+  }
+  char *dir = ccb_dirname(final_path);
+  if (ccb_mkdir_p(dir) != CCB_OK) {
+    free(dir);
+    return 5;
+  }
+  free(dir);
+  ccb_str ts;
+  ccb_str_init(&ts);
+  ccb_str_append(&ts, final_path);
+  ccb_str_append(&ts, ".tmp");
+  char *tmp = ccb_arena_strdup(a, ts.buf);
+  ccb_str_free(&ts);
+  for (size_t i = 0; i < repos_count; i++) {
+    char *url = mv_metadata_url(a, repos[i].base, group, artifact,
+      version);
+    if (ccb_net_download_auth(url, tmp, repos[i].user,
+        repos[i].pass) != 0) {
+      remove(tmp);
+      continue;
+    }
+    char hex[65];
+    if (ccb_sha256_file(tmp, hex) != CCB_OK) {
+      remove(tmp);
+      return 5;
+    }
+    if (rename(tmp, final_path) != 0) {
+      remove(tmp);
+      return 5;
+    }
+    mv_write_sidecar(final_path, hex);
+    *path_out = final_path;
+    return 0;
+  }
+  return 1;
+}
+
+// ---------- Maven version ordering ----------
+//
+// ComparableVersion rules, simplified to the cases real repositories
+// publish: dot/dash-separated tokens, digit runs compared numerically
+// (arbitrary precision via length-then-lexical), qualifier order
+// alpha < beta < milestone < rc < snapshot < "" (release) < sp, and
+// unknown qualifiers sorting after sp, lexically. "1.0" == "1.0.0";
+// "1.0-alpha" < "1.0"; "1.0-SNAPSHOT" < "1.0" < "1.0-sp-1".
+
+typedef struct {
+  int is_num; // 1: digit run, 0: qualifier string
+  const char *text;
+  size_t len;
+} mv_vtok;
+
+// Read one token starting at *pp (past '.'/'-' separators). Returns
+// 0 when no token remains.
+static int mv_next_vtok(const char **pp, mv_vtok *tok) {
+  const char *p = *pp;
+  while (*p == '.' || *p == '-') {
+    p++;
+  }
+  if (*p == '\0') {
+    return 0;
+  }
+  const char *start = p;
+  if (*p >= '0' && *p <= '9') {
+    while (*p >= '0' && *p <= '9') {
+      p++;
+    }
+    tok->is_num = 1;
+  } else {
+    while (*p != '\0' && *p != '.' && *p != '-' &&
+        !(*p >= '0' && *p <= '9')) {
+      p++;
+    }
+    tok->is_num = 0;
+  }
+  tok->text = start;
+  tok->len = (size_t)(p - start);
+  *pp = p;
+  return 1;
+}
+
+// Rank of a qualifier token (case-insensitive): 1 alpha, 2 beta,
+// 3 milestone, 4 rc, 5 snapshot, 6 release ("" and the ga/final/
+// release aliases), 7 sp, 8 unknown.
+static int mv_qual_rank(const char *s, size_t n) {
+  static const struct { const char *name; int rank; } known[] = {
+    { "alpha", 1 }, { "beta", 2 }, { "milestone", 3 }, { "rc", 4 },
+    { "cr", 4 }, { "snapshot", 5 }, { "", 6 }, { "ga", 6 },
+    { "final", 6 }, { "release", 6 }, { "sp", 7 },
+  };
+  for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+    size_t kn = strlen(known[i].name);
+    if (kn != n) {
+      continue;
+    }
+    size_t k = 0;
+    while (k < n && tolower((unsigned char)s[k]) ==
+        known[i].name[k]) {
+      k++;
+    }
+    if (k == n) {
+      return known[i].rank;
+    }
+  }
+  return 8;
+}
+
+// Case-insensitive lexical compare of two qualifier tokens.
+static int mv_qual_lex(const char *a, size_t an, const char *b,
+    size_t bn) {
+  size_t n = an < bn ? an : bn;
+  for (size_t i = 0; i < n; i++) {
+    int ca = tolower((unsigned char)a[i]);
+    int cb = tolower((unsigned char)b[i]);
+    if (ca != cb) {
+      return ca < cb ? -1 : 1;
+    }
+  }
+  if (an == bn) {
+    return 0;
+  }
+  return an < bn ? -1 : 1;
+}
+
+// Compare two digit runs numerically: strip leading zeros, longer
+// wins, else lexical.
+static int mv_num_cmp(const char *a, size_t an, const char *b,
+    size_t bn) {
+  while (an > 0 && *a == '0') {
+    a++;
+    an--;
+  }
+  while (bn > 0 && *b == '0') {
+    b++;
+    bn--;
+  }
+  if (an != bn) {
+    return an < bn ? -1 : 1;
+  }
+  for (size_t i = 0; i < an; i++) {
+    if (a[i] != b[i]) {
+      return a[i] < b[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+static int mv_version_cmp(const char *a, const char *b) {
+  const char *pa = a;
+  const char *pb = b;
+  for (;;) {
+    mv_vtok ta;
+    mv_vtok tb;
+    int ha = mv_next_vtok(&pa, &ta);
+    int hb = mv_next_vtok(&pb, &tb);
+    if (!ha && !hb) {
+      return 0;
+    }
+    if (!ha) {
+      // a ran out: the missing token is 0 when b has a number,
+      // "" (release) when b has a qualifier. A qualifier with the
+      // release rank ("" or a ga/final/release alias) equals it.
+      if (tb.is_num) {
+        return mv_num_cmp("0", 1, tb.text, tb.len);
+      }
+      int rb = mv_qual_rank(tb.text, tb.len);
+      if (mv_qual_rank("", 0) == rb) {
+        return 0;
+      }
+      return mv_qual_rank("", 0) < rb ? -1 : 1;
+    }
+    if (!hb) {
+      if (ta.is_num) {
+        return mv_num_cmp(ta.text, ta.len, "0", 1);
+      }
+      int ra = mv_qual_rank(ta.text, ta.len);
+      if (ra == mv_qual_rank("", 0)) {
+        return 0;
+      }
+      return ra < mv_qual_rank("", 0) ? -1 : 1;
+    }
+    if (ta.is_num && tb.is_num) {
+      int c = mv_num_cmp(ta.text, ta.len, tb.text, tb.len);
+      if (c != 0) {
+        return c;
+      }
+      continue;
+    }
+    if (ta.is_num != tb.is_num) {
+      // A number sorts after a qualifier.
+      return ta.is_num ? 1 : -1;
+    }
+    int ra = mv_qual_rank(ta.text, ta.len);
+    int rb = mv_qual_rank(tb.text, tb.len);
+    if (ra != rb) {
+      return ra < rb ? -1 : 1;
+    }
+    if (ra == 8) {
+      int c = mv_qual_lex(ta.text, ta.len, tb.text, tb.len);
+      if (c != 0) {
+        return c;
+      }
+    }
+  }
+}
+
+// ---------- version ranges ----------
+
+typedef struct {
+  char *low; // NULL: unbounded below
+  int low_inc;
+  char *high; // NULL: unbounded above
+  int high_inc;
+} mv_range;
+
+// Parse a range spec ("[1.0,2.0)", "[1.0]", "[1.0,)", "(,2.0]",
+// "[1.0,2.0),[3.0,4.0)") into arena ranges. Returns 0 on success,
+// -1 on malformed input.
+static int mv_parse_ranges(ccb_arena *a, const char *spec,
+    mv_range **out, size_t *count) {
+  mv_range *ranges = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  const char *p = spec;
+  while (*p != '\0') {
+    while (*p == ' ' || *p == ',') {
+      p++;
+    }
+    if (*p == '\0') {
+      break;
+    }
+    if (*p != '[' && *p != '(') {
+      return -1;
+    }
+    int low_inc = *p == '[';
+    p++;
+    const char *close = p;
+    while (*close != '\0' && *close != ']' && *close != ')') {
+      close++;
+    }
+    if (*close == '\0') {
+      return -1;
+    }
+    int high_inc = *close == ']';
+    const char *comma = memchr(p, ',', (size_t)(close - p));
+    char *low = NULL;
+    char *high = NULL;
+    if (comma == NULL) {
+      // "[1.0]": exactly one version.
+      char *v = ccb_arena_strndup(a, p, (size_t)(close - p));
+      char *t = mv_trim(v);
+      if (t[0] == '\0' || !low_inc || !high_inc) {
+        return -1;
+      }
+      low = t;
+      high = t;
+    } else {
+      char *l = ccb_arena_strndup(a, p, (size_t)(comma - p));
+      char *h = ccb_arena_strndup(a, comma + 1,
+        (size_t)(close - (comma + 1)));
+      char *lt = mv_trim(l);
+      char *ht = mv_trim(h);
+      if (lt[0] != '\0') {
+        low = lt;
+      }
+      if (ht[0] != '\0') {
+        high = ht;
+      }
+    }
+    MV_GROW(a, ranges, n, cap, mv_range);
+    ranges[n].low = low;
+    ranges[n].low_inc = low_inc;
+    ranges[n].high = high;
+    ranges[n].high_inc = high_inc;
+    n++;
+    p = close + 1;
+  }
+  if (n == 0) {
+    return -1;
+  }
+  *out = ranges;
+  *count = n;
+  return 0;
+}
+
+static int mv_version_in_ranges(const char *v, mv_range *ranges,
+    size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    int ok = 1;
+    if (ranges[i].low != NULL) {
+      int c = mv_version_cmp(v, ranges[i].low);
+      if (c < 0 || (c == 0 && !ranges[i].low_inc)) {
+        ok = 0;
+      }
+    }
+    if (ok && ranges[i].high != NULL) {
+      int c = mv_version_cmp(v, ranges[i].high);
+      if (c > 0 || (c == 0 && !ranges[i].high_inc)) {
+        ok = 0;
+      }
+    }
+    if (ok) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int mv_is_range_spec(const char *s) {
+  return s[0] == '[' || s[0] == '(';
+}
+
+static int mv_is_snapshot_spec(const char *s) {
+  size_t n = strlen(s);
+  return n >= 9 && memcmp(s + n - 9, "-SNAPSHOT", 9) == 0;
+}
+
+// A snapshot timestamp/buildNumber is digits and dots only, so it
+// can never smuggle a path separator into a cache path or URL.
+static int mv_snapshot_part_ok(const char *s) {
+  if (s[0] == '\0') {
+    return 0;
+  }
+  for (const char *p = s; *p != '\0'; p++) {
+    if (!(*p >= '0' && *p <= '9') && *p != '.') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+// Resolve a version spec to a concrete version (arena string), or
+// NULL with a diagnostic. Exact versions pass through unchanged;
+// ranges, LATEST, and RELEASE read the artifact-level metadata;
+// -SNAPSHOT versions read the snapshot metadata and resolve to the
+// newest timestamped build.
+static char *mv_resolve_version_ctx(ccb_arena *a, const char *cache,
+    mv_repo *repos, size_t repos_count, int prefetch, int readonly,
+    ccb_diag_list *diags, const char *group, const char *artifact,
+    const char *spec) {
+  if (!mv_is_range_spec(spec) && strcmp(spec, "LATEST") != 0 &&
+      strcmp(spec, "RELEASE") != 0 && !mv_is_snapshot_spec(spec)) {
+    return ccb_arena_strdup(a, spec);
+  }
+  if (mv_is_snapshot_spec(spec)) {
+    char *meta_path = NULL;
+    int rc = mv_fetch_metadata(a, cache, repos, repos_count, group,
+      artifact, spec, prefetch, readonly, &meta_path);
+    if (rc != 0) {
+      char *coord = mv_coord_str(a, group, artifact, spec);
+      mv_fetch_fail(diags, rc, coord, "snapshot metadata");
+      return NULL;
+    }
+    char *text = NULL;
+    size_t len = 0;
+    char *coord = mv_coord_str(a, group, artifact, spec);
+    if (ccb_read_file(meta_path, &text, &len) != CCB_OK) {
+      mv_diag(diags, "CCB-E3019", coord,
+        "cached snapshot metadata cannot be read");
+      return NULL;
+    }
+    char *ts = mv_xml_tag(a, text, len, "timestamp");
+    char *bn = mv_xml_tag(a, text, len, "buildNumber");
+    free(text);
+    if (ts == NULL || bn == NULL || !mv_snapshot_part_ok(ts) ||
+        !mv_snapshot_part_ok(bn)) {
+      mv_diag(diags, "CCB-E3019", coord,
+        "snapshot metadata has no usable timestamp/buildNumber");
+      return NULL;
+    }
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append_n(&s, spec, strlen(spec) - 9);
+    ccb_str_append_c(&s, '-');
+    ccb_str_append(&s, ts);
+    ccb_str_append_c(&s, '-');
+    ccb_str_append(&s, bn);
+    char *concrete = ccb_arena_strdup(a, s.buf);
+    ccb_str_free(&s);
+    return concrete;
+  }
+  char *meta_path = NULL;
+  int rc = mv_fetch_metadata(a, cache, repos, repos_count, group,
+    artifact, NULL, prefetch, readonly, &meta_path);
+  if (rc != 0) {
+    char *coord = mv_coord_str(a, group, artifact, spec);
+    mv_fetch_fail(diags, rc, coord, "maven metadata");
+    return NULL;
+  }
+  char *text = NULL;
+  size_t len = 0;
+  char *coord = mv_coord_str(a, group, artifact, spec);
+  if (ccb_read_file(meta_path, &text, &len) != CCB_OK) {
+    mv_diag(diags, "CCB-E3019", coord, "cached maven metadata cannot be read");
+    return NULL;
+  }
+  if (strcmp(spec, "LATEST") == 0 || strcmp(spec, "RELEASE") == 0) {
+    const char *tag = strcmp(spec, "LATEST") == 0 ? "latest" : "release";
+    char *v = mv_xml_tag(a, text, len, tag);
+    free(text);
+    if (v == NULL || !mv_part_ok(v, strlen(v))) {
+      ccb_str m;
+      ccb_str_init(&m);
+      ccb_str_append(&m, "maven metadata has no <");
+      ccb_str_append(&m, tag);
+      ccb_str_append(&m, "> version");
+      mv_diag(diags, "CCB-E3019", coord, m.buf);
+      ccb_str_free(&m);
+      return NULL;
+    }
+    return v;
+  }
+  mv_range *ranges = NULL;
+  size_t ranges_count = 0;
+  if (mv_parse_ranges(a, spec, &ranges, &ranges_count) != 0) {
+    free(text);
+    mv_diag(diags, "CCB-E3019", coord, "malformed version range");
+    return NULL;
+  }
+  char **versions = NULL;
+  size_t versions_count = 0;
+  mv_xml_tag_all(a, text, len, "version", &versions, &versions_count);
+  free(text);
+  char *best = NULL;
+  for (size_t i = 0; i < versions_count; i++) {
+    if (!mv_part_ok(versions[i], strlen(versions[i]))) {
+      continue;
+    }
+    if (mv_version_in_ranges(versions[i], ranges, ranges_count) &&
+        (best == NULL ||
+          mv_version_cmp(versions[i], best) > 0)) {
+      best = versions[i];
+    }
+  }
+  if (best == NULL) {
+    ccb_str m;
+    ccb_str_init(&m);
+    ccb_str_append(&m, "no published version of ");
+    ccb_str_append(&m, group);
+    ccb_str_append_c(&m, ':');
+    ccb_str_append(&m, artifact);
+    ccb_str_append(&m, " matches range ");
+    ccb_str_append(&m, spec);
+    mv_diag(diags, "CCB-E3019", coord, m.buf);
+    ccb_str_free(&m);
+    return NULL;
+  }
+  return best;
+}
+
 // ---------- resolution ----------
 
 typedef struct {
   char *group;
   char *artifact;
   char *version;
+  // Repository directory version: the declared version for a
+  // snapshot (its timestamped files live under the -SNAPSHOT
+  // directory), else the same as version.
+  char *dir_version;
   int depth;
 } mv_qitem;
 
@@ -1434,14 +2267,16 @@ static int mv_lock_enforce(ccb_arena *a, const char *lock_path,
 //
 // A POM's <parent> block names a POM that is fetched from the same
 // repositories (same cache and checksum rules as any other POM) and
-// applied to the child: the parent's <properties> and
-// <dependencyManagement> merge into the child's, with the child's own
-// entries winning and the nearest ancestor winning among parents.
-// The merged set is what ${...} expansion sees, so a managed version
-// like ${lib.version} resolves from whichever ancestor defined the
-// property. The parent's own <dependencies> are NOT inherited, nor
-// are profiles or parent-declared exclusions; group/version
-// inheritance from the <parent> block keeps working as before.
+// applied to the child: the parent's <properties>,
+// <dependencyManagement>, <dependencies>, and <profiles> merge into
+// the child's, with the child's own entries winning and the nearest
+// ancestor winning among parents. The merged set is what ${...}
+// expansion sees, so a managed version like ${lib.version} resolves
+// from whichever ancestor defined the property. Parent-declared
+// exclusions are not inherited (CCB has no per-dependency
+// exclusions); group/version inheritance from the <parent> block
+// keeps working as before. A parent version may itself be a range
+// or -SNAPSHOT spec and resolves the same way a dependency does.
 //
 // Chain rules: at most MV_PARENT_MAX_DEPTH ancestors are followed;
 // a longer chain, or a cycle (a parent coordinate repeating any
@@ -1497,6 +2332,60 @@ static void mv_merge_parent_mgmt(ccb_arena *a, mv_pom *pom, mv_pom *parent) {
   }
 }
 
+// Same rule for the parent's own <dependencies>: appended after the
+// child's own entries (and after nearer ancestors'), skipping a
+// group:artifact the child already declares. The queue-time
+// nearest-wins check is the backstop for entries whose raw keys
+// differ but resolve equal.
+static void mv_merge_parent_deps(ccb_arena *a, mv_pom *pom, mv_pom *parent) {
+  for (size_t i = 0; i < parent->deps_count; i++) {
+    mv_dep *pd = &parent->deps[i];
+    if (pd->group == NULL || pd->artifact == NULL) {
+      continue;
+    }
+    int seen = 0;
+    for (size_t j = 0; j < pom->deps_count; j++) {
+      if (pom->deps[j].group != NULL && pom->deps[j].artifact != NULL &&
+          strcmp(pom->deps[j].group, pd->group) == 0 &&
+          strcmp(pom->deps[j].artifact, pd->artifact) == 0) {
+        seen = 1;
+        break;
+      }
+    }
+    if (!seen) {
+      MV_GROW(a, pom->deps, pom->deps_count, pom->deps_cap, mv_dep);
+      pom->deps[pom->deps_count++] = *pd;
+    }
+  }
+}
+
+// Same rule for the parent's <profiles>: appended after the child's
+// own profiles, skipping an id the child already declares. A parent
+// profile with <activeByDefault> then activates for the child too,
+// which is Maven's behavior.
+static void mv_merge_parent_profiles(ccb_arena *a, mv_pom *pom,
+    mv_pom *parent) {
+  for (size_t i = 0; i < parent->profiles_count; i++) {
+    mv_profile *pp = &parent->profiles[i];
+    if (pp->id == NULL) {
+      continue;
+    }
+    int seen = 0;
+    for (size_t j = 0; j < pom->profiles_count; j++) {
+      if (pom->profiles[j].id != NULL &&
+          strcmp(pom->profiles[j].id, pp->id) == 0) {
+        seen = 1;
+        break;
+      }
+    }
+    if (!seen) {
+      MV_GROW(a, pom->profiles, pom->profiles_count, pom->profiles_cap,
+        mv_profile);
+      pom->profiles[pom->profiles_count++] = *pp;
+    }
+  }
+}
+
 // Join the chain coordinates with " -> " for cycle/depth diagnostics.
 static char *mv_chain_str(ccb_arena *a, char **chain, size_t count,
     const char *extra) {
@@ -1518,10 +2407,11 @@ static char *mv_chain_str(ccb_arena *a, char **chain, size_t count,
 }
 
 // Fetch the parent chain of `pom` and merge each ancestor's
-// properties and dependencyManagement into it. child_coord names the
-// artifact being resolved (for diagnostics). Returns 0 on success
-// (pom now carries the merged sets), -1 with a diagnostic pushed.
-static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
+// properties, dependencyManagement, dependencies, and profiles into
+// it. child_coord names the artifact being resolved (for
+// diagnostics). Returns 0 on success (pom now carries the merged
+// sets), -1 with a diagnostic pushed.
+static int mv_merge_parents(ccb_arena *a, const char *cache, mv_repo *repos,
     size_t repos_count, mv_pom *pom, const char *child_coord, int prefetch,
     int readonly, ccb_diag_list *diags) {
   char **chain = NULL;
@@ -1572,6 +2462,17 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
         "parent coordinates cannot be resolved");
       return -1;
     }
+    // A parent version may be a range or -SNAPSHOT spec: resolve it
+    // to a concrete version before fetching, like any dependency.
+    // The spec is kept for the directory version: a snapshot parent's
+    // timestamped POM lives under its -SNAPSHOT directory.
+    char *pv_spec = pv;
+    char *pv_concrete = mv_resolve_version_ctx(a, cache, repos,
+      repos_count, prefetch, readonly, diags, pg, pa, pv);
+    if (pv_concrete == NULL) {
+      return -1;
+    }
+    pv = pv_concrete;
     char *pcoord = mv_coord_str(a, pg, pa, pv);
     for (size_t i = 0; i < chain_count; i++) {
       if (strcmp(chain[i], pcoord) == 0) {
@@ -1585,8 +2486,9 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
       }
     }
     char *parent_pom_path = NULL;
-    int rc = mv_fetch(a, cache, repos, repos_count, pg, pa, pv, "pom",
-      prefetch, readonly, &parent_pom_path);
+    const char *pv_dir = mv_is_snapshot_spec(pv_spec) ? pv_spec : pv;
+    int rc = mv_fetch(a, cache, repos, repos_count, pg, pa, pv, pv_dir,
+      "pom", prefetch, readonly, &parent_pom_path);
     if (rc != 0) {
       mv_fetch_fail(diags, rc, pcoord, "parent POM");
       return -1;
@@ -1606,6 +2508,8 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
     free(text);
     mv_merge_parent_props(a, pom, pp);
     mv_merge_parent_mgmt(a, pom, pp);
+    mv_merge_parent_deps(a, pom, pp);
+    mv_merge_parent_profiles(a, pom, pp);
     MV_GROW(a, chain, chain_count, chain_cap, char *);
     chain[chain_count++] = pcoord;
     depth++;
@@ -1614,11 +2518,83 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
   return 0;
 }
 
+// Apply the POM's active profiles: a profile is active when its id
+// is listed in [deps] maven_profiles, or — when that list is empty —
+// when it declares <activeByDefault>. Profiles apply after the
+// parent merge, and a profile's entries win over the POM's own:
+// properties and dependencyManagement replace in place, dependencies
+// append after the POM's own (the queue-time nearest-wins check
+// keeps the POM's own entry first). Inactive profiles contribute
+// nothing: a POM declaring a dependency only inside an inactive
+// profile behaves as if it had no such dependency.
+static void mv_apply_profiles(ccb_arena *a, mv_pom *pom,
+    const ccb_config *cfg) {
+  int explicit = cfg->maven_profiles_count > 0;
+  for (size_t i = 0; i < pom->profiles_count; i++) {
+    mv_profile *prof = &pom->profiles[i];
+    int active = 0;
+    if (explicit) {
+      if (prof->id != NULL) {
+        for (size_t j = 0; j < cfg->maven_profiles_count; j++) {
+          if (strcmp(cfg->maven_profiles[j], prof->id) == 0) {
+            active = 1;
+            break;
+          }
+        }
+      }
+    } else {
+      active = prof->active_default;
+    }
+    if (!active) {
+      continue;
+    }
+    for (size_t j = 0; j < prof->props_count; j++) {
+      int seen = 0;
+      for (size_t k = 0; k < pom->props_count; k++) {
+        if (strcmp(pom->props[k].key, prof->props[j].key) == 0) {
+          pom->props[k].val = prof->props[j].val;
+          seen = 1;
+          break;
+        }
+      }
+      if (!seen) {
+        MV_GROW(a, pom->props, pom->props_count, pom->props_cap, mv_prop);
+        pom->props[pom->props_count++] = prof->props[j];
+      }
+    }
+    for (size_t j = 0; j < prof->mgmt_count; j++) {
+      mv_dep *mg = &prof->mgmt[j];
+      if (mg->group == NULL || mg->artifact == NULL) {
+        continue;
+      }
+      int seen = 0;
+      for (size_t k = 0; k < pom->mgmt_count; k++) {
+        if (pom->mgmt[k].group != NULL && pom->mgmt[k].artifact != NULL &&
+            strcmp(pom->mgmt[k].group, mg->group) == 0 &&
+            strcmp(pom->mgmt[k].artifact, mg->artifact) == 0) {
+          pom->mgmt[k] = *mg;
+          seen = 1;
+          break;
+        }
+      }
+      if (!seen) {
+        MV_GROW(a, pom->mgmt, pom->mgmt_count, pom->mgmt_cap, mv_dep);
+        pom->mgmt[pom->mgmt_count++] = *mg;
+      }
+    }
+    for (size_t j = 0; j < prof->deps_count; j++) {
+      MV_GROW(a, pom->deps, pom->deps_count, pom->deps_cap, mv_dep);
+      pom->deps[pom->deps_count++] = prof->deps[j];
+    }
+  }
+}
+
 // Mutable state for one resolution run, shared by the helpers below.
 typedef struct {
   ccb_arena *arena;
+  const ccb_config *cfg;
   const char *cache;
-  char **repos;
+  mv_repo *repos;
   size_t repos_count;
   int prefetch;
   int readonly;
@@ -1637,6 +2613,15 @@ typedef struct {
   ccb_maven_result *out;
   ccb_diag_list *diags;
 } mv_resolve;
+
+// Resolve a version spec against this run's repositories, or NULL
+// with a diagnostic. Thin wrapper over mv_resolve_version_ctx.
+static char *mv_resolve_version(mv_resolve *r, const char *group,
+    const char *artifact, const char *spec) {
+  return mv_resolve_version_ctx(r->arena, r->cache, r->repos,
+    r->repos_count, r->prefetch, r->readonly, r->diags, group, artifact,
+    spec);
+}
 
 // Seed the queue with the direct coordinates, in declared order.
 // Returns 0 on success, -1 with a diagnostic on a malformed
@@ -1660,21 +2645,37 @@ static int mv_seed_queue(mv_resolve *r, const ccb_config *cfg) {
     ccb_str_append(&ks, art);
     char *key = ccb_arena_strdup(r->arena, ks.buf);
     ccb_str_free(&ks);
+    // A direct version may be a range, LATEST, RELEASE, or
+    // -SNAPSHOT spec: resolve it to a concrete version before the
+    // seen check, so the concrete version is what wins and is
+    // recorded in the lockfile. The concrete version is arena
+    // memory; v stays the malloc'd parse result and is freed below.
+    char *concrete = mv_resolve_version(r, g, art, v);
+    if (concrete == NULL) {
+      free(g);
+      free(art);
+      free(v);
+      return -1;
+    }
     mv_seen *prev = mv_seen_find(r->seen, r->seen_count, key);
     if (prev != NULL) {
-      if (r->verbose && strcmp(prev->version, v) != 0) {
-        printf("maven: %s: requested %s, using nearest %s\n", key, v,
-          prev->version);
+      if (r->verbose && strcmp(prev->version, concrete) != 0) {
+        printf("maven: %s: requested %s, using nearest %s\n", key,
+          concrete, prev->version);
       }
     } else {
       MV_GROW(r->arena, r->seen, r->seen_count, r->seen_cap, mv_seen);
       r->seen[r->seen_count].key = key;
-      r->seen[r->seen_count].version = ccb_arena_strdup(r->arena, v);
+      r->seen[r->seen_count].version =
+        ccb_arena_strdup(r->arena, concrete);
       r->seen_count++;
       MV_GROW(r->arena, r->queue, r->qcount, r->qcap, mv_qitem);
       r->queue[r->qcount].group = ccb_arena_strdup(r->arena, g);
       r->queue[r->qcount].artifact = ccb_arena_strdup(r->arena, art);
-      r->queue[r->qcount].version = ccb_arena_strdup(r->arena, v);
+      r->queue[r->qcount].version = ccb_arena_strdup(r->arena, concrete);
+      r->queue[r->qcount].dir_version = mv_is_snapshot_spec(v) ?
+        ccb_arena_strdup(r->arena, v) :
+        ccb_arena_strdup(r->arena, concrete);
       r->queue[r->qcount].depth = 0;
       r->qcount++;
     }
@@ -1849,6 +2850,17 @@ static int mv_queue_dep(mv_resolve *r, mv_pom *pom, const char *eff_group,
     ccb_str_free(&m);
     return -1;
   }
+  // A transitive version may also be a range, LATEST, RELEASE, or
+  // -SNAPSHOT spec: resolve it to a concrete version here, so the
+  // exclusion check and nearest-wins both see the version that will
+  // actually be fetched. The spec is kept for the directory version:
+  // a snapshot's timestamped files live under its -SNAPSHOT
+  // directory.
+  char *spec = dv;
+  dv = mv_resolve_version(r, dg, da, dv);
+  if (dv == NULL) {
+    return -1;
+  }
   // Exclusions are checked before nearest-wins: an excluded
   // artifact never enters the seen set, so an excluded version
   // can never win and another version from a later path can.
@@ -1883,21 +2895,29 @@ static int mv_queue_dep(mv_resolve *r, mv_pom *pom, const char *eff_group,
   r->queue[r->qcount].group = dg;
   r->queue[r->qcount].artifact = da;
   r->queue[r->qcount].version = dv;
+  r->queue[r->qcount].dir_version = mv_is_snapshot_spec(spec) ? spec : dv;
   r->queue[r->qcount].depth = item_depth + 1;
   r->qcount++;
   return 0;
 }
 
 // Resolve one queued coordinate: fetch and parse its POM, merge its
-// parent chain, fetch its artifact, record it, and queue its
-// transitive dependencies. Returns 0 on success, -1 with a
-// diagnostic on failure.
-static int mv_resolve_one(mv_resolve *r, mv_qitem item) {
+// parent chain, apply its active profiles, fetch its artifact,
+// record it, and queue its transitive dependencies. Returns 0 on
+// success, -1 with a diagnostic on failure.
+//
+// walk == 0 is the compiler-plugin path: no transitive walk and no
+// lockfile entry, and the artifact must be a jar, whose cache path
+// is returned through *jar_out (arena memory; NULL when ext is NULL
+// is a failure, not a pom entry — a plugin has to be a jar).
+static int mv_resolve_one(mv_resolve *r, mv_qitem item, int walk,
+    char **jar_out) {
   const char *coord = mv_coord_str(r->arena, item.group, item.artifact,
     item.version);
   char *pom_path = NULL;
   int rc = mv_fetch(r->arena, r->cache, r->repos, r->repos_count, item.group,
-    item.artifact, item.version, "pom", r->prefetch, r->readonly, &pom_path);
+    item.artifact, item.version, item.dir_version, "pom", r->prefetch,
+    r->readonly, &pom_path);
   if (rc != 0) {
     mv_fetch_fail(r->diags, rc, coord, "POM");
     return -1;
@@ -1915,12 +2935,14 @@ static int mv_resolve_one(mv_resolve *r, mv_qitem item) {
     return -1;
   }
   free(pom_text);
-  // Fetch the parent chain and merge its properties and
-  // dependencyManagement into this POM (child entries win).
+  // Fetch the parent chain and merge its properties,
+  // dependencyManagement, dependencies, and profiles into this POM
+  // (child entries win), then apply this POM's own active profiles.
   if (mv_merge_parents(r->arena, r->cache, r->repos, r->repos_count, &pom,
       coord, r->prefetch, r->readonly, r->diags) != 0) {
     return -1;
   }
+  mv_apply_profiles(r->arena, &pom, r->cfg);
   char *eff_group = NULL;
   char *eff_artifact = NULL;
   char *eff_version = NULL;
@@ -1937,10 +2959,20 @@ static int mv_resolve_one(mv_resolve *r, mv_qitem item) {
   if (ext != NULL) {
     char *art_path = NULL;
     rc = mv_fetch(r->arena, r->cache, r->repos, r->repos_count, item.group,
-      item.artifact, item.version, ext, r->prefetch, r->readonly, &art_path);
+      item.artifact, item.version, item.dir_version, ext, r->prefetch,
+      r->readonly, &art_path);
     if (rc != 0) {
       mv_fetch_fail(r->diags, rc, coord, ext);
       return -1;
+    }
+    if (!walk) {
+      if (is_aar) {
+        mv_diag(r->diags, "CCB-E3019", coord,
+          "a compiler plugin must be a jar artifact, not an aar");
+        return -1;
+      }
+      *jar_out = art_path;
+      return 0;
     }
     if (is_aar) {
       mv_push_result(&r->out->aars, &r->out->aars_count, &r->res_aars_cap,
@@ -1958,6 +2990,11 @@ static int mv_resolve_one(mv_resolve *r, mv_qitem item) {
     mv_push_entry(r->out, &r->res_entries_cap, item.group, item.artifact,
       item.version, ext, hex, art_path);
   } else {
+    if (!walk) {
+      mv_diag(r->diags, "CCB-E3019", coord,
+        "a compiler plugin must be a jar artifact, not a pom");
+      return -1;
+    }
     // Pom packaging has no artifact file: the lockfile records the
     // POM's hash, so a changed BOM still fails enforcement.
     char hex[65];
@@ -1978,6 +3015,80 @@ static int mv_resolve_one(mv_resolve *r, mv_qitem item) {
   return 0;
 }
 
+// ---------- JVM-platform variants ----------
+
+// A `-jvm` artifact whose `-android` sibling (same group, same
+// version) is also resolved is the JVM-platform variant of a Kotlin
+// multiplatform library: the Android build only wants the Android
+// variant, and dex rejects the classes both define. A `-jvm`
+// artifact with no `-android` sibling is kept: pure-JVM libraries
+// such as kotlinx-coroutines-core-jvm have no Android variant.
+static int mv_is_android_sibling(const ccb_maven_entry *jvm,
+    const ccb_maven_entry *other) {
+  size_t base_len = strlen(jvm->artifact) - 4; // strip "-jvm"
+  if (strcmp(jvm->group, other->group) != 0) {
+    return 0;
+  }
+  if (strcmp(jvm->version, other->version) != 0) {
+    return 0;
+  }
+  if (strncmp(other->artifact, jvm->artifact, base_len) != 0) {
+    return 0;
+  }
+  return strcmp(other->artifact + base_len, "-android") == 0;
+}
+
+static void mv_drop_path(char **arr, size_t *count, const char *path) {
+  size_t w = 0;
+  for (size_t i = 0; i < *count; i++) {
+    if (strcmp(arr[i], path) == 0) {
+      free(arr[i]);
+      continue;
+    }
+    if (w != i) {
+      arr[w] = arr[i];
+    }
+    w++;
+  }
+  *count = w;
+}
+
+static void mv_drop_jvm_variants(ccb_maven_result *out) {
+  size_t w = 0;
+  for (size_t i = 0; i < out->entries_count; i++) {
+    ccb_maven_entry *e = &out->entries[i];
+    size_t len = strlen(e->artifact);
+    int drop = 0;
+    if (len > 4 && strcmp(e->artifact + len - 4, "-jvm") == 0) {
+      for (size_t j = 0; j < out->entries_count; j++) {
+        if (j != i && mv_is_android_sibling(e, &out->entries[j])) {
+          drop = 1;
+          break;
+        }
+      }
+    }
+    if (drop) {
+      // The dropped entry's path is also a dex/classpath input in
+      // the jars/aars arrays: drop it there too, or the duplicate
+      // class still reaches d8.
+      mv_drop_path(out->jars, &out->jars_count, e->path);
+      mv_drop_path(out->aars, &out->aars_count, e->path);
+      free(e->group);
+      free(e->artifact);
+      free(e->version);
+      free(e->packaging);
+      free(e->sha256);
+      free(e->path);
+      continue;
+    }
+    if (w != i) {
+      out->entries[w] = out->entries[i];
+    }
+    w++;
+  }
+  out->entries_count = w;
+}
+
 ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
     int readonly, ccb_maven_result *out, ccb_diag_list *diags) {
   memset(out, 0, sizeof(*out));
@@ -1992,13 +3103,17 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
     return CCB_ERR_TOOLCHAIN;
   }
   size_t repos_count = 0;
-  char **repos = mv_repos(arena, cfg, &repos_count);
+  mv_repo *repos = mv_repos(arena, cfg, &repos_count, diags);
+  if (repos == NULL) {
+    return CCB_ERR_TOOLCHAIN;
+  }
   size_t excl_count = 0;
   mv_excl *excls = mv_exclusions(arena, cfg, &excl_count);
 
   mv_resolve r;
   memset(&r, 0, sizeof(r));
   r.arena = arena;
+  r.cfg = cfg;
   r.cache = cache;
   r.repos = repos;
   r.repos_count = repos_count;
@@ -2021,10 +3136,13 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
   size_t head = 0;
   while (head < r.qcount) {
     mv_qitem item = r.queue[head++];
-    if (mv_resolve_one(&r, item) != 0) {
+    if (mv_resolve_one(&r, item, 1, NULL) != 0) {
       goto fail;
     }
   }
+  // JVM-platform variants drop out when the Android variant of the
+  // same library is present (see mv_drop_jvm_variants).
+  mv_drop_jvm_variants(out);
   // Lockfile enforcement (cache-only mode only): `ccb setup` writes
   // the lockfile; check and build refuse any deviation from it.
   // A missing lockfile means no enforcement: pre-lockfile behavior.
@@ -2043,6 +3161,89 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
 fail:
   ccb_maven_result_free(out);
   memset(out, 0, sizeof(*out));
+  return CCB_ERR_TOOLCHAIN;
+}
+
+ccb_status ccb_maven_resolve_plugins(const ccb_config *cfg, int prefetch,
+    int verbose, int readonly, char ***jars_out, size_t *count_out,
+    ccb_diag_list *diags) {
+  *jars_out = NULL;
+  *count_out = 0;
+  if (cfg->kotlin_plugins_count == 0) {
+    return CCB_OK;
+  }
+  (void)verbose;
+  CCB_AUTO_ARENA ccb_arena *arena = ccb_arena_create();
+  CCB_AUTO_FREE char *cache = ccb_maven_cache_dir();
+  if (cache == NULL) {
+    mv_diag(diags, "CCB-E3019", NULL,
+      "no Maven cache directory available (set HOME or XDG_CACHE_HOME)");
+    return CCB_ERR_TOOLCHAIN;
+  }
+  size_t repos_count = 0;
+  mv_repo *repos = mv_repos(arena, cfg, &repos_count, diags);
+  if (repos == NULL) {
+    return CCB_ERR_TOOLCHAIN;
+  }
+  mv_resolve r;
+  memset(&r, 0, sizeof(r));
+  r.arena = arena;
+  r.cfg = cfg;
+  r.cache = cache;
+  r.repos = repos;
+  r.repos_count = repos_count;
+  r.prefetch = prefetch;
+  r.readonly = readonly;
+  r.diags = diags;
+
+  char **jars = NULL;
+  size_t njars = 0;
+  size_t cap = 0;
+  for (size_t i = 0; i < cfg->kotlin_plugins_count; i++) {
+    char *g = NULL;
+    char *art = NULL;
+    char *v = NULL;
+    if (!ccb_maven_parse_coord(cfg->kotlin_plugins[i], &g, &art, &v)) {
+      mv_diag(diags, "CCB-E3019", cfg->kotlin_plugins[i],
+        "malformed plugin coordinate");
+      free(g);
+      free(art);
+      free(v);
+      goto fail;
+    }
+    mv_qitem item;
+    item.group = g;
+    item.artifact = art;
+    item.version = v;
+    // Plugins are exact versions (enforced at config load), so the
+    // directory version is the version itself.
+    item.dir_version = v;
+    item.depth = 0;
+    char *jar = NULL;
+    if (mv_resolve_one(&r, item, 0, &jar) != 0) {
+      free(g);
+      free(art);
+      free(v);
+      goto fail;
+    }
+    free(g);
+    free(art);
+    free(v);
+    if (njars == cap) {
+      size_t ncap = cap == 0 ? 4 : cap * 2;
+      jars = ccb_xrealloc(jars, ncap * sizeof(*jars));
+      cap = ncap;
+    }
+    jars[njars++] = ccb_xstrdup(jar);
+  }
+  *jars_out = jars;
+  *count_out = njars;
+  return CCB_OK;
+
+fail:
+  ccb_free_str_array(jars, njars);
+  *jars_out = NULL;
+  *count_out = 0;
   return CCB_ERR_TOOLCHAIN;
 }
 

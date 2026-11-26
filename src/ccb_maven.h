@@ -12,22 +12,32 @@
 // CCB-E3021 when an artifact was never prefetched. Run `ccb setup`
 // after adding a coordinate; builds then stay offline.
 //
-// Rules (v1): exact versions only (no ranges, LATEST, RELEASE, or
-// -SNAPSHOT — rejected at config load); Google Maven by default,
-// Maven Central only when `[deps] maven_central = true`; transitive
-// resolution over compile + runtime scopes (test/provided/optional
-// skipped), nearest-wins on version conflict, cycle-safe. Exclusions
-// (`[deps] maven_exclude`, "group:artifact" or
-// "group:artifact:version") suppress an artifact wherever it is
-// reached, checked before nearest-wins; excluding a direct
-// dependency is a config error. Checksums: a published .sha256 (else
-// .sha1) is verified on download and a mismatch fails with
+// Rules: exact versions, version ranges, LATEST, RELEASE, and
+// -SNAPSHOT versions all resolve (ranges and LATEST/RELEASE read the
+// artifact's maven-metadata.xml; snapshots read the snapshot
+// metadata and resolve to the newest timestamped build); Google
+// Maven by default, Maven Central when `[deps] maven_central =
+// true`, plus `[deps] maven_repos` entries (searched after the
+// defaults, in declared order, with optional Basic-auth credentials
+// that never appear in a log or diagnostic); transitive resolution
+// over compile + runtime scopes (test/provided/optional skipped),
+// nearest-wins on version conflict, cycle-safe; parent POMs
+// contribute properties, dependencyManagement, dependencies, and
+// profiles (child entries win, nearest ancestor wins among parents),
+// and active profiles contribute properties, dependencyManagement,
+// and dependencies (activeByDefault, or listed in
+// `[deps] maven_profiles`). Exclusions (`[deps] maven_exclude`,
+// "group:artifact" or "group:artifact:version") suppress an artifact
+// wherever it is reached, checked before nearest-wins; excluding a
+// direct dependency is a config error. Checksums: a published .sha256
+// (else .sha1) is verified on download and a mismatch fails with
 // CCB-E3020; when a repo publishes no checksum, the computed SHA-256
 // is recorded in a `.ccb-sha256` sidecar next to the cached file and
 // verified on later cache hits. Lockfile: `ccb setup` writes the
 // resolved tree to `ccb.lock` in the project root; cache-only
 // resolution enforces it when present, failing with CCB-E3023 on any
-// version, packaging, hash, or set mismatch.
+// version, packaging, hash, or set mismatch. No PGP verification:
+// checksums only (see docs/maven.md).
 #ifndef CCB_MAVEN_H
 #define CCB_MAVEN_H
 
@@ -83,6 +93,23 @@ int ccb_maven_parse_coord(const char *s, char **group, char **artifact, char **v
 // left empty; on success returns CCB_OK.
 ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
   int readonly, ccb_maven_result *out, ccb_diag_list *diags);
+
+// Resolve every `[build] kotlin_plugins` coordinate to its jar in
+// the cache. Each coordinate resolves to its jar only: the POM is
+// fetched to confirm jar packaging, but no transitive walk runs — a
+// compiler-plugin jar must be self-contained (the embeddable Compose
+// and serialization plugin artifacts are). prefetch != 0 downloads
+// missing POMs/jars (setup only); prefetch == 0 reads the cache and
+// fails with CCB-E3021 on a miss. Plugin jars are not in ccb.lock:
+// the exact coordinate in ccb.toml pins them, and the cache sidecar
+// verifies the hash. On success *jars_out holds malloc'd paths in
+// declared order (caller frees the array and the strings); on
+// failure returns CCB_ERR_TOOLCHAIN with diagnostics (CCB-E3019
+// unresolvable or not a jar, CCB-E3020 checksum mismatch, CCB-E3021
+// not prefetched).
+ccb_status ccb_maven_resolve_plugins(const ccb_config *cfg, int prefetch,
+  int verbose, int readonly, char ***jars_out, size_t *count_out,
+  ccb_diag_list *diags);
 
 // Maven cache root: $XDG_CACHE_HOME/ccb/maven2, else
 // ~/.cache/ccb/maven2. Honors CCB_MAVEN_CACHE when set (tests and

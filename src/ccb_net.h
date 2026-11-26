@@ -14,6 +14,12 @@
 // failure only when curl itself fails before writing; callers that
 // need atomicity download to a temp path and rename.
 int ccb_net_download(const char *url, const char *dest);
+// Same, with HTTP Basic auth. The credentials travel only in the
+// curl argv (as one "-u user:pass" argument): never in the URL, and
+// never printed — ccb_proc_run does not log argv, and no caller may
+// render this argv. A NULL user downloads without auth.
+int ccb_net_download_auth(const char *url, const char *dest,
+  const char *user, const char *pass);
 // Cache root: $XDG_CACHE_HOME/ccb, else ~/.cache/ccb. NULL when
 // neither base is available. The caller frees the result.
 char *ccb_net_cache_root(void);

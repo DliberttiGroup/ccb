@@ -24,8 +24,11 @@
 ccb_status ccb_dexcheck_file(const char *path, char ***missing_out,
     size_t *nmissing_out, char **err_out);
 
-// Same, over every *.dex file under dir (sorted order). No dex
-// files at all is CCB_ERR_BUILD ("no dex files found").
+// Same, over every *.dex file under dir (sorted order). Defined
+// and referenced sets merge across all files before comparing, so
+// a class defined in classes2.dex satisfies a reference from
+// classes.dex. No dex files at all is CCB_ERR_BUILD ("no dex files
+// found").
 ccb_status ccb_dexcheck_dir(const char *dir, char ***missing_out,
     size_t *nmissing_out, char **err_out);
 

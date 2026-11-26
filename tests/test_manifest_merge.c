@@ -380,5 +380,94 @@ int main(void) {
     free(err);
     ccb_manifest_warnings_free(&warns);
   }
+  // 15. A merged entry using tools: (e.g. androidx.startup's provider)
+  // brings the xmlns:tools declaration onto the merged root, or aapt2
+  // rejects the manifest with "unbound prefix".
+  {
+    const char *lib =
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" "
+        "xmlns:tools=\"http://schemas.android.com/tools\" "
+        "package=\"com.example.lib\">"
+        "<application>"
+        "<provider android:name=\"androidx.startup.InitializationProvider\" "
+        "android:authorities=\"com.example.app.androidx-startup\" "
+        "android:exported=\"false\" tools:node=\"merge\">"
+        "<meta-data android:name=\"androidx.emoji2.text.EmojiCompatInitializer\" "
+        "android:value=\"androidx.startup\" />"
+        "</provider>"
+        "</application>"
+        "</manifest>";
+    ccb_manifest_warnings warns;
+    memset(&warns, 0, sizeof(warns));
+    char *err = NULL;
+    char *out = merge1(APP, lib, "startup.aar", &warns, &err);
+    CHECK(out != NULL);
+    if (out != NULL) {
+      CHECK(contains(out, "tools:node=\"merge\""));
+      CHECK(contains(out,
+        "xmlns:tools=\"http://schemas.android.com/tools\""));
+      CHECK(count_occurrences(out, "xmlns:tools=") == 1);
+    }
+    free(out);
+    free(err);
+    ccb_manifest_warnings_free(&warns);
+  }
+  // 16. The declaration is not duplicated when the app already has it.
+  {
+    const char *app_tools =
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
+        "    xmlns:tools=\"http://schemas.android.com/tools\"\n"
+        "    package=\"com.example.app\">\n"
+        "    <application android:label=\"App\">\n"
+        "        <activity android:name=\".MainActivity\" android:exported=\"true\" />\n"
+        "    </application>\n"
+        "</manifest>\n";
+    const char *lib =
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" "
+        "xmlns:tools=\"http://schemas.android.com/tools\" "
+        "package=\"com.example.lib\">"
+        "<application>"
+        "<provider android:name=\"androidx.startup.InitializationProvider\" "
+        "android:authorities=\"com.example.app.androidx-startup\" "
+        "android:exported=\"false\" tools:node=\"merge\" />"
+        "</application>"
+        "</manifest>";
+    ccb_manifest_warnings warns;
+    memset(&warns, 0, sizeof(warns));
+    char *err = NULL;
+    char *out = merge1(app_tools, lib, "startup.aar", &warns, &err);
+    CHECK(out != NULL);
+    if (out != NULL) {
+      CHECK(count_occurrences(out, "xmlns:tools=") == 1);
+    }
+    free(out);
+    free(err);
+    ccb_manifest_warnings_free(&warns);
+  }
+  // 17. A merged entry using an unknown namespace prefix fails the
+  // merge with a clear error instead of emitting an invalid manifest.
+  {
+    const char *lib =
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" "
+        "package=\"com.example.lib\">"
+        "<application>"
+        "<provider android:name=\"com.example.lib.P\" "
+        "android:exported=\"false\" custom:flag=\"true\" />"
+        "</application>"
+        "</manifest>";
+    ccb_manifest_warnings warns;
+    memset(&warns, 0, sizeof(warns));
+    char *err = NULL;
+    char *out = merge1(APP, lib, "weird.aar", &warns, &err);
+    CHECK(out == NULL);
+    CHECK(err != NULL);
+    if (err != NULL) {
+      CHECK(contains(err, "custom"));
+      CHECK(contains(err, "weird.aar"));
+    }
+    free(out);
+    free(err);
+    ccb_manifest_warnings_free(&warns);
+  }
   TEST_MAIN_END();
 }

@@ -168,11 +168,66 @@ static char *ccb_resolve(const char *root, const char *value) {
   return ccb_path_join(root, value);
 }
 
-// Exact-version coordinate check for [deps] maven entries (kept here
-// rather than in ccb_maven so config does not depend on the resolver
-// module, which itself depends on config). Exactly three non-empty
-// colon-separated parts, no path-unsafe characters, no ranges,
-// LATEST, RELEASE, or -SNAPSHOT versions.
+// Version-spec check for [deps] maven entries (kept here rather
+// than in ccb_maven so config does not depend on the resolver module,
+// which itself depends on config). Exactly three non-empty
+// colon-separated parts, no path-unsafe characters, and a version
+// that is either an exact version, a Maven version range
+// ("[1.0,2.0)", "[1.0]", "[1.0,)", "(,2.0]"), LATEST, RELEASE, or a
+// -SNAPSHOT version. A range never becomes a path component: the
+// resolver turns it into a concrete version before any fetch.
+static int ccb_config_maven_version_spec_ok(const char *s, size_t n) {
+  if (n == 0) {
+    return 0;
+  }
+  if (s[0] == '[' || s[0] == '(') {
+    // Range: first char '[' or '(', last char ']' or ')', balanced
+    // brackets, only range characters inside, at least one digit.
+    if (n < 3 || (s[n - 1] != ']' && s[n - 1] != ')')) {
+      return 0;
+    }
+    int depth = 0;
+    int digit = 0;
+    for (size_t k = 0; k < n; k++) {
+      char ch = s[k];
+      int ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
+        (ch >= 'A' && ch <= 'Z') || ch == '.' || ch == '-' || ch == '_' ||
+        ch == '+' || ch == ',' || ch == ' ' || ch == '[' || ch == ']' ||
+        ch == '(' || ch == ')';
+      if (!ok) {
+        return 0;
+      }
+      if (ch >= '0' && ch <= '9') {
+        digit = 1;
+      }
+      if (ch == '[' || ch == '(') {
+        depth++;
+      }
+      if (ch == ']' || ch == ')') {
+        depth--;
+      }
+      if (depth < 0) {
+        return 0;
+      }
+    }
+    return depth == 0 && digit;
+  }
+  if ((n == 6 && memcmp(s, "LATEST", 6) == 0) ||
+      (n == 7 && memcmp(s, "RELEASE", 7) == 0)) {
+    return 1;
+  }
+  if (n >= 9 && memcmp(s + n - 9, "-SNAPSHOT", 9) == 0) {
+    return 1;
+  }
+  for (size_t k = 0; k < n; k++) {
+    char ch = s[k];
+    if (ch == '[' || ch == ']' || ch == '(' || ch == ')') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int ccb_config_maven_coord_ok(const char *s) {
   const char *c1 = strchr(s, ':');
   const char *c2 = c1 != NULL ? strchr(c1 + 1, ':') : NULL;
@@ -204,18 +259,130 @@ static int ccb_config_maven_coord_ok(const char *s) {
   if (lens[2] == 2 && parts[2][0] == '.' && parts[2][1] == '.') {
     return 0;
   }
-  for (size_t k = 0; k < lens[2]; k++) {
-    char ch = parts[2][k];
-    if (ch == '[' || ch == ']' || ch == '(' || ch == ')') {
+  return ccb_config_maven_version_spec_ok(parts[2], lens[2]);
+}
+
+// Exact-version coordinate check for [build] kotlin_plugins: same
+// shape as a maven coordinate, but the version must be exact. A
+// compiler plugin has to match the kotlinc version, so ranges,
+// LATEST, RELEASE, and -SNAPSHOT are rejected here.
+static int ccb_config_plugin_coord_ok(const char *s) {
+  const char *c1 = strchr(s, ':');
+  const char *c2 = c1 != NULL ? strchr(c1 + 1, ':') : NULL;
+  if (c1 == NULL || c2 == NULL || strchr(c2 + 1, ':') != NULL) {
+    return 0;
+  }
+  const char *v = c2 + 1;
+  size_t n = strlen(v);
+  if (n == 0) {
+    return 0;
+  }
+  if (v[0] == '[' || v[0] == '(') {
+    return 0;
+  }
+  if ((n == 6 && memcmp(v, "LATEST", 6) == 0) ||
+      (n == 7 && memcmp(v, "RELEASE", 7) == 0)) {
+    return 0;
+  }
+  if (n >= 9 && memcmp(v + n - 9, "-SNAPSHOT", 9) == 0) {
+    return 0;
+  }
+  return ccb_config_maven_coord_ok(s);
+}
+
+// One [deps] maven_repos entry: "url" or
+// "url username password-source". The password source is "env:NAME"
+// (read from the environment at resolve time) or a literal password.
+// Fields are space-separated; a URL never contains a space.
+static int ccb_config_maven_repo_ok(const char *s) {
+  const char *sp1 = strchr(s, ' ');
+  size_t url_len = sp1 != NULL ? (size_t)(sp1 - s) : strlen(s);
+  if (url_len == 0) {
+    return 0;
+  }
+  if (url_len < 7 || (memcmp(s, "http://", 7) != 0 &&
+      memcmp(s, "https://", 8) != 0 && memcmp(s, "file://", 7) != 0)) {
+    return 0;
+  }
+  // No userinfo in the URL: credentials belong in the username and
+  // password-source fields, never embedded where they could be
+  // logged as part of a URL.
+  for (size_t k = 0; k < url_len; k++) {
+    if (s[k] == '@') {
       return 0;
     }
   }
-  if ((lens[2] == 6 && memcmp(parts[2], "LATEST", 6) == 0) ||
-      (lens[2] == 7 && memcmp(parts[2], "RELEASE", 7) == 0)) {
+  if (sp1 == NULL) {
+    return 1;
+  }
+  const char *user = sp1 + 1;
+  const char *sp2 = strchr(user, ' ');
+  if (sp2 == NULL) {
     return 0;
   }
-  if (lens[2] >= 9 && memcmp(parts[2] + lens[2] - 9, "-SNAPSHOT", 9) == 0) {
+  size_t user_len = (size_t)(sp2 - user);
+  if (user_len == 0) {
     return 0;
+  }
+  for (size_t k = 0; k < user_len; k++) {
+    if (user[k] == ':') {
+      return 0;
+    }
+  }
+  const char *pw = sp2 + 1;
+  if (pw[0] == '\0' || strchr(pw, ' ') != NULL) {
+    return 0;
+  }
+  if (memcmp(pw, "env:", 4) == 0) {
+    // Environment variable name: [A-Za-z_][A-Za-z0-9_]*.
+    const char *name = pw + 4;
+    if (name[0] == '\0') {
+      return 0;
+    }
+    for (size_t k = 0; name[k] != '\0'; k++) {
+      char ch = name[k];
+      int ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+        ch == '_' || (k > 0 && ch >= '0' && ch <= '9');
+      if (!ok) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+// One [build] kotlin_plugin_options entry: "plugin-id:key=value".
+// The id and key are dotted identifiers; the value is any non-empty
+// string without spaces.
+static int ccb_config_plugin_option_ok(const char *s) {
+  const char *colon = strchr(s, ':');
+  if (colon == NULL || colon == s) {
+    return 0;
+  }
+  for (const char *p = s; p < colon; p++) {
+    char ch = *p;
+    int ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+      (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_';
+    if (!ok) {
+      return 0;
+    }
+  }
+  const char *eq = strchr(colon + 1, '=');
+  if (eq == NULL || eq == colon + 1 || eq[1] == '\0') {
+    return 0;
+  }
+  for (const char *p = colon + 1; p < eq; p++) {
+    char ch = *p;
+    int ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+      (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_';
+    if (!ok) {
+      return 0;
+    }
+  }
+  for (const char *p = eq + 1; *p != '\0'; p++) {
+    if (*p <= ' ') {
+      return 0;
+    }
   }
   return 1;
 }
@@ -349,7 +516,13 @@ void ccb_config_free(ccb_config *c) {
   ccb_free_str_array(c->jars, c->jars_count);
   ccb_free_str_array(c->aars, c->aars_count);
   ccb_free_str_array(c->maven, c->maven_count);
+  ccb_free_str_array(c->maven_repos, c->maven_repos_count);
+  ccb_free_str_array(c->maven_profiles, c->maven_profiles_count);
   ccb_free_str_array(c->maven_exclude, c->maven_exclude_count);
+  ccb_free_str_array(c->kotlin_plugins, c->kotlin_plugins_count);
+  ccb_free_str_array(c->kotlin_plugin_options,
+    c->kotlin_plugin_options_count);
+  ccb_free_str_array(c->kotlin_plugin_jars, c->kotlin_plugin_jars_count);
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
   ccb_free_str_array(c->ndk_sources, c->ndk_sources_count);
   ccb_free_str_array(c->ndk_cflags, c->ndk_cflags_count);
@@ -615,8 +788,8 @@ static void ccb_load_unknown_keys(ccb_validator *v) {
   static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign", "adb" };
   static const char *debug_keys[] = { "store", "alias" };
   static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
-  static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules", "kotlinc_daemon", "kotlinc_daemon_idle_seconds" };
-  static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central", "maven_exclude" };
+  static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules", "kotlinc_daemon", "kotlinc_daemon_idle_seconds", "kotlin_plugins", "kotlin_plugin_options" };
+  static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central", "maven_exclude", "maven_repos", "maven_profiles" };
   static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
   static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
   ccb_check_unknown_keys(v, "", root_keys, 1);
@@ -625,8 +798,8 @@ static void ccb_load_unknown_keys(ccb_validator *v) {
   ccb_check_unknown_keys(v, "sdk", sdk_keys, 7);
   ccb_check_unknown_keys(v, "signing.debug", debug_keys, 2);
   ccb_check_unknown_keys(v, "signing.release", release_keys, 4);
-  ccb_check_unknown_keys(v, "build", build_keys, 7);
-  ccb_check_unknown_keys(v, "deps", deps_keys, 5);
+  ccb_check_unknown_keys(v, "build", build_keys, 9);
+  ccb_check_unknown_keys(v, "deps", deps_keys, 7);
   ccb_check_unknown_keys(v, "ndk", ndk_keys, 3);
   ccb_check_unknown_keys(v, "preview", preview_keys, 9);
 }
@@ -808,6 +981,24 @@ static void ccb_load_build(ccb_validator *v,
   if (c->minify && c->proguard_rules == NULL) {
     ccb_vdiag(v, "CCB-E1004", "build.minify requires 'build.proguard_rules'");
   }
+  ccb_get_str_array(v, "build", "kotlin_plugins", &c->kotlin_plugins,
+    &c->kotlin_plugins_count);
+  ccb_get_str_array(v, "build", "kotlin_plugin_options",
+    &c->kotlin_plugin_options, &c->kotlin_plugin_options_count);
+  for (size_t i = 0; i < c->kotlin_plugins_count; i++) {
+    if (!ccb_config_plugin_coord_ok(c->kotlin_plugins[i])) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "kotlin_plugins coordinate '%s' must be 'group:artifact:version' with an exact version (no ranges, LATEST, RELEASE, or -SNAPSHOT)",
+        c->kotlin_plugins[i], "");
+    }
+  }
+  for (size_t i = 0; i < c->kotlin_plugin_options_count; i++) {
+    if (!ccb_config_plugin_option_ok(c->kotlin_plugin_options[i])) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "kotlin_plugin_options entry '%s' must be 'plugin-id:key=value'",
+        c->kotlin_plugin_options[i], "");
+    }
+  }
 }
 
 // Does a direct dependency coordinate carry this exclusion's version
@@ -869,11 +1060,22 @@ static void ccb_load_deps(ccb_validator *v, ccb_config *c) {
   ccb_get_bool(v, "deps", "maven_central", &c->maven_central);
   ccb_get_str_array(v, "deps", "maven_exclude", &c->maven_exclude,
     &c->maven_exclude_count);
+  ccb_get_str_array(v, "deps", "maven_repos", &c->maven_repos,
+    &c->maven_repos_count);
+  ccb_get_str_array(v, "deps", "maven_profiles", &c->maven_profiles,
+    &c->maven_profiles_count);
   for (size_t i = 0; i < c->maven_count; i++) {
     if (!ccb_config_maven_coord_ok(c->maven[i])) {
       ccb_vdiagf(v, "CCB-E1005",
-        "maven coordinate '%s' must be 'group:artifact:version' with an exact version (no ranges, LATEST, RELEASE, or -SNAPSHOT)",
+        "maven coordinate '%s' must be 'group:artifact:version' with an exact version, a version range, LATEST, RELEASE, or a -SNAPSHOT version",
         c->maven[i], "");
+    }
+  }
+  for (size_t i = 0; i < c->maven_repos_count; i++) {
+    if (!ccb_config_maven_repo_ok(c->maven_repos[i])) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "maven_repos entry '%s' must be 'url' or 'url username password-source' (password-source 'env:VAR' or a literal password)",
+        c->maven_repos[i], "");
     }
   }
   for (size_t i = 0; i < c->maven_exclude_count; i++) {
