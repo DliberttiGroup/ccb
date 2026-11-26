@@ -11,8 +11,10 @@ Home (entry)
   -> Form via "New note"
   -> Form("note-42") via "Edit note"
   -> Detail via "Quick open"
+  -> Detail("note-1") via "Note 1: Buy milk"
+  -> Detail("note-2") via "Note 2: Call Ana"
+  -> Detail("note-3") via "Note 3: Ideas"
   -> Settings via "Settings"
 Settings
   branches: if darkMode [then, else]
   -> Home via "Back"
-  -> Settings via "Settings"

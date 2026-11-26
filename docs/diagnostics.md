@@ -1,15 +1,14 @@
 # Diagnostic codes
 
-Every failure carries a stable code. Codes are grouped by phase; the
-exit code follows spec §6.4 (0 success, 1 build failure, 2 config
-error, 3 toolchain missing/wrong version, 4 signing error, 5 device
-error).
+Every failure carries a stable code. Codes grouped by phase. Exit codes
+(spec §6.4): 0 success, 1 build failure, 2 config error, 3 toolchain
+missing/wrong version, 4 signing error, 5 device error.
 
 ## Config (exit 2)
 
 | Code | Meaning |
 | ---- | ------- |
-| CCB-E1001 | Unknown key in `ccb.toml` (hard error; the key and table are named) |
+| CCB-E1001 | Unknown key in `ccb.toml` (hard error; key and table named) |
 | CCB-E1002 | Missing required `ccb_version` |
 | CCB-E1003 | Unsupported `ccb_version` (only 1 is supported) |
 | CCB-E1004 | Missing required key |
@@ -35,7 +34,7 @@ error).
 | CCB-E2006 | kotlinc is not 2.x |
 | CCB-E2007 | NDK not installed for the requested version |
 | CCB-E2008 | NDK revision mismatch |
-| CCB-E2009 | A required tool binary is missing or not executable. Also covers a broken explicit tool override: a `[sdk] aapt2` / `[sdk] zipalign` key or a `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, and the message names the override source (e.g. `[sdk] aapt2`, `CCB_ZIPALIGN`) and the path. No silent fallback to the default tool. |
+| CCB-E2009 | Required tool binary missing or not executable. Also covers a broken explicit tool override: `[sdk] aapt2` / `[sdk] zipalign` key or `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, message names the override source and the path. No silent fallback to the default tool. |
 
 ## Build (exit 1 unless noted)
 
@@ -63,8 +62,9 @@ error).
 | CCB-E3020 | Maven checksum mismatch: downloaded or cached file does not match its published or recorded checksum |
 | CCB-E3021 | Maven artifact not in the local cache; run `ccb setup` to prefetch it (builds never download) |
 | CCB-E3022 | Library module name collides with a declared AAR's base name (their extraction paths would overwrite each other) |
-| CCB-E3023 | Maven lockfile mismatch: the resolved tree deviates from `ccb.lock` (version, packaging, hash, missing, or stale entry), or the lockfile is malformed; run `ccb setup` to regenerate it |
+| CCB-E3023 | Maven lockfile mismatch: resolved tree deviates from `ccb.lock` (version, packaging, hash, missing, or stale entry), or the lockfile is malformed; run `ccb setup` to regenerate it |
 | CCB-E3024 | Maven parent POM chain error: a cycle in the chain, or more than 10 ancestors, naming the chain |
+| CCB-E3025 | Dex check failed: the dex references one or more classes it does not define (first 10 named, then "+ N more"), or a dex file is malformed/truncated; the build stops before packaging |
 
 ## Preview (exit 1 unless noted)
 
@@ -86,20 +86,19 @@ error).
 | CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
 | CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
 | CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
-| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows, wireframe cells; message also reports the size in dp. Precision rule (Chunk C): width is always layout-computed so `w < 8` always counts, but height without a `font-size` rule is the 1-row default, not a measurement, so `h < 2` counts only when the effective rule sets `font-size` (warning, always) |
-| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows (warning, always). Full rule: [docs/preview.md](preview.md#lint-diagnostics-after-layout) |
+| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always). Full rule: [docs/preview.md](preview.md#lint-diagnostics-after-layout) |
 | CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
 | CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
 | CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
-| CCB-P1022 | Scenario entry does not match the project: a scenario names an unknown screen, branch entry, list, or field; a list that already has static rows; a button label matching no edge; or a button whose edges have no unknown argument to fill. The entry is skipped, rendering continues (warning, always; a scenario never fails the build gate) |
-| CCB-P1023 | Trace step does not match the project: a trace names an unknown screen; an edge label matching no edge in the screen; a branch entry that does not exist in the screen; a step naming neither an edge nor a branch; or a branch entry that contains no component with the step's button label (the edge is still marked taken). The step (or its unmatched part) is skipped, rendering continues (warning, always; a trace never fails the build gate) |
+| CCB-P1022 | Scenario entry does not match the project (warning, always; a scenario never fails the build gate) |
+| CCB-P1023 | Trace step does not match the project (warning, always; a trace never fails the build gate) |
 | CCB-P1024 | Ambiguous function reference: a click-handler method reference or a helper call names a top-level fun defined in more than one flow file, so no edge is recorded for it — the reference is never guessed. Warns once per (file, name) (warning, always; never fails the build gate) |
 | CCB-P1025 | Unattributed navigation: a nav call in a flow file that no parse recorded as an edge — inside a nested block, a skipped statement, or a helper never scanned from a button. Reported with file:line so it is never silently dropped; never invents an edge. Navs already reported by CCB-P1019 (unbound handler) or CCB-P1024 (ambiguous reference) are not repeated here (warning, always; never fails the build gate) |
 
-Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under
-`--strict`) CCB-P1001/CCB-P1014 exit 1. CCB-P1016/P1017/P1018/P1019/P1020/P1021/P1022/P1023/P1024/P1025 are
-warnings even under `--strict`, so they never fail the build gate.
-A project with no usable
+Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under `--strict`)
+CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
+`--strict`, so they never fail the build gate. A project with no usable
 `[preview]` section is not a diagnostic at all: `ccb preview` prints
 "preview not applicable to this project" and exits 0.
 
@@ -110,6 +109,6 @@ A project with no usable
 | CCB-E5001 | adb command failed or no device connected (see docs/device-setup.md) |
 | CCB-E5002 | No APK to install (run `ccb build` first) |
 
-Tool failures include the exact command that failed and the tail of
-its stderr. Keystore passwords are never included: release signing
-passes them to apksigner as `env:VAR` references only.
+Tool failures include the exact command that failed and the tail of its
+stderr. Keystore passwords are never included: release signing passes them
+to apksigner as `env:VAR` references only.

@@ -805,6 +805,7 @@ static const char *pv_res_name(const char *v) {
 typedef struct {
   char ***methods_io;
   char ***ids_io;
+  char ***texts_io;
   size_t *n_io;
 } pv_layout_ctx;
 
@@ -813,9 +814,11 @@ static void pv_layout_tag(void *ctx_v, const char *text, size_t tag_start,
   pv_layout_ctx *ctx = ctx_v;
   char *onclick = NULL;
   char *id = NULL;
+  char *label_text = NULL;
   size_t n = 0;
   char **next_m = NULL;
   char **next_i = NULL;
+  char **next_t = NULL;
   if (local_len < 6 || memcmp(local + local_len - 6, "Button", 6) != 0) {
     return;
   }
@@ -824,16 +827,24 @@ static void pv_layout_tag(void *ctx_v, const char *text, size_t tag_start,
     return;
   }
   id = pv_xml_attr(text, tag_start, tag_end, "android:id");
+  // Phase 2: the layout's own android:text is the label fallback
+  // when no [preview.bindings] entry names the button — the layout
+  // declares the label, so an onClick button whose text is right
+  // there in the XML is bound without a config table.
+  label_text = pv_xml_attr(text, tag_start, tag_end, "android:text");
   n = *ctx->n_io;
   // xrealloc preserves the existing entries; only the new slot is
   // filled here.
   next_m = ccb_xrealloc(*ctx->methods_io, (n + 1) * sizeof(*next_m));
   next_i = ccb_xrealloc(*ctx->ids_io, (n + 1) * sizeof(*next_i));
+  next_t = ccb_xrealloc(*ctx->texts_io, (n + 1) * sizeof(*next_t));
   next_m[n] = onclick;
   next_i[n] = id != NULL ? ccb_xstrdup(pv_res_name(id)) : NULL;
+  next_t[n] = label_text;
   free(id);
   *ctx->methods_io = next_m;
   *ctx->ids_io = next_i;
+  *ctx->texts_io = next_t;
   *ctx->n_io = n + 1;
 }
 
@@ -1070,17 +1081,22 @@ static void pv_screen_edge_add(ccb_arena *arena, pv_screen *screen,
   screen->nedges++;
 }
 
-// True when the component tree contains a component box (not the
-// screen root, not a branch node) with the given label.
+// True when the component tree contains a BUTTON box with the
+// given label. Only buttons match: an onClick edge's `from` is a
+// button label by construction, and a TextView that happens to
+// share the text (a screen title, e.g. "Settings" on the Settings
+// screen) is a different component — matching it would attach the
+// edge to a screen that has no such button. (Phase 2: layout
+// wireframes carry title TextViews, so label-only matching
+// mis-attached the Main settings-button edge to the Settings
+// screen itself.)
 static int pv_tree_has_label(pv_box *box, const char *label) {
   size_t i = 0;
   if (box == NULL || label == NULL) {
     return 0;
   }
   if (box->label != NULL && strcmp(box->label, label) == 0 &&
-      strcmp(box->type, "screen") != 0 &&
-      strcmp(box->type, "branch") != 0 &&
-      strcmp(box->type, "branch-entry") != 0) {
+      box->type != NULL && strcmp(box->type, "button") == 0) {
     return 1;
   }
   for (i = 0; i < box->nchildren; i++) {
@@ -1230,6 +1246,7 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
     size_t nlayout = 0;
     char **lay_methods = NULL;
     char **lay_ids = NULL;
+    char **lay_texts = NULL;
     size_t nlay = 0;
     char **warned_ids = NULL;
     size_t nwarned_ids = 0;
@@ -1264,6 +1281,7 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
       }
       lctx.methods_io = &lay_methods;
       lctx.ids_io = &lay_ids;
+      lctx.texts_io = &lay_texts;
       lctx.n_io = &nlay;
       pv_xml_scan_tags(text, len, pv_layout_tag, &lctx);
       free(text);
@@ -1284,6 +1302,13 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
       }
       label = lay_ids[pi] != NULL ?
         pv_binding_lookup(cfg, lay_ids[pi]) : NULL;
+      // Phase 2 fallback: the layout's own android:text names the
+      // button (kept raw here — an "@string/..." reference resolves
+      // with the other component labels later in the load). Only a
+      // button with neither a binding nor a text warns P1019.
+      if (label == NULL) {
+        label = lay_texts[pi];
+      }
       if (label == NULL) {
         ccb_str msg;
         if (!warned) {
@@ -1336,9 +1361,11 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
     for (pi = 0; pi < nlay; pi++) {
       free(lay_methods[pi]);
       free(lay_ids[pi]);
+      free(lay_texts[pi]);
     }
     free(lay_methods);
     free(lay_ids);
+    free(lay_texts);
     for (pi = 0; pi < nwarned_ids; pi++) {
       free(warned_ids[pi]);
     }
@@ -1449,10 +1476,10 @@ void pv_project_assemble(pv_project *p, pv_screen **screens,
   }
   p->nscreens = nscreens;
     // Slice 3 distribution: an onClick edge attaches to every screen
-    // whose component tree contains the bound label (the button the
-    // layout declares). A label in no screen is CCB-P1021 (warning,
-    // no edge): the edge has nowhere to attach, and attaching it to
-    // an unrelated screen would be a guess. Distribution runs before
+    // whose component tree contains a BUTTON with the bound label
+    // (the button the layout declares). A label in no screen is
+    // CCB-P1021 (warning, no edge): the edge has nowhere to attach,
+    // and attaching it to an unrelated screen would be a guess. Distribution runs before
     // reconciliation, so declared edges still beat these derived
     // edges exactly as they beat Slice 1 derived edges. Note the
     // labels compared here are pre-@string-resolution, matching the
@@ -1588,6 +1615,176 @@ void pv_project_assemble(pv_project *p, pv_screen **screens,
   p->caprules = p->nrules;
 }
 
+// Phase 2: preview applies to a config with a [preview] section
+// and at least one of styles, flow, or real Kotlin sources. A
+// [preview] section with none of the three is "preview not
+// applicable", exactly as before Phase 2.
+int pv_preview_applicable(const ccb_config *cfg) {
+  char *kdir = NULL;
+  if (cfg == NULL || !cfg->has_preview) {
+    return 0;
+  }
+  if (cfg->preview_styles != NULL || cfg->preview_flow != NULL) {
+    return 1;
+  }
+  kdir = pv_real_kotlin_dir(cfg);
+  if (kdir != NULL) {
+    free(kdir);
+    return 1;
+  }
+  return 0;
+}
+
+// Phase 2 merge: real-code screens merge into the sketch screens
+// (or stand alone when there is no flow/). A real screen merges
+// into a sketch screen of the same name (pv_names_match), or a
+// launcher real screen merges into a sketch screen named "Home"
+// (the launcher IS the entry screen; sketches name it Home while
+// real Activities are MainActivity). Edges append via
+// pv_screen_edge_add (silent dedup on the same button + target +
+// args + branch); a conflicting destination for the same button
+// warns CCB-P1020 and the real-code edge stands (PROJECT-FIRST:
+// real code over sketch), applied in place so the sketch edge list
+// keeps its order. A merged screen keeps the sketch root — the
+// real root is synthetic Buttons (Chunk 1), so the sketch wireframe
+// wins; a sketch screen with no root at all adopts the real one.
+// Real screens that merge nowhere are appended as-is, and the
+// real parse's pending onClick edges are appended to the caller's
+// pending list, so assemble distributes them by label.
+static void pv_merge_real_screens(ccb_arena *arena,
+    pv_screen ***screens_io, size_t *nscreens_io,
+    pv_pending_edge ***pending_io, size_t *npending_io,
+    pv_screen **real_screens, size_t nreal,
+    pv_pending_edge **real_pending, size_t nreal_pending,
+    const char *launcher, const char *package,
+    ccb_diag_list *diags) {
+  size_t r = 0;
+  size_t pi = 0;
+  for (r = 0; r < nreal; r++) {
+    pv_screen *real = real_screens[r];
+    pv_screen *target = NULL;
+    size_t i = 0;
+    size_t e = 0;
+    for (i = 0; i < *nscreens_io; i++) {
+      if (pv_names_match(package, (*screens_io)[i]->name,
+          real->name)) {
+        target = (*screens_io)[i];
+        break;
+      }
+    }
+    if (target == NULL && launcher != NULL &&
+        pv_names_match(package, real->name, launcher)) {
+      for (i = 0; i < *nscreens_io; i++) {
+        if (strcmp((*screens_io)[i]->name, "Home") == 0) {
+          target = (*screens_io)[i];
+          break;
+        }
+      }
+    }
+    if (target == NULL) {
+      // Real-only screen: keep it (with its synthetic Button
+      // roots, for now — Chunk 2 replaces those with a layout
+      // wireframe). The screens array is arena-grown (see
+      // pv_screen_add), so append the same way, never xrealloc.
+      pv_screen **next = ccb_arena_alloc(arena,
+        (*nscreens_io + 1) * sizeof(*next));
+      size_t k = 0;
+      for (k = 0; k < *nscreens_io; k++) {
+        next[k] = (*screens_io)[k];
+      }
+      next[*nscreens_io] = real;
+      *screens_io = next;
+      (*nscreens_io)++;
+      continue;
+    }
+    for (e = 0; e < real->nedges; e++) {
+      pv_edge *edge = &real->edges[e];
+      size_t d = 0;
+      int handled = 0;
+      for (d = 0; d < target->nedges; d++) {
+        pv_edge *old = &target->edges[d];
+        int same_branch = (old->branch == NULL && edge->branch == NULL) ||
+          (old->branch != NULL && edge->branch != NULL &&
+           strcmp(old->branch, edge->branch) == 0);
+        if (old->from == NULL || edge->from == NULL ||
+            strcmp(old->from, edge->from) != 0 || !same_branch) {
+          continue;
+        }
+        if (old->target != NULL && edge->target != NULL &&
+            pv_names_match(package, old->target, edge->target)) {
+          // Same destination (possibly spelled with/without the
+          // Activity suffix, e.g. "Form" vs "FormActivity"): silent
+          // dedup, keeping the sketch edge — it may carry args
+          // the real call does not.
+          handled = 1;
+          break;
+        }
+        if (old->target != NULL && edge->target != NULL) {
+          ccb_str msg;
+          ccb_str_init(&msg);
+          ccb_str_append(&msg,
+            "conflicting navigation: button '");
+          ccb_str_append(&msg, edge->from);
+          ccb_str_append(&msg, "' on screen '");
+          ccb_str_append(&msg, target->name);
+          ccb_str_append(&msg, "' points to '");
+          ccb_str_append(&msg, old->target);
+          ccb_str_append(&msg, "' in the flow sketch and to '");
+          ccb_str_append(&msg, edge->target);
+          ccb_str_append(&msg, "' in the real code; the real-code "
+            "destination is used");
+          pv_diag(diags, "CCB-P1020", msg.buf != NULL ? msg.buf : "",
+            NULL, -1);
+          ccb_str_free(&msg);
+          old->target = edge->target;
+          old->unknown = edge->unknown;
+          old->args = edge->args;
+          old->nargs = edge->nargs;
+          old->args_named = edge->args_named;
+          old->branch = edge->branch;
+          old->derived = 1;
+          handled = 1;
+          break;
+        }
+        // One side unknown: the known destination stands; two
+        // unknowns keep the first edge, silently.
+        if (edge->target != NULL) {
+          old->target = edge->target;
+          old->unknown = edge->unknown;
+          old->args = edge->args;
+          old->nargs = edge->nargs;
+          old->args_named = edge->args_named;
+          old->branch = edge->branch;
+          old->derived = 1;
+        }
+        handled = 1;
+        break;
+      }
+      if (!handled) {
+        pv_screen_edge_add(arena, target, edge->from, edge->target,
+          edge->unknown, edge->args, edge->nargs, edge->args_named,
+          edge->branch);
+      }
+    }
+    if (target->root == NULL && real->root != NULL) {
+      target->root = real->root;
+    }
+  }
+  if (nreal_pending > 0) {
+    // Same arena rule as the screens array (see pv_pending_add).
+    pv_pending_edge **next = ccb_arena_alloc(arena,
+      (*npending_io + nreal_pending) * sizeof(*next));
+    for (pi = 0; pi < *npending_io; pi++) {
+      next[pi] = (*pending_io)[pi];
+    }
+    for (pi = 0; pi < nreal_pending; pi++) {
+      next[*npending_io + pi] = real_pending[pi];
+    }
+    *pending_io = next;
+    *npending_io += nreal_pending;
+  }
+}
+
 ccb_status pv_project_load_scenario(const ccb_config *cfg,
     long frame_width, int ascii, int strict, ccb_diag_list *diags,
     const ccb_scenario *scenario, pv_project **out) {
@@ -1610,12 +1807,16 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
   // by the scan, so they outlive the block either way.
   char **graph_vals = NULL;
   size_t ngraph = 0;
+  // Phase 2: the manifest launcher activity, as a stripped screen
+  // name ("Main" for MainActivity). Set by the real-code load
+  // below; after assemble, the launcher moves to index 0 when no
+  // screen is named "Home".
+  char *launcher = NULL;
   if (out == NULL) {
     return CCB_ERR_CONFIG;
   }
   *out = NULL;
-  if (cfg == NULL || !cfg->has_preview || (cfg->preview_styles == NULL &&
-      cfg->preview_flow == NULL)) {
+  if (cfg == NULL || !pv_preview_applicable(cfg)) {
     return CCB_ERR_CONFIG;
   }
   if (diags != NULL) {
@@ -1698,6 +1899,50 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
         ccb_free_str_array(flow_files, nflow);
       }
     }
+    // Phase 2: real-code screens/edges merge into the sketch
+    // screens (or stand alone when there is no flow/). Runs after
+    // the sketch parse so the merge can dedup against it, and
+    // before assemble so pending onClick edges distribute with the
+    // sketch's.
+    {
+      pv_screen **real_screens = NULL;
+      size_t nreal = 0;
+      pv_pending_edge **real_pending = NULL;
+      size_t nreal_pending = 0;
+      pv_real_load(cfg, arena, dl, graph_keys, graph_vals, ngraph,
+        onclick_methods, onclick_labels, nonclick,
+        &real_screens, &nreal, &real_pending, &nreal_pending,
+        &launcher);
+      pv_merge_real_screens(arena, &screens, &nscreens, &pending,
+        &npending, real_screens, nreal, real_pending, nreal_pending,
+        launcher, cfg->package, dl);
+      // real_screens / real_pending are arena-grown by the real
+      // parse (see pv_screen_add / pv_pending_add): never freed.
+      // Phase 2: the nav graph's "Home" destination IS the
+      // launcher screen — the same launcher↔Home equivalence as
+      // the merge above. Without this, assemble would create an
+      // empty graph-only "Home" node beside the real launcher
+      // screen, and the entry rule would pick that empty node.
+      // Only when no sketch screen is named "Home": with a
+      // sketch, the graph destination already matches it.
+      if (launcher != NULL) {
+        size_t g = 0;
+        int has_home = 0;
+        for (i = 0; i < nscreens; i++) {
+          if (strcmp(screens[i]->name, "Home") == 0) {
+            has_home = 1;
+            break;
+          }
+        }
+        if (!has_home) {
+          for (g = 0; g < ngraph; g++) {
+            if (strcmp(graph_vals[g], "Home") == 0) {
+              graph_vals[g] = launcher;
+            }
+          }
+        }
+      }
+    }
   }
   // CSS entries: every .css file parsed once, in sorted order,
   // into its own rules + diagnostics. Assembly merges them in
@@ -1752,6 +1997,34 @@ ccb_status pv_project_load_scenario(const ccb_config *cfg,
     free(css_lists);
     free(css_entries);
     ccb_free_str_array(css_files, ncss);
+  }
+  // Phase 2: the launcher is the entry screen when no sketch names
+  // a screen "Home" — the entry rule is Home else screens[0], so
+  // the launcher moves to index 0 (assemble appends graph-only
+  // nodes after the real screens, so the move sees them all).
+  if (launcher != NULL) {
+    size_t hi = 0;
+    int has_home = 0;
+    for (hi = 0; hi < p->nscreens; hi++) {
+      if (strcmp(p->screens[hi]->name, "Home") == 0) {
+        has_home = 1;
+        break;
+      }
+    }
+    if (!has_home) {
+      size_t li = 0;
+      for (li = 0; li < p->nscreens; li++) {
+        if (pv_names_match(cfg->package, p->screens[li]->name,
+            launcher)) {
+          pv_screen *tmp = p->screens[li];
+          memmove(&p->screens[1], &p->screens[0],
+            li * sizeof(*p->screens));
+          p->screens[0] = tmp;
+          break;
+        }
+      }
+    }
+    free(launcher);
   }
   *out = p;
   return CCB_OK;

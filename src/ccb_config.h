@@ -106,6 +106,11 @@ typedef struct {
   char *jvm_target;
   char *proguard_rules;
   char *build_dir;
+  // [build] kotlinc_daemon: opt-in Kotlin compiler daemon (default
+  // off: no background process). kotlinc_daemon_idle_seconds: idle
+  // seconds before the daemon shuts itself down (default 300).
+  int kotlinc_daemon;
+  long kotlinc_daemon_idle_seconds;
   // [deps]
   char **jars;
   size_t jars_count;

@@ -188,7 +188,7 @@ static char *pv_trim_arena(ccb_arena *arena, const char *text, size_t start, siz
 
 // ---------- arena tree growth ----------
 
-static pv_box *pv_box_new(ccb_arena *arena, char *type, char *label) {
+pv_box *pv_box_new(ccb_arena *arena, char *type, char *label) {
   pv_box *box = ccb_arena_alloc(arena, sizeof(*box));
   memset(box, 0, sizeof(*box));
   box->type = type;
@@ -196,7 +196,7 @@ static pv_box *pv_box_new(ccb_arena *arena, char *type, char *label) {
   return box;
 }
 
-static void pv_box_add_child(ccb_arena *arena, pv_box *parent, pv_box *child) {
+void pv_box_add_child(ccb_arena *arena, pv_box *parent, pv_box *child) {
   if (parent->nchildren == parent->capchildren) {
     size_t ncap = parent->capchildren == 0 ? 4 : parent->capchildren * 2;
     pv_box **next = ccb_arena_alloc(arena, ncap * sizeof(*next));
@@ -2075,6 +2075,126 @@ static void pv_scan_when(pv_parser *p, size_t *i_io, size_t end,
   *i_io = i > end ? end : i;
 }
 
+// Classify the argument list of the call at token i (ident + '(')
+// into the edge-args shape: each top-level comma segment becomes
+// one entry (a literal, a "name = value" raw text, or NULL for
+// anything else). Used to carry a helper call's literal arguments
+// onto the edges its body produces (Phase 2: a helper like
+// openDetail("note-1") whose body only startActivitys).
+static void pv_call_site_args(pv_parser *p, size_t i, char ***args_out,
+    size_t *nargs_out, int **args_named_out) {
+  size_t close = 0;
+  char **args = NULL;
+  size_t nargs = 0;
+  int *args_named = NULL;
+  size_t seg_start = 0;
+  size_t k = 0;
+  long paren_depth = 0;
+  long brace_depth = 0;
+  if (args_out != NULL) {
+    *args_out = NULL;
+  }
+  if (nargs_out != NULL) {
+    *nargs_out = 0;
+  }
+  if (args_named_out != NULL) {
+    *args_named_out = NULL;
+  }
+  if (i + 1 >= p->ntoks || !pv_is_sym(&p->toks[i + 1], '(')) {
+    return;
+  }
+  close = pv_match_paren(p, i + 1);
+  if (close == (size_t)-1 || close == i + 2) {
+    return;
+  }
+  seg_start = i + 2;
+  paren_depth = 1;
+  brace_depth = 0;
+  for (k = i + 2; k <= close; k++) {
+    int is_split = 0;
+    int is_end = k == close;
+    if (!is_end) {
+      if (pv_is_sym(&p->toks[k], '(')) {
+        paren_depth++;
+      } else if (pv_is_sym(&p->toks[k], ')')) {
+        paren_depth--;
+      } else if (pv_is_sym(&p->toks[k], '{')) {
+        brace_depth++;
+      } else if (pv_is_sym(&p->toks[k], '}')) {
+        brace_depth--;
+      } else if (pv_is_sym(&p->toks[k], ',') && paren_depth == 1 &&
+          brace_depth == 0) {
+        is_split = 1;
+      }
+    }
+    if (!is_split && !is_end) {
+      continue;
+    }
+    {
+      int named = 0;
+      char *arg = NULL;
+      char **next = NULL;
+      int *next_named = NULL;
+      size_t m = 0;
+      if (seg_start < k) {
+        arg = pv_arg_classify(p, seg_start, k, &named);
+      }
+      next = ccb_arena_alloc(p->arena, (nargs + 1) * sizeof(*next));
+      next_named = ccb_arena_alloc(p->arena,
+        (nargs + 1) * sizeof(*next_named));
+      for (m = 0; m < nargs; m++) {
+        next[m] = args[m];
+        next_named[m] = args_named[m];
+      }
+      next[nargs] = arg;
+      next_named[nargs] = named;
+      args = next;
+      args_named = next_named;
+      nargs++;
+    }
+    seg_start = k + 1;
+  }
+  if (args_out != NULL) {
+    *args_out = args;
+  }
+  if (nargs_out != NULL) {
+    *nargs_out = nargs;
+  }
+  if (args_named_out != NULL) {
+    *args_named_out = args_named;
+  }
+}
+
+// Carry a helper call's arguments onto the edges its body just
+// produced: every edge added since `before` that carries no
+// arguments of its own takes the call-site arguments. An edge whose
+// nav call already has arguments keeps its own — the helper's
+// literal is more specific than the caller's. A call with no
+// arguments changes nothing.
+static void pv_apply_helper_args(pv_parser *p, size_t call_idx,
+    size_t before) {
+  char **args = NULL;
+  size_t nargs = 0;
+  int *args_named = NULL;
+  size_t e = 0;
+  if (p->screen == NULL || before >= p->screen->nedges) {
+    return;
+  }
+  pv_call_site_args(p, call_idx, &args, &nargs, &args_named);
+  if (nargs == 0) {
+    return;
+  }
+  for (e = before; e < p->screen->nedges; e++) {
+    pv_edge *edge = &p->screen->edges[e];
+    if (edge->nargs != 0) {
+      continue;
+    }
+    edge->args = args;
+    edge->nargs = nargs;
+    edge->args_named = args_named;
+  }
+}
+
 // Chunk B: try to consume a bare helper call at token i in a
 // handler-body scan: `helper(...)` where helper is a top-level fun
 // (same file first, else the whole-project index when unique).
@@ -2110,17 +2230,21 @@ static size_t pv_try_helper_call(pv_parser *p, size_t i, size_t end,
     return 0;
   }
   if (pv_handler_range(p, name, &hs, &he)) {
+    size_t before = p->screen != NULL ? p->screen->nedges : 0;
     int saved = p->helper_depth;
     p->helper_depth = 1;
     pv_scan_handler_branch(p, hs, he, from_label, branch);
     p->helper_depth = saved;
+    pv_apply_helper_args(p, i, before);
     return close + 1;
   }
   if (p->index != NULL) {
     size_t count = 0;
     size_t file = pv_index_lookup(p->index, name, &count);
     if (count == 1) {
+      size_t before = p->screen != NULL ? p->screen->nedges : 0;
       pv_scan_foreign_body(p, file, name, from_label, branch, 1);
+      pv_apply_helper_args(p, i, before);
       return close + 1;
     }
     if (count > 1) {

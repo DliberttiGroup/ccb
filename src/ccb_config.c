@@ -5,6 +5,8 @@
 #include "ccb_fs.h"
 #include "ccb_toml.h"
 #include "ccb_config.h"
+#include "ccb_daemon.h"
+#include "ccb_manifest.h"
 #include <unistd.h>
 
 ccb_status ccb_config_discover(const char *start_dir, const char *explicit, char **out_path) {
@@ -537,6 +539,872 @@ static int ccb_sort_modules(ccb_validator *v, ccb_config *c) {
   return 1;
 }
 
+// ---------- section loaders ----------
+// Each loader fills one part of ccb_config from the parsed TOML doc
+// and appends diagnostics for what it finds. Validation is
+// accumulate-and-report: a loader never aborts the load, so every
+// section is checked and all errors are reported at once, in section
+// order. No loader changes a rule, a default, or a message — the
+// code below is the old ccb_config_load body, moved verbatim into
+// one function per section.
+
+// Optional string field: when present, store it as written; a wrong
+// type is already CCB-E1007 from the getter.
+static void ccb_load_plain_str(ccb_validator *v,
+    const char *table, const char *key, char **field) {
+  char *p = NULL;
+  if (ccb_get_str(v, table, key, &p)) {
+    *field = p;
+  }
+}
+
+// Optional string field, resolved against the project root.
+static void ccb_load_resolved_str(ccb_validator *v,
+    const char *root, const char *table, const char *key, char **field) {
+  char *p = NULL;
+  if (ccb_get_str(v, table, key, &p)) {
+    *field = ccb_resolve(root, p);
+    free(p);
+  }
+}
+
+// Optional string field replacing a default: the old value is freed.
+static void ccb_load_replace_str(ccb_validator *v,
+    const char *table, const char *key, char **field) {
+  char *p = NULL;
+  if (ccb_get_str(v, table, key, &p)) {
+    free(*field);
+    *field = p;
+  }
+}
+
+// Optional string field with ~ expansion (keystore paths).
+static void ccb_load_home_str(ccb_validator *v,
+    const char *table, const char *key, char **field) {
+  char *p = NULL;
+  if (ccb_get_str(v, table, key, &p)) {
+    *field = ccb_expand_home(p);
+    free(p);
+  }
+}
+
+// Required string field: missing is CCB-E1004; when present it is
+// stored as written, or ~ expanded when expand_home is set.
+static void ccb_load_required_str(ccb_validator *v, const ccb_toml_doc *doc,
+    const char *table, const char *key, char **field, int expand_home) {
+  char *p = NULL;
+  if (!ccb_get_str(v, table, key, &p)) {
+    if (!ccb_key_present(doc, table, key)) {
+      ccb_vdiagf(v, "CCB-E1004", "missing required key '%s.%s'", table, key);
+    }
+    return;
+  }
+  if (expand_home) {
+    *field = ccb_expand_home(p);
+    free(p);
+  } else {
+    *field = p;
+  }
+}
+
+// Unknown keys, per table.
+static void ccb_load_unknown_keys(ccb_validator *v) {
+  static const char *root_keys[] = { "ccb_version" };
+  static const char *project_keys[] = { "name", "package", "version", "version_code", "min_sdk", "target_sdk", "compile_sdk" };
+  static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "libs" };
+  static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign", "adb" };
+  static const char *debug_keys[] = { "store", "alias" };
+  static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
+  static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules", "kotlinc_daemon", "kotlinc_daemon_idle_seconds" };
+  static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central", "maven_exclude" };
+  static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
+  static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
+  ccb_check_unknown_keys(v, "", root_keys, 1);
+  ccb_check_unknown_keys(v, "project", project_keys, 7);
+  ccb_check_unknown_keys(v, "paths", paths_keys, 6);
+  ccb_check_unknown_keys(v, "sdk", sdk_keys, 7);
+  ccb_check_unknown_keys(v, "signing.debug", debug_keys, 2);
+  ccb_check_unknown_keys(v, "signing.release", release_keys, 4);
+  ccb_check_unknown_keys(v, "build", build_keys, 7);
+  ccb_check_unknown_keys(v, "deps", deps_keys, 5);
+  ccb_check_unknown_keys(v, "ndk", ndk_keys, 3);
+  ccb_check_unknown_keys(v, "preview", preview_keys, 9);
+}
+
+// Root: ccb_version.
+static void ccb_load_root(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  long ver = 0;
+  if (!ccb_get_int(v, "", "ccb_version", &ver)) {
+    const ccb_toml_table *root = ccb_toml_find_table(doc, "");
+    if (ccb_toml_find_value(root, "ccb_version") == NULL) {
+      ccb_vdiag(v, "CCB-E1002", "missing required key 'ccb_version' (must be 1)");
+    }
+  } else if (ver != 1) {
+    ccb_vdiag(v, "CCB-E1003", "unsupported ccb_version: only version 1 is supported");
+  } else {
+    c->ccb_version = ver;
+  }
+}
+
+// A required non-empty string in [project]: missing is CCB-E1004,
+// present-but-empty is CCB-E1005; a wrong type is already CCB-E1007
+// from the getter and needs no further diagnostic.
+static void ccb_load_project_str(ccb_validator *v, const ccb_toml_doc *doc,
+    const char *key, char **field) {
+  if (!ccb_get_str(v, "project", key, field) || (*field)[0] == '\0') {
+    if (*field == NULL && !ccb_key_present(doc, "project", key)) {
+      ccb_vdiagf(v, "CCB-E1004", "missing required key 'project.%s'", key, "");
+    } else if (*field != NULL) {
+      ccb_vdiagf(v, "CCB-E1005", "project.%s must not be empty", key, "");
+    }
+  }
+}
+
+// [project]
+static void ccb_load_project(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  ccb_load_project_str(v, doc, "name", &c->name);
+  ccb_load_project_str(v, doc, "package", &c->package);
+  ccb_load_project_str(v, doc, "version", &c->version);
+  {
+    long vc = 0;
+    if (ccb_get_int(v, "project", "version_code", &vc)) {
+      if (vc < 0) {
+        ccb_vdiag(v, "CCB-E1005", "project.version_code must be >= 0");
+      } else {
+        c->version_code = vc;
+      }
+    }
+  }
+  int have_min = ccb_get_int(v, "project", "min_sdk", &c->min_sdk);
+  int have_target = ccb_get_int(v, "project", "target_sdk", &c->target_sdk);
+  int have_compile = ccb_get_int(v, "project", "compile_sdk", &c->compile_sdk);
+  if (!have_min && !ccb_key_present(doc, "project", "min_sdk")) {
+    ccb_vdiag(v, "CCB-E1004", "missing required key 'project.min_sdk'");
+  } else if (have_min && (c->min_sdk < 21 || c->min_sdk > 36)) {
+    ccb_vdiag(v, "CCB-E1005", "project.min_sdk must be in 21..36");
+  }
+  if (!have_target && !ccb_key_present(doc, "project", "target_sdk")) {
+    ccb_vdiag(v, "CCB-E1004", "missing required key 'project.target_sdk'");
+  }
+  if (!have_compile && !ccb_key_present(doc, "project", "compile_sdk")) {
+    ccb_vdiag(v, "CCB-E1004", "missing required key 'project.compile_sdk'");
+  } else if (have_compile && (c->compile_sdk < 34 || c->compile_sdk > 36)) {
+    ccb_vdiag(v, "CCB-E1005", "project.compile_sdk must be 34, 35 or 36");
+  }
+  if (have_min && have_target && c->min_sdk > c->target_sdk) {
+    ccb_vdiag(v, "CCB-E1005", "project.min_sdk must not exceed project.target_sdk");
+  }
+  if (have_target && have_compile && c->target_sdk > c->compile_sdk) {
+    ccb_vdiag(v, "CCB-E1005", "project.target_sdk must not exceed project.compile_sdk");
+  }
+}
+
+// [paths]
+static void ccb_load_paths(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  char *m = NULL;
+  if (!ccb_get_str(v, "paths", "manifest", &m)) {
+    if (!ccb_key_present(doc, "paths", "manifest")) {
+      ccb_vdiag(v, "CCB-E1004", "missing required key 'paths.manifest'");
+    }
+  } else {
+    c->manifest = ccb_resolve(c->project_root, m);
+    free(m);
+  }
+  ccb_load_resolved_str(v, c->project_root, "paths", "res", &c->res);
+  ccb_load_resolved_str(v, c->project_root, "paths", "assets", &c->assets);
+  ccb_load_resolved_str(v, c->project_root, "paths", "kotlin", &c->kotlin_dir);
+  ccb_load_resolved_str(v, c->project_root, "paths", "java", &c->java_dir);
+  ccb_load_resolved_str(v, c->project_root, "paths", "libs", &c->libs_dir);
+}
+
+// [sdk]
+static void ccb_load_sdk(ccb_validator *v, ccb_config *c) {
+  ccb_load_resolved_str(v, c->project_root, "sdk", "home", &c->sdk_home);
+  ccb_load_replace_str(v, "sdk", "build_tools", &c->build_tools);
+  ccb_load_plain_str(v, "sdk", "ndk_version", &c->ndk_version);
+  ccb_load_resolved_str(v, c->project_root, "sdk", "kotlin_home", &c->kotlin_home);
+  ccb_load_resolved_str(v, c->project_root, "sdk", "r8_jar", &c->r8_jar);
+  // Tool overrides are stored exactly as written: a relative value
+  // stays relative and is interpreted against the caller's working
+  // directory when the tool runs, not against the project root or
+  // the SDK home. No existence check here: ccb_sdk_resolve validates
+  // the effective path (config, env, or default) at Stage 0.
+  ccb_load_plain_str(v, "sdk", "aapt2", &c->aapt2_override);
+  ccb_load_plain_str(v, "sdk", "zipalign", &c->zipalign_override);
+  ccb_load_plain_str(v, "sdk", "adb", &c->adb_override);
+}
+
+// [signing.debug] and [signing.release]
+static void ccb_load_signing(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  ccb_load_home_str(v, "signing.debug", "store", &c->debug_store);
+  ccb_load_replace_str(v, "signing.debug", "alias", &c->debug_alias);
+  if (ccb_toml_find_table(doc, "signing.release") == NULL) {
+    return;
+  }
+  c->has_release_signing = 1;
+  ccb_load_required_str(v, doc, "signing.release", "store",
+    &c->release_store, 1);
+  ccb_load_required_str(v, doc, "signing.release", "alias",
+    &c->release_alias, 0);
+  ccb_load_required_str(v, doc, "signing.release", "store_password_env",
+    &c->release_store_pw_env, 0);
+  ccb_load_required_str(v, doc, "signing.release", "key_password_env",
+    &c->release_key_pw_env, 0);
+}
+
+// [build]
+static void ccb_load_build(ccb_validator *v,
+    ccb_config *c, const char *variant_override) {
+  ccb_load_replace_str(v, "build", "variant", &c->variant);
+  if (strcmp(c->variant, "debug") != 0 && strcmp(c->variant, "release") != 0) {
+    ccb_vdiag(v, "CCB-E1005", "build.variant must be 'debug' or 'release'");
+  }
+  // The CLI --variant override applies before validation that depends
+  // on the variant (e.g. minify requires release), so a project with
+  // minify = true builds with --variant release even when the TOML
+  // default variant is debug.
+  if (variant_override != NULL) {
+    if (strcmp(variant_override, "debug") != 0 &&
+        strcmp(variant_override, "release") != 0) {
+      ccb_vdiag(v, "CCB-E1005", "--variant must be 'debug' or 'release'");
+    } else {
+      free(c->variant);
+      c->variant = ccb_xstrdup(variant_override);
+    }
+  }
+  int b = 0;
+  if (ccb_get_bool(v, "build", "kotlinc_daemon", &b)) {
+    c->kotlinc_daemon = b;
+  }
+  long idle = 0;
+  if (ccb_get_int(v, "build", "kotlinc_daemon_idle_seconds", &idle)) {
+    c->kotlinc_daemon_idle_seconds = idle;
+  }
+  if (c->kotlinc_daemon_idle_seconds < CCB_DAEMON_IDLE_MIN_S ||
+      c->kotlinc_daemon_idle_seconds > CCB_DAEMON_IDLE_MAX_S) {
+    ccb_vdiag(v, "CCB-E1005",
+      "build.kotlinc_daemon_idle_seconds must be between 60 and 3600");
+  }
+  if (ccb_get_bool(v, "build", "minify", &b)) {
+    c->minify = b;
+  }
+  b = 0;
+  if (ccb_get_bool(v, "build", "shrink_resources", &b)) {
+    c->shrink_resources = b;
+  }
+  if (c->minify && strcmp(c->variant, "debug") == 0) {
+    ccb_vdiag(v, "CCB-E1005", "build.minify requires variant = 'release'");
+  }
+  ccb_load_replace_str(v, "build", "jvm_target", &c->jvm_target);
+  if (strcmp(c->jvm_target, "11") != 0 && strcmp(c->jvm_target, "17") != 0) {
+    ccb_vdiag(v, "CCB-E1005", "build.jvm_target must be '11' or '17'");
+  }
+  ccb_load_resolved_str(v, c->project_root, "build", "proguard_rules",
+    &c->proguard_rules);
+  if (c->minify && c->proguard_rules == NULL) {
+    ccb_vdiag(v, "CCB-E1004", "build.minify requires 'build.proguard_rules'");
+  }
+}
+
+// Does a direct dependency coordinate carry this exclusion's version
+// (or does the exclusion carry no version at all)? Coordinates here
+// were already validated, so a missing second colon means no match.
+static int ccb_maven_version_matches(const char *coord, const char *ev,
+    size_t evlen) {
+  const char *c2 = strchr(coord, ':');
+  const char *c3 = c2 != NULL ? strchr(c2 + 1, ':') : NULL;
+  if (c3 == NULL || strlen(c3 + 1) != evlen) {
+    return 0;
+  }
+  return memcmp(c3 + 1, ev, evlen) == 0;
+}
+
+// Excluding a direct dependency is a config error: the exclusion
+// would remove something the project explicitly declares. An
+// unversioned exclusion matches every version; a versioned one
+// matches only that exact version, so excluding some other version
+// of a direct dependency is allowed.
+static void ccb_deps_check_exclude(ccb_validator *v, ccb_config *c,
+    const char *ex) {
+  const char *eg = NULL;
+  const char *ea = NULL;
+  size_t eglen = 0;
+  size_t ealen = 0;
+  if (!ccb_config_maven_ga(ex, &eg, &eglen, &ea, &ealen)) {
+    return;
+  }
+  const char *ec2 = strchr(ea, ':');
+  const char *ev = ec2 != NULL ? ec2 + 1 : NULL;
+  size_t evlen = ec2 != NULL ? strlen(ec2 + 1) : 0;
+  for (size_t j = 0; j < c->maven_count; j++) {
+    const char *dg = NULL;
+    const char *da = NULL;
+    size_t dglen = 0;
+    size_t dalen = 0;
+    if (!ccb_config_maven_ga(c->maven[j], &dg, &dglen, &da, &dalen)) {
+      continue;
+    }
+    if (dglen != eglen || dalen != ealen || memcmp(dg, eg, dglen) != 0 ||
+        memcmp(da, ea, dalen) != 0) {
+      continue;
+    }
+    if (ev != NULL && !ccb_maven_version_matches(c->maven[j], ev, evlen)) {
+      continue;
+    }
+    ccb_vdiagf(v, "CCB-E1005",
+      "maven_exclude '%s' matches direct dependency '%s'; remove one of them",
+      ex, c->maven[j]);
+  }
+}
+
+// [deps]
+static void ccb_load_deps(ccb_validator *v, ccb_config *c) {
+  ccb_get_str_array(v, "deps", "jars", &c->jars, &c->jars_count);
+  ccb_get_str_array(v, "deps", "aars", &c->aars, &c->aars_count);
+  ccb_get_str_array(v, "deps", "maven", &c->maven, &c->maven_count);
+  ccb_get_bool(v, "deps", "maven_central", &c->maven_central);
+  ccb_get_str_array(v, "deps", "maven_exclude", &c->maven_exclude,
+    &c->maven_exclude_count);
+  for (size_t i = 0; i < c->maven_count; i++) {
+    if (!ccb_config_maven_coord_ok(c->maven[i])) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "maven coordinate '%s' must be 'group:artifact:version' with an exact version (no ranges, LATEST, RELEASE, or -SNAPSHOT)",
+        c->maven[i], "");
+    }
+  }
+  for (size_t i = 0; i < c->maven_exclude_count; i++) {
+    const char *ex = c->maven_exclude[i];
+    if (!ccb_config_maven_exclude_ok(ex)) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "maven_exclude '%s' must be 'group:artifact' or 'group:artifact:version'",
+        ex, "");
+      continue;
+    }
+    ccb_deps_check_exclude(v, c, ex);
+  }
+  for (size_t i = 0; i < c->jars_count; i++) {
+    char *resolved = ccb_resolve(c->project_root, c->jars[i]);
+    free(c->jars[i]);
+    c->jars[i] = resolved;
+  }
+  for (size_t i = 0; i < c->aars_count; i++) {
+    char *resolved = ccb_resolve(c->project_root, c->aars[i]);
+    free(c->aars[i]);
+    c->aars[i] = resolved;
+  }
+}
+
+// Is this one of the four ABIs CCB knows how to build for?
+static int ccb_ndk_abi_known(const char *abi) {
+  static const char *known_abis[] = { "arm64-v8a", "armeabi-v7a", "x86_64", "x86" };
+  for (size_t j = 0; j < 4; j++) {
+    if (strcmp(abi, known_abis[j]) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// [ndk]
+static void ccb_load_ndk(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  if (ccb_toml_find_table(doc, "ndk") == NULL) {
+    return;
+  }
+  c->has_ndk = 1;
+  ccb_get_str_array(v, "ndk", "abis", &c->ndk_abis, &c->ndk_abis_count);
+  ccb_get_str_array(v, "ndk", "c_sources", &c->ndk_sources, &c->ndk_sources_count);
+  ccb_get_str_array(v, "ndk", "cflags", &c->ndk_cflags, &c->ndk_cflags_count);
+  if (c->ndk_abis_count == 0) {
+    if (!ccb_key_present(doc, "ndk", "abis")) {
+      ccb_vdiag(v, "CCB-E1004", "missing required key 'ndk.abis'");
+    } else {
+      ccb_vdiag(v, "CCB-E1005", "ndk.abis must not be empty");
+    }
+  }
+  for (size_t i = 0; i < c->ndk_abis_count; i++) {
+    if (!ccb_ndk_abi_known(c->ndk_abis[i])) {
+      ccb_vdiagf(v, "CCB-E1005", "unknown ABI '%s' in ndk.abis", c->ndk_abis[i], "");
+    }
+  }
+  for (size_t i = 0; i < c->ndk_sources_count; i++) {
+    char *resolved = ccb_resolve(c->project_root, c->ndk_sources[i]);
+    free(c->ndk_sources[i]);
+    c->ndk_sources[i] = resolved;
+  }
+}
+
+// [preview.bindings]: code identifier -> component label, both
+// strings. A non-string value is the existing wrong-type error
+// (CCB-E1007); the table itself needs no unknown-key check
+// because any identifier may be a key.
+static void ccb_preview_bindings(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  const ccb_toml_table *bt = ccb_toml_find_table(doc, "preview.bindings");
+  if (bt == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < bt->count; i++) {
+    if (bt->kvs[i].value.type != CCB_TOML_STRING) {
+      ccb_vdiagf(v, "CCB-E1007",
+        "key '%s' must be a string", bt->kvs[i].key, "");
+      continue;
+    }
+    size_t n = c->preview_binding_count;
+    c->preview_binding_keys = ccb_xrealloc(
+      c->preview_binding_keys, (n + 1) * sizeof(*c->preview_binding_keys));
+    c->preview_binding_values = ccb_xrealloc(
+      c->preview_binding_values,
+      (n + 1) * sizeof(*c->preview_binding_values));
+    c->preview_binding_keys[n] = ccb_xstrdup(bt->kvs[i].key);
+    c->preview_binding_values[n] =
+      ccb_xstrdup(bt->kvs[i].value.str);
+    c->preview_binding_count = n + 1;
+  }
+}
+
+// [preview]
+static void ccb_load_preview(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  if (ccb_toml_find_table(doc, "preview") == NULL) {
+    return;
+  }
+  c->has_preview = 1;
+  ccb_load_resolved_str(v, c->project_root, "preview", "styles",
+    &c->preview_styles);
+  ccb_load_resolved_str(v, c->project_root, "preview", "flow",
+    &c->preview_flow);
+  ccb_load_resolved_str(v, c->project_root, "preview", "resources",
+    &c->preview_resources);
+  ccb_load_resolved_str(v, c->project_root, "preview", "layout",
+    &c->preview_layout);
+  ccb_load_resolved_str(v, c->project_root, "preview", "nav_graph",
+    &c->preview_nav_graph);
+  long w = 0;
+  if (ccb_get_int(v, "preview", "phone_width", &w)) {
+    c->preview_phone_width = w;
+  }
+  long h = 0;
+  if (ccb_get_int(v, "preview", "phone_height", &h)) {
+    c->preview_phone_height = h;
+  }
+  int strict = 0;
+  if (ccb_get_bool(v, "preview", "strict", &strict)) {
+    c->preview_strict = strict;
+  }
+  int gate = 0;
+  if (ccb_get_bool(v, "preview", "gate", &gate)) {
+    c->preview_gate = gate;
+  }
+  ccb_preview_bindings(v, doc, c);
+}
+
+// ---------- [preview.scenario.*] ----------
+
+// Find a scenario by name, or NULL.
+static ccb_scenario *ccb_find_scenario(ccb_config *c, const char *name) {
+  for (size_t i = 0; i < c->preview_scenario_count; i++) {
+    if (strcmp(c->preview_scenarios[i].name, name) == 0) {
+      return &c->preview_scenarios[i];
+    }
+  }
+  return NULL;
+}
+
+// Find the scenario a section table belongs to: the scenario whose
+// name is the table's first segment. Names never contain '.', so a
+// prefix match on the first segment is an exact match.
+static ccb_scenario *ccb_find_scenario_for_table(ccb_config *c,
+    const char *rest) {
+  for (size_t i = 0; i < c->preview_scenario_count; i++) {
+    size_t nlen = strlen(c->preview_scenarios[i].name);
+    if (strlen(rest) > nlen &&
+        strncmp(rest, c->preview_scenarios[i].name, nlen) == 0 &&
+        rest[nlen] == '.') {
+      return &c->preview_scenarios[i];
+    }
+  }
+  return NULL;
+}
+
+// A scenario name is a single path-safe segment.
+static int ccb_scenario_name_ok(const char *name) {
+  return name[0] != '\0' && strcmp(name, ".") != 0 &&
+    strcmp(name, "..") != 0 && strchr(name, '/') == NULL &&
+    strchr(name, '\\') == NULL;
+}
+
+// Append a new empty scenario, taking ownership of name. The
+// returned pointer is valid until the next scenario is created
+// (appending may move the array).
+static ccb_scenario *ccb_scenario_new(ccb_config *c, char *name) {
+  c->preview_scenarios = ccb_xrealloc(c->preview_scenarios,
+    (c->preview_scenario_count + 1) *
+    sizeof(*c->preview_scenarios));
+  ccb_scenario *sc = &c->preview_scenarios[c->preview_scenario_count];
+  memset(sc, 0, sizeof(*sc));
+  sc->name = name;
+  c->preview_scenario_count++;
+  return sc;
+}
+
+// A bare [preview.scenario.<name>] table carries no data: it
+// registers the name (an empty scenario is a valid no-op), and keys
+// under it are CCB-E1001, like any unknown key.
+static void ccb_scenario_bare_table(ccb_validator *v,
+    const ccb_toml_doc *doc, ccb_config *c, const char *tname,
+    const char *rest) {
+  if (ccb_find_scenario(c, rest) == NULL) {
+    if (!ccb_scenario_name_ok(rest)) {
+      ccb_vdiagf(v, "CCB-E1005", "invalid scenario name '%s'", rest, "");
+      return;
+    }
+    ccb_scenario_new(c, ccb_xstrdup(rest));
+  }
+  const ccb_toml_table *t = ccb_toml_find_table(doc, tname);
+  for (size_t i = 0; i < t->count; i++) {
+    ccb_vdiagf(v, "CCB-E1001",
+      "unknown key '%s' in table [%s]",
+      t->kvs[i].key, tname);
+  }
+}
+
+// One section of a scenario: branches and fields hold strings,
+// lists and args hold string arrays.
+static void ccb_scenario_section(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_scenario *sc, const char *tname, const char *section) {
+  const ccb_toml_table *t = ccb_toml_find_table(doc, tname);
+  if (strcmp(section, "branches") == 0) {
+    for (size_t i = 0; i < t->count; i++) {
+      char *entry = NULL;
+      const char *screen = t->kvs[i].key;
+      if (!ccb_get_str(v, tname, screen, &entry)) {
+        continue;
+      }
+      sc->branches = ccb_xrealloc(sc->branches,
+        (sc->nbranches + 1) * sizeof(*sc->branches));
+      sc->branches[sc->nbranches].screen = ccb_xstrdup(screen);
+      sc->branches[sc->nbranches].entry = entry;
+      sc->nbranches++;
+    }
+    return;
+  }
+  if (strcmp(section, "fields") == 0) {
+    for (size_t i = 0; i < t->count; i++) {
+      char *text = NULL;
+      const char *label = t->kvs[i].key;
+      if (!ccb_get_str(v, tname, label, &text)) {
+        continue;
+      }
+      sc->fields = ccb_xrealloc(sc->fields,
+        (sc->nfields + 1) * sizeof(*sc->fields));
+      sc->fields[sc->nfields].label = ccb_xstrdup(label);
+      sc->fields[sc->nfields].text = text;
+      sc->nfields++;
+    }
+    return;
+  }
+  if (strcmp(section, "lists") == 0) {
+    for (size_t i = 0; i < t->count; i++) {
+      char **rows = NULL;
+      size_t nrows = 0;
+      const char *label = t->kvs[i].key;
+      if (!ccb_get_str_array(v, tname, label, &rows, &nrows)) {
+        continue;
+      }
+      sc->lists = ccb_xrealloc(sc->lists,
+        (sc->nlists + 1) * sizeof(*sc->lists));
+      sc->lists[sc->nlists].label = ccb_xstrdup(label);
+      sc->lists[sc->nlists].rows = rows;
+      sc->lists[sc->nlists].nrows = nrows;
+      sc->nlists++;
+    }
+    return;
+  }
+  if (strcmp(section, "args") == 0) {
+    for (size_t i = 0; i < t->count; i++) {
+      char **values = NULL;
+      size_t nvalues = 0;
+      const char *label = t->kvs[i].key;
+      if (!ccb_get_str_array(v, tname, label, &values, &nvalues)) {
+        continue;
+      }
+      sc->args = ccb_xrealloc(sc->args,
+        (sc->nargs + 1) * sizeof(*sc->args));
+      sc->args[sc->nargs].label = ccb_xstrdup(label);
+      sc->args[sc->nargs].values = values;
+      sc->args[sc->nargs].nvalues = nvalues;
+      sc->nargs++;
+    }
+    return;
+  }
+  ccb_vdiagf(v, "CCB-E1001",
+    "unknown scenario section '%s' in [preview.scenario.%s]",
+    section, sc->name);
+}
+
+// One [preview.scenario.*] table: a bare table or one section of a
+// scenario. The scenario is found or created by its single-segment
+// name; an invalid name is CCB-E1005 and the table is skipped.
+static void ccb_scenario_table(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c, const char *tname) {
+  static const char prefix[] = "preview.scenario.";
+  size_t plen = strlen(prefix);
+  const char *rest = tname + plen;
+  const char *dot = strchr(rest, '.');
+  if (dot == NULL) {
+    ccb_scenario_bare_table(v, doc, c, tname, rest);
+    return;
+  }
+  ccb_scenario *sc = ccb_find_scenario_for_table(c, rest);
+  if (sc == NULL) {
+    size_t nlen = (size_t)(dot - rest);
+    char *name = ccb_xmalloc(nlen + 1);
+    memcpy(name, rest, nlen);
+    name[nlen] = '\0';
+    if (!ccb_scenario_name_ok(name)) {
+      ccb_vdiagf(v, "CCB-E1005", "invalid scenario name '%s'", name, "");
+      free(name);
+      return;
+    }
+    sc = ccb_scenario_new(c, name);
+  }
+  ccb_scenario_section(v, doc, sc, tname, dot + 1);
+}
+
+// [preview.scenario.<name>.<section>] tables, sub-table spelling:
+// branches maps screen -> entry label (strings), lists maps list
+// label -> rows (string arrays), fields maps textfield label ->
+// text (strings), args maps button label -> values (string
+// arrays). The TOML subset has no inline tables, so the plan's
+// `branches = {...}` example is written as a section table
+// instead; the data model is identical. A bare
+// [preview.scenario.<name>] table carries no data: keys under it
+// are CCB-E1001, like any unknown key. Wrong value types are
+// CCB-E1007 via the shared getters. Parsed regardless of whether
+// [preview] exists: the preview-applicability gate, not the
+// config, decides whether scenarios ever run.
+static void ccb_load_scenarios(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  static const char prefix[] = "preview.scenario.";
+  size_t plen = strlen(prefix);
+  for (size_t ti = 0; ti < doc->count; ti++) {
+    if (strncmp(doc->tables[ti].name, prefix, plen) != 0) {
+      continue;
+    }
+    ccb_scenario_table(v, doc, c, doc->tables[ti].name);
+  }
+}
+
+// ---------- [modules.<name>] ----------
+
+// Optional standard-layout inputs: present only when the directory
+// exists on disk.
+static void ccb_module_layout_inputs(ccb_module *m) {
+  char *p = ccb_path_join3(m->dir, "src/main", "res");
+  if (ccb_path_is_dir(p)) {
+    m->res = p;
+  } else {
+    free(p);
+  }
+  p = ccb_path_join3(m->dir, "src/main", "assets");
+  if (ccb_path_is_dir(p)) {
+    m->assets = p;
+  } else {
+    free(p);
+  }
+  p = ccb_path_join3(m->dir, "src/main", "kotlin");
+  if (ccb_path_is_dir(p)) {
+    m->kotlin_dir = p;
+  } else {
+    free(p);
+  }
+  p = ccb_path_join3(m->dir, "src/main", "java");
+  if (ccb_path_is_dir(p)) {
+    m->java_dir = p;
+  } else {
+    free(p);
+  }
+}
+
+// A module manifest must declare a package, it must differ from the
+// app package, and no two modules may share one. m->package is NULL
+// or empty when the manifest was unreadable or declares none.
+static void ccb_module_check_package(ccb_validator *v, ccb_config *c,
+    ccb_module *m, const char *mod_name, size_t mi) {
+  if (m->package == NULL || m->package[0] == '\0') {
+    ccb_vdiagf(v, "CCB-E1005",
+      "module '%s' manifest must declare a package attribute",
+      mod_name, "");
+    return;
+  }
+  if (c->package != NULL && strcmp(m->package, c->package) == 0) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "module '%s' package must differ from the app package",
+      mod_name, "");
+    return;
+  }
+  for (size_t k = 0; k < mi; k++) {
+    if (c->modules[k].package != NULL &&
+        strcmp(c->modules[k].package, m->package) == 0) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "modules '%s' and '%s' share a package",
+        c->modules[k].name, mod_name);
+      break;
+    }
+  }
+}
+
+// Register one [modules.<name>] table. The standard layout under
+// <dir> mirrors [paths]: src/main/AndroidManifest.xml (required),
+// src/main/res, src/main/assets, src/main/kotlin, src/main/java
+// (each optional; absent means the module has no such input).
+static void ccb_module_register(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c, const char *tname, const char *mod_name) {
+  static const char *module_keys[] = { "dir", "depends" };
+  ccb_check_unknown_keys(v, tname, module_keys, 2);
+  size_t mi = c->modules_count++;
+  c->modules = ccb_xrealloc(c->modules,
+    c->modules_count * sizeof(*c->modules));
+  ccb_module *m = &c->modules[mi];
+  memset(m, 0, sizeof(*m));
+  m->name = ccb_xstrdup(mod_name);
+  char *dir = NULL;
+  if (!ccb_get_str(v, tname, "dir", &dir)) {
+    if (!ccb_key_present(doc, tname, "dir")) {
+      ccb_vdiagf(v, "CCB-E1004", "missing required key '%s.dir'", tname, "");
+    }
+  } else {
+    m->dir = ccb_resolve(c->project_root, dir);
+    free(dir);
+  }
+  ccb_get_str_array(v, tname, "depends", &m->depends,
+    &m->depends_count);
+  if (m->dir == NULL) {
+    return;
+  }
+  if (!ccb_path_is_dir(m->dir)) {
+    ccb_vdiagf(v, "CCB-E1006", "module directory does not exist: %s",
+      m->dir, "");
+    return;
+  }
+  m->manifest = ccb_path_join3(m->dir, "src/main",
+    "AndroidManifest.xml");
+  if (!ccb_path_exists(m->manifest) || ccb_path_is_dir(m->manifest)) {
+    ccb_vdiagf(v, "CCB-E1006", "module manifest does not exist: %s",
+      m->manifest, "");
+  } else {
+    char *text = NULL;
+    size_t len = 0;
+    if (ccb_read_file(m->manifest, &text, &len) == CCB_OK) {
+      m->package = ccb_manifest_package(text);
+      free(text);
+    }
+    ccb_module_check_package(v, c, m, mod_name, mi);
+  }
+  ccb_module_layout_inputs(m);
+}
+
+// [modules.<name>] library modules.
+static void ccb_load_modules(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  for (size_t ti = 0; ti < doc->count; ti++) {
+    const char *tname = doc->tables[ti].name;
+    if (strcmp(tname, "modules") == 0) {
+      ccb_vdiagf(v, "CCB-E1001", "unknown table '[%s]'", tname, "");
+      continue;
+    }
+    if (strncmp(tname, "modules.", 8) != 0) {
+      continue;
+    }
+    const char *mod_name = tname + 8;
+    if (mod_name[0] == '\0' || strchr(mod_name, '.') != NULL) {
+      ccb_vdiagf(v, "CCB-E1001", "unknown table '[%s]'", tname, "");
+      continue;
+    }
+    if (strchr(mod_name, '/') != NULL || strchr(mod_name, '\\') != NULL ||
+        strcmp(mod_name, ".") == 0 || strcmp(mod_name, "..") == 0) {
+      ccb_vdiagf(v, "CCB-E1005", "invalid module name '%s'", mod_name, "");
+      continue;
+    }
+    if (ccb_find_module(c, mod_name) != NULL) {
+      ccb_vdiagf(v, "CCB-E1005", "duplicate module '%s'", mod_name, "");
+      continue;
+    }
+    ccb_module_register(v, doc, c, tname, mod_name);
+  }
+  ccb_sort_modules(v, c);
+}
+
+// Path existence checks (only when no earlier error already explains
+// the path, and only for declared paths).
+static void ccb_check_paths(ccb_validator *v, ccb_config *c) {
+  if (c->manifest != NULL) {
+    ccb_require_file(v, c->manifest, "manifest");
+  }
+  if (c->res != NULL) {
+    ccb_require_dir(v, c->res, "res directory");
+  }
+  if (c->assets != NULL) {
+    ccb_require_dir(v, c->assets, "assets directory");
+  }
+  if (c->kotlin_dir != NULL) {
+    ccb_require_dir(v, c->kotlin_dir, "kotlin directory");
+  }
+  if (c->java_dir != NULL) {
+    ccb_require_dir(v, c->java_dir, "java directory");
+  }
+  if (c->libs_dir != NULL) {
+    ccb_require_dir(v, c->libs_dir, "libs directory");
+  }
+  if (c->sdk_home != NULL) {
+    ccb_require_dir(v, c->sdk_home, "sdk home");
+  }
+  if (c->kotlin_home != NULL) {
+    ccb_require_dir(v, c->kotlin_home, "kotlin home");
+  }
+  if (c->r8_jar != NULL) {
+    ccb_require_file(v, c->r8_jar, "r8 jar");
+  }
+  if (c->proguard_rules != NULL) {
+    ccb_require_file(v, c->proguard_rules, "proguard rules");
+  }
+  if (c->debug_store != NULL) {
+    ccb_require_file(v, c->debug_store, "debug keystore");
+  }
+  if (c->release_store != NULL) {
+    ccb_require_file(v, c->release_store, "release keystore");
+  }
+  for (size_t i = 0; i < c->jars_count; i++) {
+    ccb_require_file(v, c->jars[i], "jar dependency");
+  }
+  for (size_t i = 0; i < c->aars_count; i++) {
+    ccb_require_file(v, c->aars[i], "aar dependency");
+  }
+  for (size_t i = 0; i < c->ndk_sources_count; i++) {
+    ccb_require_file(v, c->ndk_sources[i], "ndk source");
+  }
+  if (c->preview_styles != NULL) {
+    ccb_require_dir(v, c->preview_styles, "preview styles directory");
+  }
+  if (c->preview_flow != NULL) {
+    ccb_require_dir(v, c->preview_flow, "preview flow directory");
+  }
+  if (c->preview_resources != NULL) {
+    ccb_require_dir(v, c->preview_resources, "preview resources directory");
+  }
+  if (c->preview_layout != NULL) {
+    ccb_require_path(v, c->preview_layout, "preview layout path");
+  }
+  if (c->preview_nav_graph != NULL) {
+    ccb_require_path(v, c->preview_nav_graph, "preview nav_graph path");
+  }
+}
+
 ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_config **out, ccb_diag_list *diags) {
   *out = NULL;
   size_t diag_before = diags->count;
@@ -574,817 +1442,24 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   c->debug_alias = ccb_xstrdup("androiddebugkey");
   c->variant = ccb_xstrdup("debug");
   c->jvm_target = ccb_xstrdup("17");
+  c->kotlinc_daemon_idle_seconds = CCB_DAEMON_IDLE_DEFAULT_S;
   c->build_dir = ccb_path_join(c->project_root, "build");
   c->preview_phone_width = 390;
   c->preview_phone_height = 844;
 
-  // Unknown keys, per table.
-  {
-    static const char *root_keys[] = { "ccb_version" };
-    static const char *project_keys[] = { "name", "package", "version", "version_code", "min_sdk", "target_sdk", "compile_sdk" };
-    static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "libs" };
-    static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign", "adb" };
-    static const char *debug_keys[] = { "store", "alias" };
-    static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
-    static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules" };
-    static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central", "maven_exclude" };
-    static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
-    static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
-    ccb_check_unknown_keys(&v, "", root_keys, 1);
-    ccb_check_unknown_keys(&v, "project", project_keys, 7);
-    ccb_check_unknown_keys(&v, "paths", paths_keys, 6);
-    ccb_check_unknown_keys(&v, "sdk", sdk_keys, 7);
-    ccb_check_unknown_keys(&v, "signing.debug", debug_keys, 2);
-    ccb_check_unknown_keys(&v, "signing.release", release_keys, 4);
-    ccb_check_unknown_keys(&v, "build", build_keys, 5);
-    ccb_check_unknown_keys(&v, "deps", deps_keys, 5);
-    ccb_check_unknown_keys(&v, "ndk", ndk_keys, 3);
-    ccb_check_unknown_keys(&v, "preview", preview_keys, 9);
-  }
-
-  // Root: ccb_version.
-  {
-    long ver = 0;
-    if (!ccb_get_int(&v, "", "ccb_version", &ver)) {
-      const ccb_toml_table *root = ccb_toml_find_table(doc, "");
-      if (ccb_toml_find_value(root, "ccb_version") == NULL) {
-        ccb_vdiag(&v, "CCB-E1002", "missing required key 'ccb_version' (must be 1)");
-      }
-    } else if (ver != 1) {
-      ccb_vdiag(&v, "CCB-E1003", "unsupported ccb_version: only version 1 is supported");
-    } else {
-      c->ccb_version = ver;
-    }
-  }
-
-  // [project]
-  if (!ccb_get_str(&v, "project", "name", &c->name) || c->name[0] == '\0') {
-    if (c->name == NULL && !ccb_key_present(doc, "project", "name")) {
-      ccb_vdiag(&v, "CCB-E1004", "missing required key 'project.name'");
-    } else if (c->name != NULL) {
-      ccb_vdiag(&v, "CCB-E1005", "project.name must not be empty");
-    }
-  }
-  if (!ccb_get_str(&v, "project", "package", &c->package) || c->package[0] == '\0') {
-    if (c->package == NULL && !ccb_key_present(doc, "project", "package")) {
-      ccb_vdiag(&v, "CCB-E1004", "missing required key 'project.package'");
-    } else if (c->package != NULL) {
-      ccb_vdiag(&v, "CCB-E1005", "project.package must not be empty");
-    }
-  }
-  if (!ccb_get_str(&v, "project", "version", &c->version) || c->version[0] == '\0') {
-    if (c->version == NULL && !ccb_key_present(doc, "project", "version")) {
-      ccb_vdiag(&v, "CCB-E1004", "missing required key 'project.version'");
-    } else if (c->version != NULL) {
-      ccb_vdiag(&v, "CCB-E1005", "project.version must not be empty");
-    }
-  }
-  {
-    long vc = 0;
-    if (ccb_get_int(&v, "project", "version_code", &vc)) {
-      if (vc < 0) {
-        ccb_vdiag(&v, "CCB-E1005", "project.version_code must be >= 0");
-      } else {
-        c->version_code = vc;
-      }
-    }
-  }
-  int have_min = ccb_get_int(&v, "project", "min_sdk", &c->min_sdk);
-  int have_target = ccb_get_int(&v, "project", "target_sdk", &c->target_sdk);
-  int have_compile = ccb_get_int(&v, "project", "compile_sdk", &c->compile_sdk);
-  if (!have_min && !ccb_key_present(doc, "project", "min_sdk")) {
-    ccb_vdiag(&v, "CCB-E1004", "missing required key 'project.min_sdk'");
-  } else if (have_min && (c->min_sdk < 21 || c->min_sdk > 35)) {
-    ccb_vdiag(&v, "CCB-E1005", "project.min_sdk must be in 21..35");
-  }
-  if (!have_target && !ccb_key_present(doc, "project", "target_sdk")) {
-    ccb_vdiag(&v, "CCB-E1004", "missing required key 'project.target_sdk'");
-  }
-  if (!have_compile && !ccb_key_present(doc, "project", "compile_sdk")) {
-    ccb_vdiag(&v, "CCB-E1004", "missing required key 'project.compile_sdk'");
-  } else if (have_compile && (c->compile_sdk < 34 || c->compile_sdk > 35)) {
-    ccb_vdiag(&v, "CCB-E1005", "project.compile_sdk must be 34 or 35");
-  }
-  if (have_min && have_target && c->min_sdk > c->target_sdk) {
-    ccb_vdiag(&v, "CCB-E1005", "project.min_sdk must not exceed project.target_sdk");
-  }
-  if (have_target && have_compile && c->target_sdk > c->compile_sdk) {
-    ccb_vdiag(&v, "CCB-E1005", "project.target_sdk must not exceed project.compile_sdk");
-  }
-
-  // [paths]
-  {
-    char *m = NULL;
-    if (!ccb_get_str(&v, "paths", "manifest", &m)) {
-      if (!ccb_key_present(doc, "paths", "manifest")) {
-        ccb_vdiag(&v, "CCB-E1004", "missing required key 'paths.manifest'");
-      }
-    } else {
-      c->manifest = ccb_resolve(c->project_root, m);
-      free(m);
-    }
-    char *p = NULL;
-    if (ccb_get_str(&v, "paths", "res", &p)) {
-      c->res = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "paths", "assets", &p)) {
-      c->assets = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "paths", "kotlin", &p)) {
-      c->kotlin_dir = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "paths", "java", &p)) {
-      c->java_dir = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "paths", "libs", &p)) {
-      c->libs_dir = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-  }
-
-  // [sdk]
-  {
-    char *p = NULL;
-    if (ccb_get_str(&v, "sdk", "home", &p)) {
-      c->sdk_home = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "build_tools", &p)) {
-      free(c->build_tools);
-      c->build_tools = p;
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "ndk_version", &p)) {
-      c->ndk_version = p;
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "kotlin_home", &p)) {
-      c->kotlin_home = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "r8_jar", &p)) {
-      c->r8_jar = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    // Tool overrides are stored exactly as written: a relative value
-    // stays relative and is interpreted against the caller's working
-    // directory when the tool runs, not against the project root or
-    // the SDK home. No existence check here: ccb_sdk_resolve validates
-    // the effective path (config, env, or default) at Stage 0.
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "aapt2", &p)) {
-      c->aapt2_override = p;
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "zipalign", &p)) {
-      c->zipalign_override = p;
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "sdk", "adb", &p)) {
-      c->adb_override = p;
-    }
-  }
-
-  // [signing.debug]
-  {
-    char *p = NULL;
-    if (ccb_get_str(&v, "signing.debug", "store", &p)) {
-      c->debug_store = ccb_expand_home(p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "signing.debug", "alias", &p)) {
-      free(c->debug_alias);
-      c->debug_alias = p;
-    }
-  }
-
-  // [signing.release]
-  if (ccb_toml_find_table(doc, "signing.release") != NULL) {
-    c->has_release_signing = 1;
-    char *p = NULL;
-    if (!ccb_get_str(&v, "signing.release", "store", &p)) {
-      if (!ccb_key_present(doc, "signing.release", "store")) {
-        ccb_vdiag(&v, "CCB-E1004", "missing required key 'signing.release.store'");
-      }
-    } else {
-      c->release_store = ccb_expand_home(p);
-      free(p);
-    }
-    p = NULL;
-    if (!ccb_get_str(&v, "signing.release", "alias", &p)) {
-      if (!ccb_key_present(doc, "signing.release", "alias")) {
-        ccb_vdiag(&v, "CCB-E1004", "missing required key 'signing.release.alias'");
-      }
-    } else {
-      c->release_alias = p;
-    }
-    p = NULL;
-    if (!ccb_get_str(&v, "signing.release", "store_password_env", &p)) {
-      if (!ccb_key_present(doc, "signing.release", "store_password_env")) {
-        ccb_vdiag(&v, "CCB-E1004", "missing required key 'signing.release.store_password_env'");
-      }
-    } else {
-      c->release_store_pw_env = p;
-    }
-    p = NULL;
-    if (!ccb_get_str(&v, "signing.release", "key_password_env", &p)) {
-      if (!ccb_key_present(doc, "signing.release", "key_password_env")) {
-        ccb_vdiag(&v, "CCB-E1004", "missing required key 'signing.release.key_password_env'");
-      }
-    } else {
-      c->release_key_pw_env = p;
-    }
-  }
-
-  // [build]
-  {
-    char *p = NULL;
-    if (ccb_get_str(&v, "build", "variant", &p)) {
-      free(c->variant);
-      c->variant = p;
-    }
-    if (strcmp(c->variant, "debug") != 0 && strcmp(c->variant, "release") != 0) {
-      ccb_vdiag(&v, "CCB-E1005", "build.variant must be 'debug' or 'release'");
-    }
-    // The CLI --variant override applies before validation that depends
-    // on the variant (e.g. minify requires release), so a project with
-    // minify = true builds with --variant release even when the TOML
-    // default variant is debug.
-    if (variant_override != NULL) {
-      if (strcmp(variant_override, "debug") != 0 &&
-          strcmp(variant_override, "release") != 0) {
-        ccb_vdiag(&v, "CCB-E1005", "--variant must be 'debug' or 'release'");
-      } else {
-        free(c->variant);
-        c->variant = ccb_xstrdup(variant_override);
-      }
-    }
-    int b = 0;
-    if (ccb_get_bool(&v, "build", "minify", &b)) {
-      c->minify = b;
-    }
-    b = 0;
-    if (ccb_get_bool(&v, "build", "shrink_resources", &b)) {
-      c->shrink_resources = b;
-    }
-    if (c->minify && strcmp(c->variant, "debug") == 0) {
-      ccb_vdiag(&v, "CCB-E1005", "build.minify requires variant = 'release'");
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "build", "jvm_target", &p)) {
-      free(c->jvm_target);
-      c->jvm_target = p;
-    }
-    if (strcmp(c->jvm_target, "11") != 0 && strcmp(c->jvm_target, "17") != 0) {
-      ccb_vdiag(&v, "CCB-E1005", "build.jvm_target must be '11' or '17'");
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "build", "proguard_rules", &p)) {
-      c->proguard_rules = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    if (c->minify && c->proguard_rules == NULL) {
-      ccb_vdiag(&v, "CCB-E1004", "build.minify requires 'build.proguard_rules'");
-    }
-  }
-
-  // [deps]
-  ccb_get_str_array(&v, "deps", "jars", &c->jars, &c->jars_count);
-  ccb_get_str_array(&v, "deps", "aars", &c->aars, &c->aars_count);
-  ccb_get_str_array(&v, "deps", "maven", &c->maven, &c->maven_count);
-  ccb_get_bool(&v, "deps", "maven_central", &c->maven_central);
-  ccb_get_str_array(&v, "deps", "maven_exclude", &c->maven_exclude,
-    &c->maven_exclude_count);
-  for (size_t i = 0; i < c->maven_count; i++) {
-    if (!ccb_config_maven_coord_ok(c->maven[i])) {
-      ccb_vdiagf(&v, "CCB-E1005",
-        "maven coordinate '%s' must be 'group:artifact:version' with an exact version (no ranges, LATEST, RELEASE, or -SNAPSHOT)",
-        c->maven[i], "");
-    }
-  }
-  for (size_t i = 0; i < c->maven_exclude_count; i++) {
-    const char *ex = c->maven_exclude[i];
-    if (!ccb_config_maven_exclude_ok(ex)) {
-      ccb_vdiagf(&v, "CCB-E1005",
-        "maven_exclude '%s' must be 'group:artifact' or 'group:artifact:version'",
-        ex, "");
-      continue;
-    }
-    // Excluding a direct dependency is a config error: the exclusion
-    // would remove something the project explicitly declares. An
-    // unversioned exclusion matches every version; a versioned one
-    // matches only that exact version, so excluding some other version
-    // of a direct dependency is allowed.
-    const char *eg = NULL;
-    const char *ea = NULL;
-    size_t eglen = 0;
-    size_t ealen = 0;
-    if (!ccb_config_maven_ga(ex, &eg, &eglen, &ea, &ealen)) {
-      continue;
-    }
-    const char *ec2 = strchr(ea, ':');
-    const char *ev = ec2 != NULL ? ec2 + 1 : NULL;
-    size_t evlen = ec2 != NULL ? strlen(ec2 + 1) : 0;
-    for (size_t j = 0; j < c->maven_count; j++) {
-      const char *dg = NULL;
-      const char *da = NULL;
-      size_t dglen = 0;
-      size_t dalen = 0;
-      if (!ccb_config_maven_ga(c->maven[j], &dg, &dglen, &da, &dalen)) {
-        continue;
-      }
-      if (dglen != eglen || dalen != ealen || memcmp(dg, eg, dglen) != 0 ||
-          memcmp(da, ea, dalen) != 0) {
-        continue;
-      }
-      if (ev != NULL) {
-        const char *dc2 = strchr(c->maven[j], ':');
-        const char *dc3 = dc2 != NULL ? strchr(dc2 + 1, ':') : NULL;
-        if (dc3 == NULL || strlen(dc3 + 1) != evlen ||
-            memcmp(dc3 + 1, ev, evlen) != 0) {
-          continue;
-        }
-      }
-      ccb_vdiagf(&v, "CCB-E1005",
-        "maven_exclude '%s' matches direct dependency '%s'; remove one of them",
-        ex, c->maven[j]);
-    }
-  }
-  for (size_t i = 0; i < c->jars_count; i++) {
-    char *resolved = ccb_resolve(c->project_root, c->jars[i]);
-    free(c->jars[i]);
-    c->jars[i] = resolved;
-  }
-  for (size_t i = 0; i < c->aars_count; i++) {
-    char *resolved = ccb_resolve(c->project_root, c->aars[i]);
-    free(c->aars[i]);
-    c->aars[i] = resolved;
-  }
-
-  // [ndk]
-  if (ccb_toml_find_table(doc, "ndk") != NULL) {
-    c->has_ndk = 1;
-    ccb_get_str_array(&v, "ndk", "abis", &c->ndk_abis, &c->ndk_abis_count);
-    ccb_get_str_array(&v, "ndk", "c_sources", &c->ndk_sources, &c->ndk_sources_count);
-    ccb_get_str_array(&v, "ndk", "cflags", &c->ndk_cflags, &c->ndk_cflags_count);
-    if (c->ndk_abis_count == 0) {
-      if (!ccb_key_present(doc, "ndk", "abis")) {
-        ccb_vdiag(&v, "CCB-E1004", "missing required key 'ndk.abis'");
-      } else {
-        ccb_vdiag(&v, "CCB-E1005", "ndk.abis must not be empty");
-      }
-    }
-    static const char *known_abis[] = { "arm64-v8a", "armeabi-v7a", "x86_64", "x86" };
-    for (size_t i = 0; i < c->ndk_abis_count; i++) {
-      int ok = 0;
-      for (size_t j = 0; j < 4; j++) {
-        if (strcmp(c->ndk_abis[i], known_abis[j]) == 0) {
-          ok = 1;
-          break;
-        }
-      }
-      if (!ok) {
-        ccb_vdiagf(&v, "CCB-E1005", "unknown ABI '%s' in ndk.abis", c->ndk_abis[i], "");
-      }
-    }
-    for (size_t i = 0; i < c->ndk_sources_count; i++) {
-      char *resolved = ccb_resolve(c->project_root, c->ndk_sources[i]);
-      free(c->ndk_sources[i]);
-      c->ndk_sources[i] = resolved;
-    }
-  }
-
-  // [preview]
-  if (ccb_toml_find_table(doc, "preview") != NULL) {
-    c->has_preview = 1;
-    char *p = NULL;
-    if (ccb_get_str(&v, "preview", "styles", &p)) {
-      c->preview_styles = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "preview", "flow", &p)) {
-      c->preview_flow = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "preview", "resources", &p)) {
-      c->preview_resources = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "preview", "layout", &p)) {
-      c->preview_layout = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    p = NULL;
-    if (ccb_get_str(&v, "preview", "nav_graph", &p)) {
-      c->preview_nav_graph = ccb_resolve(c->project_root, p);
-      free(p);
-    }
-    long w = 0;
-    if (ccb_get_int(&v, "preview", "phone_width", &w)) {
-      c->preview_phone_width = w;
-    }
-    long h = 0;
-    if (ccb_get_int(&v, "preview", "phone_height", &h)) {
-      c->preview_phone_height = h;
-    }
-    int strict = 0;
-    if (ccb_get_bool(&v, "preview", "strict", &strict)) {
-      c->preview_strict = strict;
-    }
-    int gate = 0;
-    if (ccb_get_bool(&v, "preview", "gate", &gate)) {
-      c->preview_gate = gate;
-    }
-    // [preview.bindings]: code identifier -> component label, both
-    // strings. A non-string value is the existing wrong-type error
-    // (CCB-E1007); the table itself needs no unknown-key check
-    // because any identifier may be a key.
-    {
-      const ccb_toml_table *bt = ccb_toml_find_table(doc,
-        "preview.bindings");
-      if (bt != NULL) {
-        for (size_t i = 0; i < bt->count; i++) {
-          if (bt->kvs[i].value.type != CCB_TOML_STRING) {
-            ccb_vdiagf(&v, "CCB-E1007",
-              "key '%s' must be a string", bt->kvs[i].key, "");
-            continue;
-          }
-          size_t n = c->preview_binding_count;
-          c->preview_binding_keys = ccb_xrealloc(
-            c->preview_binding_keys, (n + 1) * sizeof(*c->preview_binding_keys));
-          c->preview_binding_values = ccb_xrealloc(
-            c->preview_binding_values,
-            (n + 1) * sizeof(*c->preview_binding_values));
-          c->preview_binding_keys[n] = ccb_xstrdup(bt->kvs[i].key);
-          c->preview_binding_values[n] =
-            ccb_xstrdup(bt->kvs[i].value.str);
-          c->preview_binding_count = n + 1;
-        }
-      }
-    }
-  }
-
-  // [preview.scenario.<name>.<section>] tables, sub-table spelling:
-  // branches maps screen -> entry label (strings), lists maps list
-  // label -> rows (string arrays), fields maps textfield label ->
-  // text (strings), args maps button label -> values (string
-  // arrays). The TOML subset has no inline tables, so the plan's
-  // `branches = {...}` example is written as a section table
-  // instead; the data model is identical. A bare
-  // [preview.scenario.<name>] table carries no data: keys under it
-  // are CCB-E1001, like any unknown key. Wrong value types are
-  // CCB-E1007 via the shared getters. Parsed regardless of whether
-  // [preview] exists: the preview-applicability gate, not the
-  // config, decides whether scenarios ever run.
-  {
-    static const char prefix[] = "preview.scenario.";
-    size_t plen = strlen(prefix);
-    for (size_t ti = 0; ti < doc->count; ti++) {
-      const char *tname = doc->tables[ti].name;
-      const char *rest = NULL;
-      const char *dot = NULL;
-      const char *section = NULL;
-      ccb_scenario *sc = NULL;
-      size_t si = 0;
-      size_t ki = 0;
-      if (strncmp(tname, prefix, plen) != 0) {
-        continue;
-      }
-      rest = tname + plen;
-      dot = strchr(rest, '.');
-      if (dot == NULL) {
-        // Bare scenario table: register the name (an empty scenario
-        // is a valid no-op), but keys under it are not part of the
-        // format — data lives in the section tables.
-        size_t nlen = strlen(rest);
-        ccb_scenario *found = NULL;
-        for (si = 0; si < c->preview_scenario_count; si++) {
-          if (strcmp(c->preview_scenarios[si].name, rest) == 0) {
-            found = &c->preview_scenarios[si];
-            break;
-          }
-        }
-        if (found == NULL) {
-          if (nlen == 0 || strcmp(rest, ".") == 0 ||
-              strcmp(rest, "..") == 0 || strchr(rest, '/') != NULL ||
-              strchr(rest, '\\') != NULL) {
-            ccb_vdiagf(&v, "CCB-E1005", "invalid scenario name '%s'",
-              rest, "");
-            continue;
-          }
-          c->preview_scenarios = ccb_xrealloc(c->preview_scenarios,
-            (c->preview_scenario_count + 1) *
-            sizeof(*c->preview_scenarios));
-          sc = &c->preview_scenarios[c->preview_scenario_count];
-          memset(sc, 0, sizeof(*sc));
-          sc->name = ccb_xstrdup(rest);
-          c->preview_scenario_count++;
-        }
-        for (ki = 0; ki < doc->tables[ti].count; ki++) {
-          ccb_vdiagf(&v, "CCB-E1001",
-            "unknown key '%s' in table [%s]",
-            doc->tables[ti].kvs[ki].key, tname);
-        }
-        continue;
-      }
-      // Find or create the scenario by its single-segment name.
-      for (si = 0; si < c->preview_scenario_count; si++) {
-        size_t nlen = strlen(c->preview_scenarios[si].name);
-        if (strlen(rest) > nlen &&
-            strncmp(rest, c->preview_scenarios[si].name, nlen) == 0 &&
-            rest[nlen] == '.') {
-          sc = &c->preview_scenarios[si];
-          break;
-        }
-      }
-      if (sc == NULL) {
-        size_t nlen = (size_t)(dot - rest);
-        char *name = ccb_xmalloc(nlen + 1);
-        memcpy(name, rest, nlen);
-        name[nlen] = '\0';
-        if (nlen == 0 || strcmp(name, ".") == 0 ||
-            strcmp(name, "..") == 0 || strchr(name, '/') != NULL ||
-            strchr(name, '\\') != NULL) {
-          ccb_vdiagf(&v, "CCB-E1005", "invalid scenario name '%s'",
-            name, "");
-          free(name);
-          continue;
-        }
-        c->preview_scenarios = ccb_xrealloc(c->preview_scenarios,
-          (c->preview_scenario_count + 1) *
-          sizeof(*c->preview_scenarios));
-        sc = &c->preview_scenarios[c->preview_scenario_count];
-        memset(sc, 0, sizeof(*sc));
-        sc->name = name;
-        c->preview_scenario_count++;
-      }
-      section = dot + 1;
-      if (strcmp(section, "branches") == 0) {
-        for (ki = 0; ki < doc->tables[ti].count; ki++) {
-          char *entry = NULL;
-          const char *screen = doc->tables[ti].kvs[ki].key;
-          if (!ccb_get_str(&v, tname, screen, &entry)) {
-            continue;
-          }
-          sc->branches = ccb_xrealloc(sc->branches,
-            (sc->nbranches + 1) * sizeof(*sc->branches));
-          sc->branches[sc->nbranches].screen = ccb_xstrdup(screen);
-          sc->branches[sc->nbranches].entry = entry;
-          sc->nbranches++;
-        }
-      } else if (strcmp(section, "fields") == 0) {
-        for (ki = 0; ki < doc->tables[ti].count; ki++) {
-          char *text = NULL;
-          const char *label = doc->tables[ti].kvs[ki].key;
-          if (!ccb_get_str(&v, tname, label, &text)) {
-            continue;
-          }
-          sc->fields = ccb_xrealloc(sc->fields,
-            (sc->nfields + 1) * sizeof(*sc->fields));
-          sc->fields[sc->nfields].label = ccb_xstrdup(label);
-          sc->fields[sc->nfields].text = text;
-          sc->nfields++;
-        }
-      } else if (strcmp(section, "lists") == 0) {
-        for (ki = 0; ki < doc->tables[ti].count; ki++) {
-          char **rows = NULL;
-          size_t nrows = 0;
-          const char *label = doc->tables[ti].kvs[ki].key;
-          if (!ccb_get_str_array(&v, tname, label, &rows, &nrows)) {
-            continue;
-          }
-          sc->lists = ccb_xrealloc(sc->lists,
-            (sc->nlists + 1) * sizeof(*sc->lists));
-          sc->lists[sc->nlists].label = ccb_xstrdup(label);
-          sc->lists[sc->nlists].rows = rows;
-          sc->lists[sc->nlists].nrows = nrows;
-          sc->nlists++;
-        }
-      } else if (strcmp(section, "args") == 0) {
-        for (ki = 0; ki < doc->tables[ti].count; ki++) {
-          char **values = NULL;
-          size_t nvalues = 0;
-          const char *label = doc->tables[ti].kvs[ki].key;
-          if (!ccb_get_str_array(&v, tname, label, &values, &nvalues)) {
-            continue;
-          }
-          sc->args = ccb_xrealloc(sc->args,
-            (sc->nargs + 1) * sizeof(*sc->args));
-          sc->args[sc->nargs].label = ccb_xstrdup(label);
-          sc->args[sc->nargs].values = values;
-          sc->args[sc->nargs].nvalues = nvalues;
-          sc->nargs++;
-        }
-      } else {
-        ccb_vdiagf(&v, "CCB-E1001",
-          "unknown scenario section '%s' in [preview.scenario.%s]",
-          section, sc->name);
-      }
-    }
-  }
-
-  // [modules.<name>] library modules. The standard layout under
-  // <dir> mirrors [paths]: src/main/AndroidManifest.xml (required),
-  // src/main/res, src/main/assets, src/main/kotlin, src/main/java
-  // (each optional; absent means the module has no such input).
-  {
-    static const char *module_keys[] = { "dir", "depends" };
-    for (size_t ti = 0; ti < doc->count; ti++) {
-      const char *tname = doc->tables[ti].name;
-      if (strcmp(tname, "modules") == 0) {
-        ccb_vdiagf(&v, "CCB-E1001", "unknown table '[%s]'", tname, "");
-        continue;
-      }
-      if (strncmp(tname, "modules.", 8) != 0) {
-        continue;
-      }
-      const char *mod_name = tname + 8;
-      if (mod_name[0] == '\0' || strchr(mod_name, '.') != NULL) {
-        ccb_vdiagf(&v, "CCB-E1001", "unknown table '[%s]'", tname, "");
-        continue;
-      }
-      if (strchr(mod_name, '/') != NULL || strchr(mod_name, '\\') != NULL ||
-          strcmp(mod_name, ".") == 0 || strcmp(mod_name, "..") == 0) {
-        ccb_vdiagf(&v, "CCB-E1005", "invalid module name '%s'", mod_name, "");
-        continue;
-      }
-      if (ccb_find_module(c, mod_name) != NULL) {
-        ccb_vdiagf(&v, "CCB-E1005", "duplicate module '%s'", mod_name, "");
-        continue;
-      }
-      ccb_check_unknown_keys(&v, tname, module_keys, 2);
-      size_t mi = c->modules_count++;
-      c->modules = ccb_xrealloc(c->modules,
-        c->modules_count * sizeof(*c->modules));
-      ccb_module *m = &c->modules[mi];
-      memset(m, 0, sizeof(*m));
-      m->name = ccb_xstrdup(mod_name);
-      char *dir = NULL;
-      if (!ccb_get_str(&v, tname, "dir", &dir)) {
-        if (!ccb_key_present(doc, tname, "dir")) {
-          ccb_vdiagf(&v, "CCB-E1004", "missing required key '%s.dir'", tname, "");
-        }
-      } else {
-        m->dir = ccb_resolve(c->project_root, dir);
-        free(dir);
-      }
-      ccb_get_str_array(&v, tname, "depends", &m->depends,
-        &m->depends_count);
-      if (m->dir != NULL) {
-        if (!ccb_path_is_dir(m->dir)) {
-          ccb_vdiagf(&v, "CCB-E1006", "module directory does not exist: %s",
-            m->dir, "");
-        } else {
-          m->manifest = ccb_path_join3(m->dir, "src/main",
-            "AndroidManifest.xml");
-          if (!ccb_path_exists(m->manifest) || ccb_path_is_dir(m->manifest)) {
-            ccb_vdiagf(&v, "CCB-E1006", "module manifest does not exist: %s",
-              m->manifest, "");
-          } else {
-            // Package from the manifest (same text search the app
-            // manifest check and the AAR scan use).
-            char *text = NULL;
-            size_t len = 0;
-            if (ccb_read_file(m->manifest, &text, &len) == CCB_OK) {
-              const char *pk = strstr(text, "package=\"");
-              if (pk != NULL) {
-                pk += 9;
-                const char *end = strchr(pk, '"');
-                if (end != NULL) {
-                  m->package = ccb_xstrndup(pk, (size_t)(end - pk));
-                }
-              }
-              free(text);
-            }
-            if (m->package == NULL || m->package[0] == '\0') {
-              ccb_vdiagf(&v, "CCB-E1005",
-                "module '%s' manifest must declare a package attribute",
-                mod_name, "");
-            } else if (c->package != NULL &&
-                strcmp(m->package, c->package) == 0) {
-              ccb_vdiagf(&v, "CCB-E1005",
-                "module '%s' package must differ from the app package",
-                mod_name, "");
-            } else {
-              for (size_t k = 0; k < mi; k++) {
-                if (c->modules[k].package != NULL &&
-                    strcmp(c->modules[k].package, m->package) == 0) {
-                  ccb_vdiagf(&v, "CCB-E1005",
-                    "modules '%s' and '%s' share a package",
-                    c->modules[k].name, mod_name);
-                  break;
-                }
-              }
-            }
-          }
-          // Optional standard-layout inputs: present only when the
-          // directory exists on disk.
-          char *p = ccb_path_join3(m->dir, "src/main", "res");
-          if (ccb_path_is_dir(p)) {
-            m->res = p;
-          } else {
-            free(p);
-          }
-          p = ccb_path_join3(m->dir, "src/main", "assets");
-          if (ccb_path_is_dir(p)) {
-            m->assets = p;
-          } else {
-            free(p);
-          }
-          p = ccb_path_join3(m->dir, "src/main", "kotlin");
-          if (ccb_path_is_dir(p)) {
-            m->kotlin_dir = p;
-          } else {
-            free(p);
-          }
-          p = ccb_path_join3(m->dir, "src/main", "java");
-          if (ccb_path_is_dir(p)) {
-            m->java_dir = p;
-          } else {
-            free(p);
-          }
-        }
-      }
-    }
-    ccb_sort_modules(&v, c);
-  }
-
-  // Path existence checks (only when no earlier error already explains
-  // the path, and only for declared paths).
-  if (c->manifest != NULL) {
-    ccb_require_file(&v, c->manifest, "manifest");
-  }
-  if (c->res != NULL) {
-    ccb_require_dir(&v, c->res, "res directory");
-  }
-  if (c->assets != NULL) {
-    ccb_require_dir(&v, c->assets, "assets directory");
-  }
-  if (c->kotlin_dir != NULL) {
-    ccb_require_dir(&v, c->kotlin_dir, "kotlin directory");
-  }
-  if (c->java_dir != NULL) {
-    ccb_require_dir(&v, c->java_dir, "java directory");
-  }
-  if (c->libs_dir != NULL) {
-    ccb_require_dir(&v, c->libs_dir, "libs directory");
-  }
-  if (c->sdk_home != NULL) {
-    ccb_require_dir(&v, c->sdk_home, "sdk home");
-  }
-  if (c->kotlin_home != NULL) {
-    ccb_require_dir(&v, c->kotlin_home, "kotlin home");
-  }
-  if (c->r8_jar != NULL) {
-    ccb_require_file(&v, c->r8_jar, "r8 jar");
-  }
-  if (c->proguard_rules != NULL) {
-    ccb_require_file(&v, c->proguard_rules, "proguard rules");
-  }
-  if (c->debug_store != NULL) {
-    ccb_require_file(&v, c->debug_store, "debug keystore");
-  }
-  if (c->release_store != NULL) {
-    ccb_require_file(&v, c->release_store, "release keystore");
-  }
-  for (size_t i = 0; i < c->jars_count; i++) {
-    ccb_require_file(&v, c->jars[i], "jar dependency");
-  }
-  for (size_t i = 0; i < c->aars_count; i++) {
-    ccb_require_file(&v, c->aars[i], "aar dependency");
-  }
-  for (size_t i = 0; i < c->ndk_sources_count; i++) {
-    ccb_require_file(&v, c->ndk_sources[i], "ndk source");
-  }
-  if (c->preview_styles != NULL) {
-    ccb_require_dir(&v, c->preview_styles, "preview styles directory");
-  }
-  if (c->preview_flow != NULL) {
-    ccb_require_dir(&v, c->preview_flow, "preview flow directory");
-  }
-  if (c->preview_resources != NULL) {
-    ccb_require_dir(&v, c->preview_resources, "preview resources directory");
-  }
-  if (c->preview_layout != NULL) {
-    ccb_require_path(&v, c->preview_layout, "preview layout path");
-  }
-  if (c->preview_nav_graph != NULL) {
-    ccb_require_path(&v, c->preview_nav_graph, "preview nav_graph path");
-  }
+  ccb_load_unknown_keys(&v);
+  ccb_load_root(&v, doc, c);
+  ccb_load_project(&v, doc, c);
+  ccb_load_paths(&v, doc, c);
+  ccb_load_sdk(&v, c);
+  ccb_load_signing(&v, doc, c);
+  ccb_load_build(&v, c, variant_override);
+  ccb_load_deps(&v, c);
+  ccb_load_ndk(&v, doc, c);
+  ccb_load_preview(&v, doc, c);
+  ccb_load_scenarios(&v, doc, c);
+  ccb_load_modules(&v, doc, c);
+  ccb_check_paths(&v, c);
 
   ccb_toml_free_doc(doc);
   if (diags->count > diag_before) {

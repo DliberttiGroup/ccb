@@ -11,6 +11,7 @@
 #include "ccb_log.h"
 #include "ccb_proc.h"
 #include "ccb_config.h"
+#include "ccb_daemon.h"
 #include "ccb_sdk.h"
 #include "ccb_pipeline.h"
 #include "ccb_preview.h"
@@ -45,8 +46,11 @@ static const char *CCB_USAGE =
   "  check [--preview-gate] [--no-preview-gate]\n"
   "                                            validate config + toolchain\n"
   "  build [--preview-gate] [--no-preview-gate] [--aab]\n"
+  "        [--kotlinc-daemon] [--no-kotlinc-daemon]\n"
   "                                            build the APK (or .aab with --aab)\n"
   "  clean                                     remove the build directory\n"
+  "                                            (and stop the kotlinc daemon)\n"
+  "  daemon stop                               stop the kotlinc daemon\n"
   "  doctor                                    report toolchain status\n"
   "  install                                   adb install the built APK\n"
   "  run                                       install + launch the app\n"
@@ -95,6 +99,8 @@ typedef struct {
   const char *preview_record;
   int preview_gate_on;
   int preview_gate_off;
+  int kotlinc_daemon_on;
+  int kotlinc_daemon_off;
 } ccb_args;
 
 static void ccb_print_diags_human(ccb_diag_list *diags) {
@@ -374,6 +380,45 @@ static char *ccb_find_sdkmanager(const char *sdk_home) {
   }
   free(p);
   return NULL;
+}
+
+// Count the SDK components setup would install that are missing
+// from disk (platform-tools, the platform, build-tools). When
+// names is not NULL it is filled with the missing component names.
+// Shared by the pre-install skip and the post-install verification.
+static int ccb_setup_missing_components(const char *sdk_home, long compile_sdk,
+    const char *build_tools, const char **names) {
+  int n = 0;
+  char *pt = ccb_path_join(sdk_home, "platform-tools");
+  if (!ccb_path_exists(pt)) {
+    if (names != NULL) {
+      names[n] = "platform-tools";
+    }
+    n++;
+  }
+  free(pt);
+  ccb_str ps;
+  ccb_str_init(&ps);
+  ccb_str_append(&ps, "platforms/android-");
+  ccb_str_appendf(&ps, "%ld", compile_sdk);
+  char *plat = ccb_path_join(sdk_home, ps.buf);
+  ccb_str_free(&ps);
+  if (!ccb_path_exists(plat)) {
+    if (names != NULL) {
+      names[n] = "platform";
+    }
+    n++;
+  }
+  free(plat);
+  char *btd = ccb_path_join3(sdk_home, "build-tools", build_tools);
+  if (!ccb_path_exists(btd)) {
+    if (names != NULL) {
+      names[n] = "build-tools";
+    }
+    n++;
+  }
+  free(btd);
+  return n;
 }
 
 // Download a file with curl (follows redirects) to a temp path.
@@ -1210,75 +1255,116 @@ static void ccb_setup_final_pass(ccb_config *cfg, long compile_sdk, const char *
   }
 }
 
-static int ccb_cmd_setup(ccb_args *a) {
-  // sdkmanager is a Java program. When no usable JDK is present, offer
-  // to install one (Termux pkg or the distro package manager) instead
-  // of failing at the sdkmanager step with a generic error.
+// Shared state for the `setup` steps. The orchestrator owns the
+// cleanup: every step frees only its own locals and reports an exit
+// code, so a step never frees ctx fields. sdk_home and build_tools
+// are borrowed (config, env, or default_home); default_home and
+// sdkmanager are owned.
+typedef struct {
+  ccb_args *a;
+  ccb_config *cfg;
+  const char *sdk_home;
+  char *default_home;
+  char *sdkmanager;
+  long compile_sdk;
+  const char *build_tools;
+  ccb_str platform;
+  ccb_str bt;
+} ccb_setup_ctx;
+
+// Whether to install OpenJDK 17: 1 installs, 0 declines (the caller
+// reports the failure). Prints the prompt or the non-interactive
+// error itself.
+static int ccb_setup_java_decide(ccb_args *a, const ccb_jdkinst_info *inst) {
+  if (inst->kind == CCB_JDKINST_NONE) {
+    fprintf(stderr,
+      "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
+      "No supported package installer found (Termux pkg, apt-get, dnf, yum, pacman, zypper, apk).\n"
+      "Install a JDK 17+ manually and set JAVA_HOME, or put java 17+ on PATH.\n");
+    return 0;
+  }
+  if (a->yes || a->upgrade) {
+    return 1;
+  }
+  if (isatty(STDIN_FILENO)) {
+    ccb_str q;
+    int go = 0;
+    ccb_str_init(&q);
+    ccb_str_append(&q, "Java 17+ not found. Install OpenJDK 17 via ");
+    ccb_str_append(&q, inst->display);
+    ccb_str_append(&q, "?");
+    go = ccb_prompt_yes(q.buf);
+    ccb_str_free(&q);
+    if (!go) {
+      fprintf(stderr, "setup aborted: Java 17+ is required.\n");
+    }
+    return go;
+  }
+  fprintf(stderr,
+    "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
+    "Run `ccb setup` in a terminal to install OpenJDK 17 via %s, or pass --yes to install automatically.\n",
+    inst->display);
+  return 0;
+}
+
+// A JDK 17+ must exist before sdkmanager can run: sdkmanager is a
+// Java program. When no usable JDK is present, offer to install one
+// (Termux pkg or the distro package manager) instead of failing at
+// the sdkmanager step with a generic error. Returns 0 when a usable
+// JDK is configured, 3 otherwise.
+static int ccb_setup_ensure_java(ccb_args *a) {
+  char *java = NULL;
+  int java_major = 0;
+  if (ccb_sdk_find_java(&java, &java_major) == CCB_OK) {
+    ccb_configure_java_home(java);
+    free(java);
+    return 0;
+  }
   {
-    char *java = NULL;
-    int java_major = 0;
-    if (ccb_sdk_find_java(&java, &java_major) != CCB_OK) {
-      ccb_jdkinst_info inst;
-      ccb_detect_jdkinst(&inst);
-      if (inst.kind == CCB_JDKINST_NONE) {
-        fprintf(stderr,
-          "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
-          "No supported package installer found (Termux pkg, apt-get, dnf, yum, pacman, zypper, apk).\n"
-          "Install a JDK 17+ manually and set JAVA_HOME, or put java 17+ on PATH.\n");
-        return 3;
-      }
-      int go = 0;
-      if (a->yes || a->upgrade) {
-        go = 1;
-      } else if (isatty(STDIN_FILENO)) {
-        ccb_str q;
-        ccb_str_init(&q);
-        ccb_str_append(&q, "Java 17+ not found. Install OpenJDK 17 via ");
-        ccb_str_append(&q, inst.display);
-        ccb_str_append(&q, "?");
-        go = ccb_prompt_yes(q.buf);
-        ccb_str_free(&q);
-        if (!go) {
-          fprintf(stderr, "setup aborted: Java 17+ is required.\n");
-        }
-      } else {
-        fprintf(stderr,
-          "error: java not found: `ccb setup` runs sdkmanager, which needs a JDK 17+.\n"
-          "Run `ccb setup` in a terminal to install OpenJDK 17 via %s, or pass --yes to install automatically.\n",
-          inst.display);
-      }
-      if (!go) {
-        free(inst.path);
-        free(inst.sudo_path);
-        return 3;
-      }
-      fprintf(stderr, "Installing OpenJDK 17 via %s...\n", inst.display);
-      int irc = ccb_install_jdk(&inst);
+    ccb_jdkinst_info inst;
+    ccb_detect_jdkinst(&inst);
+    if (!ccb_setup_java_decide(a, &inst)) {
       free(inst.path);
       free(inst.sudo_path);
-      if (irc != 0) {
-        fprintf(stderr, "error: failed to install OpenJDK 17 via %s.\n", inst.display);
-        return 3;
-      }
-      if (ccb_sdk_find_java(&java, &java_major) != CCB_OK) {
-        fprintf(stderr,
-          "error: installed OpenJDK 17 via %s but java 17+ is still not found.\n"
-          "Set JAVA_HOME or put java 17+ on PATH, then run `ccb setup` again.\n",
-          inst.display);
-        return 3;
-      }
+      return 3;
+    }
+    fprintf(stderr, "Installing OpenJDK 17 via %s...\n", inst.display);
+    int irc = ccb_install_jdk(&inst);
+    free(inst.path);
+    free(inst.sudo_path);
+    if (irc != 0) {
+      fprintf(stderr, "error: failed to install OpenJDK 17 via %s.\n", inst.display);
+      return 3;
+    }
+    if (ccb_sdk_find_java(&java, &java_major) != CCB_OK) {
+      fprintf(stderr,
+        "error: installed OpenJDK 17 via %s but java 17+ is still not found.\n"
+        "Set JAVA_HOME or put java 17+ on PATH, then run `ccb setup` again.\n",
+        inst.display);
+      return 3;
     }
     ccb_configure_java_home(java);
     free(java);
+    return 0;
   }
+}
+
+// Loads the project config. Defaults apply when no ccb.toml exists.
+// But a config that was found (or explicitly requested) and failed
+// to load is an error: silently falling back to the default SDK home
+// would provision the wrong SDK. Returns 0 with *cfg_out set
+// (possibly NULL), 2 on a load error.
+static int ccb_setup_load_config(ccb_args *a, ccb_config **cfg_out) {
   ccb_diag_list diags;
+  ccb_config *cfg = NULL;
   ccb_diag_list_init(&diags);
-  ccb_config *cfg = ccb_load_config_or_die(a, &diags);
-  // Config is optional for setup: defaults apply when no ccb.toml
-  // exists. But a config that was found (or explicitly requested)
-  // and failed to load is an error: silently falling back to the
-  // default SDK home would provision the wrong SDK.
-  if (cfg == NULL) {
+  cfg = ccb_load_config_or_die(a, &diags);
+  if (cfg != NULL) {
+    ccb_diag_list_free(&diags);
+    *cfg_out = cfg;
+    return 0;
+  }
+  {
     int found = 0;
     if (a->config_path != NULL) {
       found = 1;
@@ -1291,51 +1377,57 @@ static int ccb_cmd_setup(ccb_args *a) {
         free(discovered);
       }
     }
-    if (found) {
-      ccb_print_diags(a, &diags);
+    if (!found) {
+      // No config anywhere: defaults apply.
       ccb_diag_list_free(&diags);
-      return 2;
+      *cfg_out = NULL;
+      return 0;
     }
-    // No config anywhere: defaults apply.
   }
+  ccb_print_diags(a, &diags);
   ccb_diag_list_free(&diags);
-  long compile_sdk = 35;
-  const char *build_tools = "35.0.0";
-  const char *sdk_home_cfg = NULL;
-  if (cfg != NULL) {
-    compile_sdk = cfg->compile_sdk;
-    build_tools = cfg->build_tools;
-    sdk_home_cfg = cfg->sdk_home;
-  }
-  const char *sdk_home = sdk_home_cfg;
+  return 2;
+}
+
+// Resolves the SDK home: config, then ANDROID_HOME /
+// ANDROID_SDK_ROOT, then ~/Android/Sdk. Returns 0, or 3 when no
+// location can be determined.
+static int ccb_setup_resolve_sdk_home(ccb_setup_ctx *ctx) {
+  const char *sdk_home = ctx->cfg != NULL ? ctx->cfg->sdk_home : NULL;
   if (sdk_home == NULL) {
     sdk_home = getenv("ANDROID_HOME");
   }
   if (sdk_home == NULL) {
     sdk_home = getenv("ANDROID_SDK_ROOT");
   }
-  char *default_home = NULL;
   if (sdk_home == NULL) {
     const char *home = getenv("HOME");
     if (home == NULL) {
       fprintf(stderr, "error: cannot determine an SDK location (no HOME, no ANDROID_HOME)\n");
-      ccb_config_free(cfg);
       return 3;
     }
-    default_home = ccb_path_join(home, "Android/Sdk");
-    sdk_home = default_home;
+    ctx->default_home = ccb_path_join(home, "Android/Sdk");
+    sdk_home = ctx->default_home;
   }
-  char *sdkmanager = ccb_find_sdkmanager(sdk_home);
-  if (sdkmanager == NULL) {
-    // Bootstrap: download the official cmdline-tools archive.
-    fprintf(stderr, "cmdline-tools not found, downloading the official archive...\n");
-    if (ccb_mkdir_p(sdk_home) != CCB_OK) {
-      fprintf(stderr, "error: cannot create SDK directory %s\n", sdk_home);
-      free(default_home);
-      ccb_config_free(cfg);
-      return 3;
-    }
-    char *tmp = ccb_path_join(sdk_home, "cmdline-tools.zip");
+  ctx->sdk_home = sdk_home;
+  return 0;
+}
+
+// Downloads and installs cmdline-tools when sdkmanager is missing.
+// Sets ctx->sdkmanager. Returns 0, or 3 on failure.
+static int ccb_setup_bootstrap_sdkmanager(ccb_setup_ctx *ctx) {
+  const char *sdk_home = ctx->sdk_home;
+  char *tmp = NULL;
+  char *unzip_dir = NULL;
+  char *unzip = NULL;
+  // Bootstrap: download the official cmdline-tools archive.
+  fprintf(stderr, "cmdline-tools not found, downloading the official archive...\n");
+  if (ccb_mkdir_p(sdk_home) != CCB_OK) {
+    fprintf(stderr, "error: cannot create SDK directory %s\n", sdk_home);
+    return 3;
+  }
+  tmp = ccb_path_join(sdk_home, "cmdline-tools.zip");
+  {
     const char *url = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip";
     int drc = ccb_download_cached(url, tmp, CCB_CMDLINE_SHA256);
     if (drc != 0) {
@@ -1344,20 +1436,18 @@ static int ccb_cmd_setup(ccb_args *a) {
         url);
       remove(tmp);
       free(tmp);
-      free(default_home);
-      ccb_config_free(cfg);
       return 3;
     }
-    char *unzip_dir = ccb_path_join(sdk_home, "cmdline-tools-tmp");
-    ccb_remove_recursive(unzip_dir);
-    if (ccb_mkdir_p(unzip_dir) != CCB_OK) {
-      free(unzip_dir);
-      free(tmp);
-      free(default_home);
-      ccb_config_free(cfg);
-      return 3;
-    }
-    char *unzip = ccb_sdk_find_on_path("unzip");
+  }
+  unzip_dir = ccb_path_join(sdk_home, "cmdline-tools-tmp");
+  ccb_remove_recursive(unzip_dir);
+  if (ccb_mkdir_p(unzip_dir) != CCB_OK) {
+    free(unzip_dir);
+    free(tmp);
+    return 3;
+  }
+  unzip = ccb_sdk_find_on_path("unzip");
+  {
     char *unzip_argv[] = { unzip == NULL ? "unzip" : unzip, "-q", tmp, "-d", unzip_dir, NULL };
     ccb_proc_result r;
     int unzip_ok = unzip != NULL && ccb_proc_run(unzip_argv, NULL, NULL, &r) == CCB_OK && r.exit_code == 0;
@@ -1368,10 +1458,10 @@ static int ccb_cmd_setup(ccb_args *a) {
     if (!unzip_ok) {
       fprintf(stderr, "error: cannot unzip cmdline-tools archive\n");
       free(unzip_dir);
-      free(default_home);
-      ccb_config_free(cfg);
       return 3;
     }
+  }
+  {
     char *src = ccb_path_join(unzip_dir, "cmdline-tools");
     char *dst = ccb_path_join(sdk_home, "cmdline-tools/latest");
     char *dst_parent = ccb_dirname(dst);
@@ -1380,8 +1470,6 @@ static int ccb_cmd_setup(ccb_args *a) {
       free(src);
       free(dst);
       free(unzip_dir);
-      free(default_home);
-      ccb_config_free(cfg);
       return 3;
     }
     free(dst_parent);
@@ -1390,165 +1478,153 @@ static int ccb_cmd_setup(ccb_args *a) {
       free(src);
       free(dst);
       free(unzip_dir);
-      free(default_home);
-      ccb_config_free(cfg);
       return 3;
     }
     free(src);
     free(dst);
-    ccb_remove_recursive(unzip_dir);
-    free(unzip_dir);
-    sdkmanager = ccb_find_sdkmanager(sdk_home);
-    if (sdkmanager == NULL) {
-      fprintf(stderr, "error: cmdline-tools installed but sdkmanager not found\n");
-      free(default_home);
-      ccb_config_free(cfg);
-      return 3;
-    }
   }
-  // Accept licenses BEFORE installing: on a fresh SDK an install
-  // attempted before license acceptance installs nothing, and the
-  // old order then reported success anyway (see the verification
-  // below). A licenses failure is only a warning here: the
-  // post-install verification is the arbiter of success.
-  {
-    char *lic_cmd = NULL;
-    {
-      ccb_str s;
-      ccb_str_init(&s);
-      ccb_str_append(&s, "yes | \"");
-      ccb_str_append(&s, sdkmanager);
-      ccb_str_append(&s, "\" --licenses >/dev/null");
-      lic_cmd = ccb_str_steal(&s);
-    }
-    // execve does no PATH lookup, so resolve sh explicitly.
-    char *sh = ccb_sdk_find_on_path("sh");
-    if (sh == NULL) {
-      fprintf(stderr, "warning: could not accept SDK licenses (sh not found); continuing\n");
-    } else {
-      char *sh_argv[] = { sh, "-c", lic_cmd, NULL };
-      ccb_proc_result lr;
-      ccb_status lrc = ccb_proc_run(sh_argv, NULL, NULL, &lr);
-      if (lrc != CCB_OK || lr.exit_code != 0) {
-        fprintf(stderr, "warning: sdkmanager --licenses failed; continuing\n");
-      }
-      ccb_proc_result_free(&lr);
-      free(sh);
-    }
-    free(lic_cmd);
-  }
-  // Install the components this project needs.
-  ccb_str platform;
-  ccb_str_init(&platform);
-  ccb_str_append(&platform, "platforms;android-");
-  ccb_str_appendf(&platform, "%ld", compile_sdk);
-  ccb_str bt;
-  ccb_str_init(&bt);
-  ccb_str_append(&bt, "build-tools;");
-  ccb_str_append(&bt, build_tools);
-  char *components[] = { "platform-tools", platform.buf, bt.buf, NULL };
-  char *argv[] = { sdkmanager, components[0], components[1], components[2], NULL };
-  ccb_proc_result r;
-  ccb_status prc = ccb_proc_run(argv, NULL, NULL, &r);
-  if (prc != CCB_OK || r.exit_code != 0) {
-    fprintf(stderr, "error: sdkmanager failed to install components\n%s\n", r.err);
-    fprintf(stderr,
-      "note: sdkmanager needs network access to Google's repository. It has no flags for\n"
-      "authenticated proxies, so behind an authenticated egress proxy it cannot fetch;\n"
-      "in that case provision the SDK by direct download instead (see docs/setup.md).\n");
-    ccb_proc_result_free(&r);
-    ccb_str_free(&platform);
-    ccb_str_free(&bt);
-    free(sdkmanager);
-    free(default_home);
-    ccb_config_free(cfg);
+  ccb_remove_recursive(unzip_dir);
+  free(unzip_dir);
+  ctx->sdkmanager = ccb_find_sdkmanager(sdk_home);
+  if (ctx->sdkmanager == NULL) {
+    fprintf(stderr, "error: cmdline-tools installed but sdkmanager not found\n");
     return 3;
   }
-  ccb_proc_result_free(&r);
-  // Verify the components actually landed before claiming success:
-  // an install that silently installed nothing must not print
-  // "SDK ready".
+  return 0;
+}
+
+// Accepts the SDK licenses before installing. A licenses failure is
+// only a warning here: the post-install verification is the arbiter
+// of success.
+static void ccb_setup_accept_licenses(ccb_setup_ctx *ctx) {
+  char *lic_cmd = NULL;
+  char *sh = NULL;
+  {
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, "yes | \"");
+    ccb_str_append(&s, ctx->sdkmanager);
+    ccb_str_append(&s, "\" --licenses >/dev/null");
+    lic_cmd = ccb_str_steal(&s);
+  }
+  // execve does no PATH lookup, so resolve sh explicitly.
+  sh = ccb_sdk_find_on_path("sh");
+  if (sh == NULL) {
+    fprintf(stderr, "warning: could not accept SDK licenses (sh not found); continuing\n");
+  } else {
+    char *sh_argv[] = { sh, "-c", lic_cmd, NULL };
+    ccb_proc_result lr;
+    ccb_status lrc = ccb_proc_run(sh_argv, NULL, NULL, &lr);
+    if (lrc != CCB_OK || lr.exit_code != 0) {
+      fprintf(stderr, "warning: sdkmanager --licenses failed; continuing\n");
+    }
+    ccb_proc_result_free(&lr);
+    free(sh);
+  }
+  free(lic_cmd);
+}
+
+// Installs the components this project needs via sdkmanager, then
+// verifies they actually landed: an install that silently installed
+// nothing must not print "SDK ready". Returns 0, or 3.
+static int ccb_setup_install_components(ccb_setup_ctx *ctx) {
+  ccb_str_append(&ctx->platform, "platforms;android-");
+  ccb_str_appendf(&ctx->platform, "%ld", ctx->compile_sdk);
+  ccb_str_append(&ctx->bt, "build-tools;");
+  ccb_str_append(&ctx->bt, ctx->build_tools);
+  {
+    char *components[] = { "platform-tools", ctx->platform.buf, ctx->bt.buf, NULL };
+    char *argv[] = { ctx->sdkmanager, components[0], components[1], components[2], NULL };
+    ccb_proc_result r;
+    ccb_status prc = ccb_proc_run(argv, NULL, NULL, &r);
+    if (prc != CCB_OK || r.exit_code != 0) {
+      fprintf(stderr, "error: sdkmanager failed to install components\n%s\n", r.err);
+      fprintf(stderr,
+        "note: sdkmanager needs network access to Google's repository. It has no flags for\n"
+        "authenticated proxies, so behind an authenticated egress proxy it cannot fetch;\n"
+        "in that case provision the SDK by direct download instead (see docs/setup.md).\n");
+      ccb_proc_result_free(&r);
+      return 3;
+    }
+    ccb_proc_result_free(&r);
+  }
   {
     const char *missing[3];
-    int nmissing = 0;
-    char *pt = ccb_path_join(sdk_home, "platform-tools");
-    if (!ccb_path_exists(pt)) {
-      missing[nmissing++] = "platform-tools";
-    }
-    free(pt);
-    ccb_str ps;
-    ccb_str_init(&ps);
-    ccb_str_append(&ps, "platforms/android-");
-    ccb_str_appendf(&ps, "%ld", compile_sdk);
-    char *plat = ccb_path_join(sdk_home, ps.buf);
-    ccb_str_free(&ps);
-    if (!ccb_path_exists(plat)) {
-      missing[nmissing++] = "platform";
-    }
-    free(plat);
-    char *btd = ccb_path_join3(sdk_home, "build-tools", build_tools);
-    if (!ccb_path_exists(btd)) {
-      missing[nmissing++] = "build-tools";
-    }
-    free(btd);
+    int nmissing = ccb_setup_missing_components(ctx->sdk_home, ctx->compile_sdk, ctx->build_tools, missing);
     if (nmissing > 0) {
       fprintf(stderr, "error: ccb setup finished but the following components are still missing:");
       for (int i = 0; i < nmissing; i++) {
         fprintf(stderr, " %s", missing[i]);
       }
       fprintf(stderr, "\nCheck the sdkmanager output above, then run `ccb setup` again.\n");
-      ccb_str_free(&platform);
-      ccb_str_free(&bt);
-      free(sdkmanager);
-      free(default_home);
-      ccb_config_free(cfg);
       return 3;
     }
   }
-  // Kotlin: when no usable kotlinc 2.x resolves, install the official
-  // compiler into the SDK home, where the resolver picks it up as a
-  // last resort (after [sdk] kotlin_home, KOTLIN_HOME, and PATH).
-  // Automatic, like the SDK component install: the destination is
-  // CCB's own directory, not a system package.
+  return 0;
+}
+
+// Upgrades the setup-managed SDK-home kotlinc when --upgrade is set
+// and it is not the pinned version. Sets *upgraded. Returns 0, or 3
+// when the reinstall fails.
+static int ccb_setup_maybe_upgrade_kotlinc(ccb_setup_ctx *ctx, int *upgraded) {
+  char *home_bin = ccb_path_join3(ctx->sdk_home, "kotlinc", "bin/kotlinc");
+  char *ver = NULL;
+  *upgraded = 0;
+  if (!ctx->a->upgrade) {
+    free(home_bin);
+    return 0;
+  }
+  // Upgrade only the setup-managed copy: when the SDK-home
+  // kotlinc exists and is not the pinned version, reinstall it.
+  // A user-managed kotlinc (config, KOTLIN_HOME, PATH) is never
+  // touched, and SDK component versions stay pinned by config.
+  if (access(home_bin, X_OK) != 0) {
+    free(home_bin);
+    return 0;
+  }
   {
-    int upgraded = 0;
-    if (a->upgrade) {
-      // Upgrade only the setup-managed copy: when the SDK-home
-      // kotlinc exists and is not the pinned version, reinstall it.
-      // A user-managed kotlinc (config, KOTLIN_HOME, PATH) is never
-      // touched, and SDK component versions stay pinned by config.
-      char *home_bin = ccb_path_join3(sdk_home, "kotlinc", "bin/kotlinc");
-      if (access(home_bin, X_OK) == 0) {
-        char *argv[] = { home_bin, "-version", NULL };
-        ccb_proc_result vr;
-        char *ver = NULL;
-        if (ccb_proc_run(argv, NULL, NULL, &vr) == CCB_OK) {
-          ver = ccb_sdk_parse_kotlin_version(vr.err);
-        }
-        ccb_proc_result_free(&vr);
-        if (ver == NULL || strcmp(ver, CCB_KOTLIN_VERSION) != 0) {
-          fprintf(stderr, "upgrading SDK-home kotlinc %s -> %s\n",
-            ver != NULL ? ver : "unversioned", CCB_KOTLIN_VERSION);
-          if (ccb_setup_install_kotlinc(sdk_home) != 0) {
-            free(ver);
-            free(home_bin);
-            ccb_str_free(&platform);
-            ccb_str_free(&bt);
-            free(sdkmanager);
-            free(default_home);
-            ccb_config_free(cfg);
-            return 3;
-          }
-          upgraded = 1;
-        }
-        free(ver);
-      }
-      free(home_bin);
+    char *argv[] = { home_bin, "-version", NULL };
+    ccb_proc_result vr;
+    if (ccb_proc_run(argv, NULL, NULL, &vr) == CCB_OK) {
+      ver = ccb_sdk_parse_kotlin_version(vr.err);
     }
-    if (!upgraded) {
+    ccb_proc_result_free(&vr);
+  }
+  if (ver != NULL && strcmp(ver, CCB_KOTLIN_VERSION) == 0) {
+    free(ver);
+    free(home_bin);
+    return 0;
+  }
+  fprintf(stderr, "upgrading SDK-home kotlinc %s -> %s\n",
+    ver != NULL ? ver : "unversioned", CCB_KOTLIN_VERSION);
+  if (ccb_setup_install_kotlinc(ctx->sdk_home) != 0) {
+    free(ver);
+    free(home_bin);
+    return 3;
+  }
+  free(ver);
+  free(home_bin);
+  *upgraded = 1;
+  return 0;
+}
+
+// Kotlin: when no usable kotlinc 2.x resolves, install the official
+// compiler into the SDK home, where the resolver picks it up as a
+// last resort (after [sdk] kotlin_home, KOTLIN_HOME, and PATH).
+// Automatic, like the SDK component install: the destination is
+// CCB's own directory, not a system package. Returns 0, or 3.
+static int ccb_setup_ensure_kotlinc(ccb_setup_ctx *ctx) {
+  int upgraded = 0;
+  if (ccb_setup_maybe_upgrade_kotlinc(ctx, &upgraded) != 0) {
+    return 3;
+  }
+  if (upgraded) {
+    return 0;
+  }
+  {
     char *kpath = NULL;
     char *kver = NULL;
-    int kprobe = ccb_setup_probe_kotlinc(cfg, sdk_home, &kpath, &kver);
+    int kprobe = ccb_setup_probe_kotlinc(ctx->cfg, ctx->sdk_home, &kpath, &kver);
     if (kprobe == 1) {
       fprintf(stderr, "kotlinc %s found at %s\n", kver, kpath);
     } else {
@@ -1556,61 +1632,59 @@ static int ccb_cmd_setup(ccb_args *a) {
         fprintf(stderr,
           "warning: found kotlinc %s at %s, which is not 2.x; installing %s into the SDK home.\n"
           "Builds will keep picking the old one until it is removed or [sdk] kotlin_home / KOTLIN_HOME points at %s/kotlinc.\n",
-          kver != NULL ? kver : "unversioned", kpath, CCB_KOTLIN_VERSION, sdk_home);
+          kver != NULL ? kver : "unversioned", kpath, CCB_KOTLIN_VERSION, ctx->sdk_home);
       }
-      if (ccb_setup_install_kotlinc(sdk_home) != 0) {
+      if (ccb_setup_install_kotlinc(ctx->sdk_home) != 0) {
         free(kpath);
         free(kver);
-        ccb_str_free(&platform);
-        ccb_str_free(&bt);
-        free(sdkmanager);
-        free(default_home);
-        ccb_config_free(cfg);
         return 3;
       }
     }
     free(kpath);
     free(kver);
-    }
   }
-  // NDK: a project declaring [ndk] needs its revision installed, or
-  // check fails after setup says ready.
-  if (cfg != NULL && cfg->has_ndk && cfg->ndk_version != NULL) {
-    char *ndk_dir = ccb_path_join3(sdk_home, "ndk", cfg->ndk_version);
+  return 0;
+}
+
+// NDK: a project declaring [ndk] needs its revision installed, or
+// check fails after setup says ready. Returns 0, or 3.
+static int ccb_setup_ensure_ndk(ccb_setup_ctx *ctx) {
+  if (ctx->cfg == NULL || !ctx->cfg->has_ndk || ctx->cfg->ndk_version == NULL) {
+    return 0;
+  }
+  {
+    char *ndk_dir = ccb_path_join3(ctx->sdk_home, "ndk", ctx->cfg->ndk_version);
     if (!ccb_path_is_dir(ndk_dir)) {
-      fprintf(stderr, "ndk %s not found, installing via sdkmanager...\n", cfg->ndk_version);
-      if (ccb_setup_install_ndk(sdk_home, sdkmanager, cfg->ndk_version) != 0) {
+      fprintf(stderr, "ndk %s not found, installing via sdkmanager...\n", ctx->cfg->ndk_version);
+      if (ccb_setup_install_ndk(ctx->sdk_home, ctx->sdkmanager, ctx->cfg->ndk_version) != 0) {
         free(ndk_dir);
-        ccb_str_free(&platform);
-        ccb_str_free(&bt);
-        free(sdkmanager);
-        free(default_home);
-        ccb_config_free(cfg);
         return 3;
       }
     } else {
-      fprintf(stderr, "ndk %s found at %s\n", cfg->ndk_version, ndk_dir);
+      fprintf(stderr, "ndk %s found at %s\n", ctx->cfg->ndk_version, ndk_dir);
     }
     free(ndk_dir);
   }
-  // r8: only for minify projects without an explicit jar. The
-  // setup-managed copy lives at <sdk-home>/r8/r8.jar, where the
-  // build picks it up.
-  if (cfg != NULL && cfg->minify && cfg->r8_jar == NULL) {
-    char *r8_path = ccb_path_join3(sdk_home, "r8", "r8.jar");
+  return 0;
+}
+
+// r8: only for minify projects without an explicit jar. The
+// setup-managed copy lives at <sdk-home>/r8/r8.jar, where the
+// build picks it up. Returns 0, or 3.
+static int ccb_setup_ensure_r8(ccb_setup_ctx *ctx) {
+  if (ctx->cfg == NULL || !ctx->cfg->minify || ctx->cfg->r8_jar != NULL) {
+    return 0;
+  }
+  {
+    char *r8_path = ccb_path_join3(ctx->sdk_home, "r8", "r8.jar");
     int need = !ccb_path_exists(r8_path);
-    if (!need && a->upgrade && getenv("CCB_R8_URL") == NULL && getenv("CCB_R8_SHA256") == NULL) {
+    if (!need && ctx->a->upgrade && getenv("CCB_R8_URL") == NULL && getenv("CCB_R8_SHA256") == NULL) {
       char hex[65];
       need = ccb_sha256_file(r8_path, hex) != CCB_OK || strcmp(hex, CCB_R8_SHA256) != 0;
     }
     if (need) {
-      if (ccb_setup_install_r8(sdk_home) != 0) {
+      if (ccb_setup_install_r8(ctx->sdk_home) != 0) {
         free(r8_path);
-        ccb_str_free(&platform);
-        ccb_str_free(&bt);
-        free(sdkmanager);
-        free(default_home);
-        ccb_config_free(cfg);
         return 3;
       }
     } else {
@@ -1618,182 +1692,305 @@ static int ccb_cmd_setup(ccb_args *a) {
     }
     free(r8_path);
   }
-  // Host tools: on Termux, the SDK's native tools can exist yet not
-  // run (x86-64 binaries on aarch64). When no runnable copy resolves
-  // (SDK or PATH) and no override pins the choice, install the
-  // platform package. Termux: aapt2 and android-tools from the
-  // official repos, zipalign from the rendiix repo (only when the
-  // official repos have no candidate). Linux: adb from the distro
-  // package manager. aapt2/zipalign on Linux are SDK-native on
-  // x86-64; on aarch64 Linux there is no package fix, so the final
-  // pass warns instead. Best effort: declining, or lacking an
-  // installer, only skips the installs; a failed install errors.
+  return 0;
+}
+
+// One host tool that may need installing from the platform package
+// manager (aapt2, zipalign, or adb).
+typedef struct {
+  const char *tool;
+  const char *pkg;
+  const char *arg;
+  int needs_repo;
+  int needed;
+} ccb_host_tool;
+
+// Works out which host tools still need installing, honouring
+// overrides (config or CCB_* env) and the runnable checks.
+static void ccb_setup_host_tools_needed(ccb_setup_ctx *ctx, ccb_host_tool tools[3]) {
+  int ov_aapt2 = (ctx->cfg != NULL && ctx->cfg->aapt2_override != NULL) || ccb_env_nonempty("CCB_AAPT2");
+  int ov_zipalign = (ctx->cfg != NULL && ctx->cfg->zipalign_override != NULL) || ccb_env_nonempty("CCB_ZIPALIGN");
+  int ov_adb = (ctx->cfg != NULL && ctx->cfg->adb_override != NULL) || ccb_env_nonempty("CCB_ADB");
+  char *bt_dir = ccb_path_join3(ctx->sdk_home, "build-tools", ctx->build_tools);
+  char *sdk_aapt2 = ccb_path_join(bt_dir, "aapt2");
+  char *sdk_zipalign = ccb_path_join(bt_dir, "zipalign");
+  char *sdk_adb = ccb_path_join(ctx->sdk_home, "platform-tools/adb");
+  int need_aapt2 = 0;
+  int need_zipalign = 0;
+  int need_adb = 0;
+  free(bt_dir);
+  need_aapt2 = !ov_aapt2 && !ccb_tool_runs(sdk_aapt2, "version") && !ccb_path_tool_runs("aapt2", "version");
+  need_zipalign = !ov_zipalign && !ccb_tool_runs(sdk_zipalign, NULL) && !ccb_path_tool_runs("zipalign", NULL);
+  need_adb = !ov_adb && !ccb_tool_runs(sdk_adb, "version") && !ccb_path_tool_runs("adb", "version");
+  free(sdk_aapt2);
+  free(sdk_zipalign);
+  free(sdk_adb);
+  tools[0] = (ccb_host_tool){ "aapt2", "aapt2", "version", 0, need_aapt2 };
+  tools[1] = (ccb_host_tool){ "zipalign", "zipalign", NULL, 1, need_zipalign };
+  tools[2] = (ccb_host_tool){ "adb", "android-tools", "version", 0, need_adb };
+}
+
+// Asks whether to install the missing host tools: 1 installs, 0
+// skips. --yes / --upgrade installs without asking; without a
+// terminal it only notes the option.
+static int ccb_setup_host_tools_decide(ccb_args *a, const ccb_jdkinst_info *inst, const ccb_host_tool tools[3]) {
+  if (a->yes || a->upgrade) {
+    return 1;
+  }
+  if (!isatty(STDIN_FILENO)) {
+    fprintf(stderr, "note: run `ccb setup` in a terminal or pass --yes to install the missing host tools.\n");
+    return 0;
+  }
   {
-    int ov_aapt2 = (cfg != NULL && cfg->aapt2_override != NULL) || ccb_env_nonempty("CCB_AAPT2");
-    int ov_zipalign = (cfg != NULL && cfg->zipalign_override != NULL) || ccb_env_nonempty("CCB_ZIPALIGN");
-    int ov_adb = (cfg != NULL && cfg->adb_override != NULL) || ccb_env_nonempty("CCB_ADB");
-    char *bt_dir = ccb_path_join3(sdk_home, "build-tools", build_tools);
-    char *sdk_aapt2 = ccb_path_join(bt_dir, "aapt2");
-    char *sdk_zipalign = ccb_path_join(bt_dir, "zipalign");
-    char *sdk_adb = ccb_path_join(sdk_home, "platform-tools/adb");
-    free(bt_dir);
-    int need_aapt2 = !ov_aapt2 && !ccb_tool_runs(sdk_aapt2, "version") && !ccb_path_tool_runs("aapt2", "version");
-    int need_zipalign = !ov_zipalign && !ccb_tool_runs(sdk_zipalign, NULL) && !ccb_path_tool_runs("zipalign", NULL);
-    int need_adb = !ov_adb && !ccb_tool_runs(sdk_adb, "version") && !ccb_path_tool_runs("adb", "version");
-    free(sdk_aapt2);
-    free(sdk_zipalign);
-    free(sdk_adb);
-    ccb_jdkinst_info inst;
-    ccb_detect_jdkinst(&inst);
-    struct ccb_tool_need { const char *tool; const char *pkg; const char *arg; int needs_repo; int needed; } tools[3] = {
-      { "aapt2", "aapt2", "version", 0, need_aapt2 },
-      { "zipalign", "zipalign", NULL, 1, need_zipalign },
-      { "adb", "android-tools", "version", 0, need_adb },
-    };
-    if (inst.kind != CCB_JDKINST_TERMUX) {
-      // Linux: only adb has a package fix.
-      tools[0].needed = 0;
-      tools[1].needed = 0;
-      if (inst.kind == CCB_JDKINST_APT) {
-        tools[2].pkg = "adb";
+    ccb_str q;
+    int go = 0;
+    int first = 1;
+    ccb_str_init(&q);
+    ccb_str_append(&q, "Install missing host tools via ");
+    ccb_str_append(&q, inst->display);
+    ccb_str_append(&q, " (");
+    for (int i = 0; i < 3; i++) {
+      if (!tools[i].needed) {
+        continue;
       }
+      if (!first) {
+        ccb_str_append(&q, ", ");
+      }
+      ccb_str_append(&q, tools[i].tool);
+      first = 0;
     }
-    int any = tools[0].needed || tools[1].needed || tools[2].needed;
-    if (any && inst.kind != CCB_JDKINST_NONE) {
-      int go = 0;
-      if (a->yes || a->upgrade) {
-        go = 1;
-      } else if (isatty(STDIN_FILENO)) {
-        ccb_str q;
-        ccb_str_init(&q);
-        ccb_str_append(&q, "Install missing host tools via ");
-        ccb_str_append(&q, inst.display);
-        ccb_str_append(&q, " (");
-        int first = 1;
-        for (int i = 0; i < 3; i++) {
-          if (!tools[i].needed) {
-            continue;
-          }
-          if (!first) {
-            ccb_str_append(&q, ", ");
-          }
-          ccb_str_append(&q, tools[i].tool);
-          first = 0;
-        }
-        ccb_str_append(&q, ")?");
-        if (inst.kind == CCB_JDKINST_TERMUX && tools[1].needed && !ccb_termux_repo_present()) {
-          ccb_str_append(&q, " zipalign is not in the official Termux repos, so this adds the rendiix repository (https://rendiix.github.io) for it.");
-        }
-        go = ccb_prompt_yes(q.buf);
-        ccb_str_free(&q);
-        if (!go) {
-          fprintf(stderr, "skipping host tool installs; the final check below lists what is still missing.\n");
-        }
-      } else {
-        fprintf(stderr, "note: run `ccb setup` in a terminal or pass --yes to install the missing host tools.\n");
-      }
-      if (go) {
-        for (int i = 0; i < 3; i++) {
-          if (!tools[i].needed) {
-            continue;
-          }
-          fprintf(stderr, "Installing %s via %s...\n", tools[i].tool, inst.display);
-          if (ccb_setup_install_system_tool(&inst, tools[i].pkg, tools[i].needs_repo) != 0) {
-            fprintf(stderr, "error: failed to install %s via %s.\n", tools[i].tool, inst.display);
-            free(inst.path);
-            free(inst.sudo_path);
-            ccb_str_free(&platform);
-            ccb_str_free(&bt);
-            free(sdkmanager);
-            free(default_home);
-            ccb_config_free(cfg);
-            return 3;
-          }
-          if (!ccb_path_tool_runs(tools[i].tool, tools[i].arg)) {
-            fprintf(stderr, "error: installed %s via %s but no runnable %s found on PATH.\n", tools[i].tool, inst.display, tools[i].tool);
-            free(inst.path);
-            free(inst.sudo_path);
-            ccb_str_free(&platform);
-            ccb_str_free(&bt);
-            free(sdkmanager);
-            free(default_home);
-            ccb_config_free(cfg);
-            return 3;
-          }
-        }
-      }
+    ccb_str_append(&q, ")?");
+    if (inst->kind == CCB_JDKINST_TERMUX && tools[1].needed && !ccb_termux_repo_present()) {
+      ccb_str_append(&q, " zipalign is not in the official Termux repos, so this adds the rendiix repository (https://rendiix.github.io) for it.");
     }
+    go = ccb_prompt_yes(q.buf);
+    ccb_str_free(&q);
+    if (!go) {
+      fprintf(stderr, "skipping host tool installs; the final check below lists what is still missing.\n");
+    }
+    return go;
+  }
+}
+
+// Installs one missing host tool and verifies it runs. Returns 0,
+// or 3 on failure.
+static int ccb_setup_install_host_tool(const ccb_jdkinst_info *inst, const ccb_host_tool *tool) {
+  fprintf(stderr, "Installing %s via %s...\n", tool->tool, inst->display);
+  if (ccb_setup_install_system_tool(inst, tool->pkg, tool->needs_repo) != 0) {
+    fprintf(stderr, "error: failed to install %s via %s.\n", tool->tool, inst->display);
+    return 3;
+  }
+  if (!ccb_path_tool_runs(tool->tool, tool->arg)) {
+    fprintf(stderr, "error: installed %s via %s but no runnable %s found on PATH.\n", tool->tool, inst->display, tool->tool);
+    return 3;
+  }
+  return 0;
+}
+
+// Host tools: on Termux, the SDK's native tools can exist yet not
+// run (x86-64 binaries on aarch64). When no runnable copy resolves
+// (SDK or PATH) and no override pins the choice, install the
+// platform package. Termux: aapt2 and android-tools from the
+// official repos, zipalign from the rendiix repo (only when the
+// official repos have no candidate). Linux: adb from the distro
+// package manager. aapt2/zipalign on Linux are SDK-native on
+// x86-64; on aarch64 Linux there is no package fix, so the final
+// pass warns instead. Best effort: declining, or lacking an
+// installer, only skips the installs; a failed install errors.
+// Returns 0, or 3.
+static int ccb_setup_install_host_tools(ccb_setup_ctx *ctx) {
+  ccb_host_tool tools[3];
+  ccb_jdkinst_info inst;
+  int any = 0;
+  int go = 0;
+  ccb_setup_host_tools_needed(ctx, tools);
+  ccb_detect_jdkinst(&inst);
+  if (inst.kind != CCB_JDKINST_TERMUX) {
+    // Linux: only adb has a package fix.
+    tools[0].needed = 0;
+    tools[1].needed = 0;
+    if (inst.kind == CCB_JDKINST_APT) {
+      tools[2].pkg = "adb";
+    }
+  }
+  any = tools[0].needed || tools[1].needed || tools[2].needed;
+  if (!any || inst.kind == CCB_JDKINST_NONE) {
     free(inst.path);
     free(inst.sudo_path);
+    return 0;
   }
-  // Maven prefetch: the one network step setup owns for dependencies.
-  // Builds never download; a project that declares [deps] maven gets
-  // its artifacts into the local cache here, and a failure stops setup
-  // instead of leaving a half-prefetched cache behind as "ready".
-  if (cfg != NULL && cfg->maven_count > 0) {
-    ccb_maven_result mv;
-    if (ccb_maven_resolve(cfg, 1, a->verbose, 0, &mv, &diags) != CCB_OK) {
-      ccb_print_diags(a, &diags);
-      ccb_diag_list_free(&diags);
-      ccb_str_free(&platform);
-      ccb_str_free(&bt);
-      free(sdkmanager);
-      free(default_home);
-      ccb_config_free(cfg);
-      return 3;
-    }
-    fprintf(stderr, "maven: prefetched %zu artifacts (%zu aar, %zu jar)\n",
-      mv.aars_count + mv.jars_count, mv.aars_count, mv.jars_count);
-    // The lockfile records exactly what was prefetched; builds and
-    // checks enforce it from here on. A lockfile that cannot be
-    // written fails setup: a half-ready project must not read "ready".
-    if (ccb_maven_write_lockfile(cfg, &mv, &diags) != CCB_OK) {
-      ccb_print_diags(a, &diags);
-      ccb_diag_list_free(&diags);
-      ccb_maven_result_free(&mv);
-      ccb_str_free(&platform);
-      ccb_str_free(&bt);
-      free(sdkmanager);
-      free(default_home);
-      ccb_config_free(cfg);
-      return 3;
-    }
-    fprintf(stderr, "maven: lockfile written to ccb.lock\n");
-    ccb_maven_result_free(&mv);
-  }
-  ccb_setup_final_pass(cfg, compile_sdk, build_tools);
-  if (a->print_env) {
-    printf("export ANDROID_HOME=\"%s\"\n", sdk_home);
-    const char *jh = getenv("JAVA_HOME");
-    if (jh != NULL) {
-      printf("export JAVA_HOME=\"%s\"\n", jh);
-    } else {
-      char *java = NULL;
-      int major = 0;
-      if (ccb_sdk_find_java(&java, &major) == CCB_OK) {
-        char *derived = ccb_derive_java_home(java);
-        if (derived != NULL) {
-          printf("export JAVA_HOME=\"%s\"\n", derived);
-          free(derived);
-        }
-        free(java);
+  go = ccb_setup_host_tools_decide(ctx->a, &inst, tools);
+  if (go) {
+    for (int i = 0; i < 3; i++) {
+      if (!tools[i].needed) {
+        continue;
+      }
+      if (ccb_setup_install_host_tool(&inst, &tools[i]) != 0) {
+        free(inst.path);
+        free(inst.sudo_path);
+        return 3;
       }
     }
-    char *kbin = ccb_path_join3(sdk_home, "kotlinc", "bin");
-    if (ccb_path_is_dir(kbin)) {
-      printf("export PATH=\"%s:$PATH\"\n", kbin);
-    }
-    free(kbin);
-    fprintf(stderr, "SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
-  } else {
-    printf("SDK ready at %s (platform android-%ld, build-tools %s)\n", sdk_home, compile_sdk, build_tools);
   }
-  ccb_str_free(&platform);
-  ccb_str_free(&bt);
-  free(sdkmanager);
-  free(default_home);
-  ccb_config_free(cfg);
+  free(inst.path);
+  free(inst.sudo_path);
   return 0;
+}
+
+// Maven prefetch: the one network step setup owns for dependencies.
+// Builds never download; a project that declares [deps] maven gets
+// its artifacts into the local cache here, and a failure stops setup
+// instead of leaving a half-prefetched cache behind as "ready".
+// Returns 0, or 3.
+static int ccb_setup_prefetch_maven(ccb_args *a, ccb_config *cfg) {
+  ccb_diag_list diags;
+  ccb_maven_result mv;
+  if (cfg == NULL || cfg->maven_count <= 0) {
+    return 0;
+  }
+  ccb_diag_list_init(&diags);
+  if (ccb_maven_resolve(cfg, 1, a->verbose, 0, &mv, &diags) != CCB_OK) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    return 3;
+  }
+  fprintf(stderr, "maven: prefetched %zu artifacts (%zu aar, %zu jar)\n",
+    mv.aars_count + mv.jars_count, mv.aars_count, mv.jars_count);
+  // The lockfile records exactly what was prefetched; builds and
+  // checks enforce it from here on. A lockfile that cannot be
+  // written fails setup: a half-ready project must not read "ready".
+  if (ccb_maven_write_lockfile(cfg, &mv, &diags) != CCB_OK) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    ccb_maven_result_free(&mv);
+    return 3;
+  }
+  fprintf(stderr, "maven: lockfile written to ccb.lock\n");
+  ccb_maven_result_free(&mv);
+  return 0;
+}
+
+// Prints the "SDK ready" line, plus the env exports with
+// --print-env.
+static void ccb_setup_print_java_home(void) {
+  const char *jh = getenv("JAVA_HOME");
+  char *java = NULL;
+  int major = 0;
+  char *derived = NULL;
+  if (jh != NULL) {
+    printf("export JAVA_HOME=\"%s\"\n", jh);
+    return;
+  }
+  if (ccb_sdk_find_java(&java, &major) != CCB_OK) {
+    return;
+  }
+  derived = ccb_derive_java_home(java);
+  if (derived != NULL) {
+    printf("export JAVA_HOME=\"%s\"\n", derived);
+    free(derived);
+  }
+  free(java);
+}
+
+static void ccb_setup_print_ready(ccb_args *a, ccb_setup_ctx *ctx) {
+  if (a->print_env) {
+    printf("export ANDROID_HOME=\"%s\"\n", ctx->sdk_home);
+    ccb_setup_print_java_home();
+    {
+      char *kbin = ccb_path_join3(ctx->sdk_home, "kotlinc", "bin");
+      if (ccb_path_is_dir(kbin)) {
+        printf("export PATH=\"%s:$PATH\"\n", kbin);
+      }
+      free(kbin);
+    }
+    fprintf(stderr, "SDK ready at %s (platform android-%ld, build-tools %s)\n", ctx->sdk_home, ctx->compile_sdk, ctx->build_tools);
+  } else {
+    printf("SDK ready at %s (platform android-%ld, build-tools %s)\n", ctx->sdk_home, ctx->compile_sdk, ctx->build_tools);
+  }
+}
+
+static int ccb_cmd_setup(ccb_args *a) {
+  ccb_setup_ctx ctx;
+  int rc = 0;
+  int missing = 0;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.a = a;
+  ctx.compile_sdk = 35;
+  ctx.build_tools = "35.0.0";
+  ccb_str_init(&ctx.platform);
+  ccb_str_init(&ctx.bt);
+  if (ccb_setup_ensure_java(a) != 0) {
+    rc = 3;
+    goto out;
+  }
+  rc = ccb_setup_load_config(a, &ctx.cfg);
+  if (rc != 0) {
+    goto out;
+  }
+  if (ctx.cfg != NULL) {
+    ctx.compile_sdk = ctx.cfg->compile_sdk;
+    ctx.build_tools = ctx.cfg->build_tools;
+  }
+  if (ccb_setup_resolve_sdk_home(&ctx) != 0) {
+    rc = 3;
+    goto out;
+  }
+  ctx.sdkmanager = ccb_find_sdkmanager(ctx.sdk_home);
+  if (ctx.sdkmanager == NULL && ccb_setup_bootstrap_sdkmanager(&ctx) != 0) {
+    rc = 3;
+    goto out;
+  }
+  // Skip sdkmanager entirely when the components are already
+  // present (bug-setup): behind an authenticated egress proxy
+  // sdkmanager cannot fetch at all, so running it can only fail.
+  // The licenses step is skipped with it — there is nothing to
+  // install, so there is nothing to license.
+  missing = ccb_setup_missing_components(ctx.sdk_home, ctx.compile_sdk, ctx.build_tools, NULL);
+  if (missing == 0) {
+    fprintf(stderr, "SDK components already present, skipping sdkmanager\n");
+  }
+  if (missing > 0) {
+    // Accept licenses BEFORE installing: on a fresh SDK an install
+    // attempted before license acceptance installs nothing, and the
+    // old order then reported success anyway (see the verification
+    // below). A licenses failure is only a warning here: the
+    // post-install verification is the arbiter of success.
+    ccb_setup_accept_licenses(&ctx);
+    // Install the components this project needs.
+    if (ccb_setup_install_components(&ctx) != 0) {
+      rc = 3;
+      goto out;
+    }
+  }
+  if (ccb_setup_ensure_kotlinc(&ctx) != 0) {
+    rc = 3;
+    goto out;
+  }
+  if (ccb_setup_ensure_ndk(&ctx) != 0) {
+    rc = 3;
+    goto out;
+  }
+  if (ccb_setup_ensure_r8(&ctx) != 0) {
+    rc = 3;
+    goto out;
+  }
+  if (ccb_setup_install_host_tools(&ctx) != 0) {
+    rc = 3;
+    goto out;
+  }
+  if (ccb_setup_prefetch_maven(a, ctx.cfg) != 0) {
+    rc = 3;
+    goto out;
+  }
+  ccb_setup_final_pass(ctx.cfg, ctx.compile_sdk, ctx.build_tools);
+  ccb_setup_print_ready(a, &ctx);
+out:
+  ccb_str_free(&ctx.platform);
+  ccb_str_free(&ctx.bt);
+  free(ctx.sdkmanager);
+  free(ctx.default_home);
+  ccb_config_free(ctx.cfg);
+  return rc;
 }
 
 // ---------- check / build / clean / doctor ----------
@@ -1957,12 +2154,19 @@ static int ccb_cmd_build(ccb_args *a) {
       "--no-preview-gate\n");
     return 2;
   }
+  if (a->kotlinc_daemon_on && a->kotlinc_daemon_off) {
+    fprintf(stderr, "error: --kotlinc-daemon cannot be combined with "
+      "--no-kotlinc-daemon\n");
+    return 2;
+  }
   memset(&opts, 0, sizeof(opts));
   opts.json = a->json;
   opts.verbose = a->verbose;
   opts.dry_run = a->dry_run;
   opts.explain = a->explain;
   opts.aab = a->aab;
+  opts.kotlinc_daemon_on = a->kotlinc_daemon_on;
+  opts.kotlinc_daemon_off = a->kotlinc_daemon_off;
   opts.variant_override = a->variant;
   opts.config_path = a->config_path;
   ccb_diag_list diags;
@@ -2018,6 +2222,83 @@ static int ccb_cmd_build(ccb_args *a) {
   return 0;
 }
 
+// ---------- daemon ----------
+
+// Stop the project's kotlinc daemon. Returns 1 when a daemon was
+// stopped, 0 when none was running, -1 when the stop could not even
+// run (missing jars, spawn failure, daemon unreachable). The stop
+// client itself exits 0 in both the stopped and the none-running
+// cases, so the outcome comes from its output, not its exit code.
+static int ccb_daemon_stop(const ccb_config *cfg, const ccb_sdk *sdk) {
+  CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
+  char *run_dir = ccb_daemon_run_dir(ar, cfg->build_dir);
+  char **argv = ccb_daemon_stop_argv(ar, sdk->java, sdk->kotlin_home,
+    run_dir);
+  if (argv == NULL) {
+    return -1;
+  }
+  ccb_proc_result r;
+  if (ccb_proc_run(argv, NULL, NULL, &r) != CCB_OK) {
+    return -1;
+  }
+  int stopped = strstr(r.out, "Daemon shut down successfully") != NULL ||
+    strstr(r.err, "Daemon shut down successfully") != NULL;
+  int none = strstr(r.out, "No daemon found to shut down") != NULL ||
+    strstr(r.err, "No daemon found to shut down") != NULL;
+  ccb_proc_result_free(&r);
+  if (stopped) {
+    return 1;
+  }
+  if (none) {
+    return 0;
+  }
+  return -1;
+}
+
+// `ccb daemon stop`: stop the kotlinc daemon for this project.
+// Exit 0 when a daemon was stopped or none was running, 1 when the
+// stop itself failed, 2 on config errors, 3 on toolchain errors.
+static int ccb_cmd_daemon(ccb_args *a) {
+  if (a->positional == NULL || strcmp(a->positional, "stop") != 0) {
+    fprintf(stderr, "error: unknown daemon command '%s'\n",
+      a->positional != NULL ? a->positional : "");
+    fputs(CCB_USAGE, stderr);
+    return 2;
+  }
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  ccb_config *cfg = ccb_load_config_or_die(a, &diags);
+  if (cfg == NULL) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    return 2;
+  }
+  ccb_sdk *sdk = NULL;
+  if (ccb_sdk_resolve(cfg, &sdk, &diags) != CCB_OK) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    ccb_config_free(cfg);
+    return 3;
+  }
+  int rc = ccb_daemon_stop(cfg, sdk);
+  ccb_sdk_free(sdk);
+  ccb_config_free(cfg);
+  ccb_diag_list_free(&diags);
+  if (rc < 0) {
+    fprintf(stderr, "error: could not stop the kotlinc daemon\n");
+    return 1;
+  }
+  if (a->json) {
+    printf("{\"event\":\"daemon_stop\",\"stopped\":%s}\n",
+      rc == 1 ? "true" : "false");
+  } else if (rc == 1) {
+    printf("kotlinc daemon stopped\n");
+  } else {
+    printf("no kotlinc daemon running\n");
+  }
+  return 0;
+}
+
 static int ccb_cmd_clean(ccb_args *a) {
   ccb_diag_list diags;
   ccb_diag_list_init(&diags);
@@ -2025,7 +2306,6 @@ static int ccb_cmd_clean(ccb_args *a) {
   char *build_dir = NULL;
   if (cfg != NULL) {
     build_dir = ccb_xstrdup(cfg->build_dir);
-    ccb_config_free(cfg);
   } else {
     char cwd[4096];
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
@@ -2042,7 +2322,28 @@ static int ccb_cmd_clean(ccb_args *a) {
       printf("{\"event\":\"clean\",\"removed\":false}\n");
     }
     free(build_dir);
+    if (cfg != NULL) {
+      ccb_config_free(cfg);
+    }
     return 0;
+  }
+  // A daemon-enabled project owns a daemon in its build dir: stop it
+  // first, so `clean` leaves no background process behind. Best
+  // effort only — a daemon that cannot be reached still shuts itself
+  // down on idle, and clean must never fail because of it. Skipped
+  // entirely when the daemon was never enabled.
+  if (cfg != NULL && cfg->kotlinc_daemon) {
+    ccb_diag_list sdiags;
+    ccb_diag_list_init(&sdiags);
+    ccb_sdk *sdk = NULL;
+    if (ccb_sdk_resolve(cfg, &sdk, &sdiags) == CCB_OK) {
+      ccb_daemon_stop(cfg, sdk);
+      ccb_sdk_free(sdk);
+    }
+    ccb_diag_list_free(&sdiags);
+  }
+  if (cfg != NULL) {
+    ccb_config_free(cfg);
   }
   if (ccb_remove_recursive(build_dir) != CCB_OK) {
     fprintf(stderr, "error: cannot remove %s\n", build_dir);
@@ -2408,6 +2709,8 @@ static int ccb_cmd_run(ccb_args *a) {
   opts.verbose = a->verbose;
   opts.dry_run = a->dry_run || a->explain;
   opts.variant_override = a->variant;
+  opts.kotlinc_daemon_on = a->kotlinc_daemon_on;
+  opts.kotlinc_daemon_off = a->kotlinc_daemon_off;
   opts.config_path = a->config_path;
   ccb_diag_list diags;
   ccb_diag_list_init(&diags);
@@ -2871,6 +3174,20 @@ static int ccb_preview_watch_dirs_changed(const char *old_dir,
 // prints diagnostics and keeps watching on the last good render; a
 // broken save never kills the loop. Returns 0 on a signal stop, 2 on
 // a watch setup or wait failure.
+// Re-scan the watched dirs after a move and adopt the fresh snapshot,
+// so the move itself does not trigger one spurious refresh. A failed
+// scan keeps the old baseline; the next tick rescans.
+static void ccb_preview_watch_rebaseline(const char *config_dir,
+    const char *cur_styles, const char *cur_flow, const char *toml_path,
+    pv_watch_snapshot **snap) {
+  pv_watch_snapshot *fresh = NULL;
+  if (pv_watch_snapshot_take(config_dir, cur_styles, cur_flow,
+      toml_path, &fresh) == CCB_OK) {
+    pv_watch_snapshot_free(*snap);
+    *snap = fresh;
+  }
+}
+
 static int ccb_preview_watch_loop(ccb_args *a, const char *toml_path,
     const char *config_dir, const char *styles_dir, const char *flow_dir,
     long eff_width, pv_project *proj, long errors,
@@ -2957,8 +3274,7 @@ static int ccb_preview_watch_loop(ccb_args *a, const char *toml_path,
       // the loader did emit.
       ccb_print_diags_human(&rdiags);
       ccb_diag_list_free(&rdiags);
-      if (!ncfg->has_preview || (ncfg->preview_styles == NULL &&
-          ncfg->preview_flow == NULL)) {
+      if (!pv_preview_applicable(ncfg)) {
         fprintf(stderr, "error: preview no longer applicable to this "
           "project; still watching\n");
         ccb_config_free(ncfg);
@@ -3002,14 +3318,8 @@ static int ccb_preview_watch_loop(ccb_args *a, const char *toml_path,
             ccb_xstrdup(ncfg->preview_flow);
           // Re-baseline against the new dirs so the move itself does
           // not trigger one spurious refresh.
-          {
-            pv_watch_snapshot *fresh = NULL;
-            if (pv_watch_snapshot_take(config_dir, cur_styles, cur_flow,
-                toml_path, &fresh) == CCB_OK) {
-              pv_watch_snapshot_free(snap);
-              snap = fresh;
-            }
-          }
+          ccb_preview_watch_rebaseline(config_dir, cur_styles, cur_flow,
+            toml_path, &snap);
         } else {
           fprintf(stderr, "error: cannot watch new preview directories; "
             "still watching the old ones\n");
@@ -3168,21 +3478,49 @@ static int ccb_preview_render_storyboard(ccb_args *a, pv_project *proj,
   return errors > 0 ? 1 : 0;
 }
 
-static int ccb_cmd_preview(ccb_args *a) {
+// Shared state for the `preview` stages. A stage that finishes
+// the command frees the context (config, diags while owned, watch
+// paths) before returning, so no stage repeats the cleanup. After a
+// successful project load the diag list belongs to the project, so
+// diags_owned is cleared and the context no longer frees it.
+typedef struct {
+  ccb_args *a;
   char cwd[4096];
-  char *path = NULL;
+  char *toml_path;
   ccb_diag_list diags;
-  ccb_config *cfg = NULL;
-  pv_project *proj = NULL;
-  ccb_status lrc = CCB_OK;
-  long errors = 0;
-  const char *selected = NULL;
-  pv_screen *selected_screen = NULL;
-  size_t i = 0;
-  // --dry-run and --explain are ignored for preview: it never builds.
-  CCB_UNUSED(a->dry_run);
-  CCB_UNUSED(a->explain);
-  // Conflicting destinations fail loudly instead of guessing.
+  int diags_owned;
+  ccb_config *cfg;
+  char *watch_toml;
+  char *watch_config_dir;
+  char *watch_styles;
+  char *watch_flow;
+  long eff_width;
+} ccb_preview_ctx;
+
+static void ccb_preview_ctx_free(ccb_preview_ctx *ctx) {
+  free(ctx->toml_path);
+  ctx->toml_path = NULL;
+  if (ctx->diags_owned) {
+    ccb_diag_list_free(&ctx->diags);
+    ctx->diags_owned = 0;
+  }
+  ccb_config_free(ctx->cfg);
+  ctx->cfg = NULL;
+  ccb_preview_watch_paths_free(ctx->watch_toml, ctx->watch_config_dir,
+    ctx->watch_styles, ctx->watch_flow);
+  ctx->watch_toml = NULL;
+  ctx->watch_config_dir = NULL;
+  ctx->watch_styles = NULL;
+  ctx->watch_flow = NULL;
+}
+
+// Preview stages return 1 when the command is finished (exit code
+// in *rc) and 0 to continue to the next stage. The flag-conflict
+// checks below return a plain exit code instead: 0 to continue,
+// 2 on a conflict.
+
+// Conflicting destinations fail loudly instead of guessing.
+static int ccb_preview_check_output_conflicts(ccb_args *a) {
   if (a->preview_output != NULL && a->preview_update_goldens) {
     fprintf(stderr, "error: --output cannot be combined with "
       "--update-goldens\n");
@@ -3213,10 +3551,14 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--walk\n");
     return 2;
   }
-  // Chunk 4: tree-live is interactive like walk, so it rejects the
-  // other output modes the same way. --scenario/--trace compose
-  // (they are passed to the spawned server); --screen and a
-  // positional screen select the initial screen.
+  return 0;
+}
+
+// Tree-live is interactive like walk, so it rejects the other
+// output modes the same way. --scenario/--trace compose (they are
+// passed to the spawned server); --screen and a positional screen
+// select the initial screen.
+static int ccb_preview_check_tree_live_conflicts(ccb_args *a) {
   if (a->preview_tree_live && a->preview_walk) {
     fprintf(stderr, "error: --tree-live cannot be combined with "
       "--walk\n");
@@ -3247,6 +3589,10 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--storyboard\n");
     return 2;
   }
+  return 0;
+}
+
+static int ccb_preview_check_diff_conflicts(ccb_args *a) {
   if (a->preview_diff != NULL && a->preview_watch) {
     fprintf(stderr, "error: --diff cannot be combined with --watch\n");
     return 2;
@@ -3260,6 +3606,10 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--update-goldens\n");
     return 2;
   }
+  return 0;
+}
+
+static int ccb_preview_check_storyboard_conflicts(ccb_args *a) {
   if (a->preview_storyboard != NULL && a->preview_screen != NULL) {
     fprintf(stderr, "error: --storyboard cannot be combined with "
       "--screen\n");
@@ -3290,10 +3640,14 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--update-goldens\n");
     return 2;
   }
-  // Chunk 1: a scenario applies to the plain render (human or
-  // --json) only. Walk takes it later, and watch/diff/storyboard/
-  // goldens each own their own project load; failing loudly beats
-  // silently rendering without the scenario.
+  return 0;
+}
+
+// A scenario applies to the plain render (human or --json) only.
+// Walk takes it later, and watch/diff/storyboard/goldens each own
+// their own project load; failing loudly beats silently rendering
+// without the scenario.
+static int ccb_preview_check_scenario_conflicts(ccb_args *a) {
   if (a->preview_scenario != NULL && a->preview_walk) {
     fprintf(stderr, "error: --scenario cannot be combined with "
       "--walk (walk takes --scenario in a later chunk)\n");
@@ -3319,11 +3673,15 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--update-goldens (goldens cover the no-scenario baseline)\n");
     return 2;
   }
-  // Chunk 2: --record only makes sense with --walk (it records the
-  // walk), and --trace is a render overlay, so it rejects the other
-  // render modes the same way --scenario does. --trace composes
-  // with --scenario (scenario applies at load, trace after), and
-  // with --json/--screen/--output like any plain render.
+  return 0;
+}
+
+// --record only makes sense with --walk (it records the walk), and
+// --trace is a render overlay, so it rejects the other render modes
+// the same way --scenario does. --trace composes with --scenario
+// (scenario applies at load, trace after), and with
+// --json/--screen/--output like any plain render.
+static int ccb_preview_check_trace_conflicts(ccb_args *a) {
   if (a->preview_record != NULL && !a->preview_walk) {
     fprintf(stderr, "error: --record requires --walk\n");
     return 2;
@@ -3353,33 +3711,74 @@ static int ccb_cmd_preview(ccb_args *a) {
       "--update-goldens (goldens cover the no-trace baseline)\n");
     return 2;
   }
-  if (getcwd(cwd, sizeof(cwd)) == NULL) {
-    fprintf(stderr, "error: cannot determine working directory\n");
-    return 2;
+  return 0;
+}
+
+// Runs the flag-conflict checks in their original order, so the
+// first conflict reported is the same as before.
+static int ccb_preview_check_flags(ccb_args *a, int *rc) {
+  *rc = ccb_preview_check_output_conflicts(a);
+  if (*rc == 0) {
+    *rc = ccb_preview_check_tree_live_conflicts(a);
   }
-  if (ccb_config_discover(cwd, a->config_path, &path) != CCB_OK) {
-    if (a->config_path == NULL) {
-      // No project here at all: preview simply does not apply.
-      // A diff, though, needs something to compare against, so it
-      // is a usage error here rather than "not applicable".
-      if (a->preview_diff != NULL) {
-        fprintf(stderr, "error: --diff requires a project: no ccb.toml "
-          "found in this directory or any parent\n");
-        return 2;
-      }
-      // With --output the message goes to the file, not stdout.
-      if (a->preview_output != NULL) {
-        if (ccb_preview_write_file(a->preview_output,
-            "preview not applicable to this project\n",
-            strlen("preview not applicable to this project\n")) != 0) {
-          return 2;
-        }
-        return 0;
-      }
-      printf("preview not applicable to this project\n");
-      return 0;
+  if (*rc == 0) {
+    *rc = ccb_preview_check_diff_conflicts(a);
+  }
+  if (*rc == 0) {
+    *rc = ccb_preview_check_storyboard_conflicts(a);
+  }
+  if (*rc == 0) {
+    *rc = ccb_preview_check_scenario_conflicts(a);
+  }
+  if (*rc == 0) {
+    *rc = ccb_preview_check_trace_conflicts(a);
+  }
+  return *rc != 0;
+}
+
+// No project here at all: preview simply does not apply. A diff,
+// though, needs something to compare against, so it is a usage
+// error here rather than "not applicable".
+static int ccb_preview_no_project(ccb_args *a, int *rc) {
+  if (a->preview_diff != NULL) {
+    fprintf(stderr, "error: --diff requires a project: no ccb.toml "
+      "found in this directory or any parent\n");
+    *rc = 2;
+    return 1;
+  }
+  // With --output the message goes to the file, not stdout.
+  if (a->preview_output != NULL) {
+    if (ccb_preview_write_file(a->preview_output,
+        "preview not applicable to this project\n",
+        strlen("preview not applicable to this project\n")) != 0) {
+      *rc = 2;
+    } else {
+      *rc = 0;
     }
-    // An explicit --config pointing at a missing file is a config error.
+    return 1;
+  }
+  printf("preview not applicable to this project\n");
+  *rc = 0;
+  return 1;
+}
+
+// Finds the project config by upward search. On success the path
+// is kept in ctx->toml_path.
+static int ccb_preview_discover_config(ccb_args *a, ccb_preview_ctx *ctx, int *rc) {
+  if (getcwd(ctx->cwd, sizeof(ctx->cwd)) == NULL) {
+    fprintf(stderr, "error: cannot determine working directory\n");
+    *rc = 2;
+    return 1;
+  }
+  if (ccb_config_discover(ctx->cwd, a->config_path, &ctx->toml_path) == CCB_OK) {
+    return 0;
+  }
+  if (a->config_path == NULL) {
+    return ccb_preview_no_project(a, rc);
+  }
+  // An explicit --config pointing at a missing file is a config error.
+  {
+    ccb_diag_list diags;
     ccb_diag_list_init(&diags);
     {
       ccb_diag d = ccb_diag_make("CCB-E1009", "config",
@@ -3388,349 +3787,449 @@ static int ccb_cmd_preview(ccb_args *a) {
     }
     ccb_print_diags(a, &diags);
     ccb_diag_list_free(&diags);
-    return 2;
   }
-  ccb_diag_list_init(&diags);
-  if (ccb_config_load(path, a->variant, &cfg, &diags) != CCB_OK) {
-    ccb_print_diags(a, &diags);
-    ccb_diag_list_free(&diags);
-    free(path);
-    return 2;
+  *rc = 2;
+  return 1;
+}
+
+// Loads the discovered config. For --watch, keeps the toml path,
+// its directory, and the resolved preview dirs alive for the loop's
+// lifetime: the loop re-loads config from the toml path on every
+// change, and the [preview] paths may themselves move.
+static int ccb_preview_load_config(ccb_args *a, ccb_preview_ctx *ctx, int *rc) {
+  ccb_diag_list_init(&ctx->diags);
+  ctx->diags_owned = 1;
+  if (ccb_config_load(ctx->toml_path, a->variant, &ctx->cfg, &ctx->diags) != CCB_OK) {
+    ccb_print_diags(a, &ctx->diags);
+    ccb_preview_ctx_free(ctx);
+    *rc = 2;
+    return 1;
   }
-  // Watch mode keeps the discovered toml path, its directory, and the
-  // resolved preview dirs alive for the loop's lifetime: the loop
-  // re-loads config from the toml path on every change, and the
-  // [preview] paths may themselves move. All four are NULL when
-  // --watch is not set; the early exits below free them.
-  char *watch_toml = NULL;
-  char *watch_config_dir = NULL;
-  char *watch_styles = NULL;
-  char *watch_flow = NULL;
   if (a->preview_watch) {
-    watch_toml = ccb_xstrdup(path);
-    watch_config_dir = ccb_dirname(path);
-    watch_styles = cfg->preview_styles == NULL ? NULL :
-      ccb_xstrdup(cfg->preview_styles);
-    watch_flow = cfg->preview_flow == NULL ? NULL :
-      ccb_xstrdup(cfg->preview_flow);
+    ctx->watch_toml = ccb_xstrdup(ctx->toml_path);
+    ctx->watch_config_dir = ccb_dirname(ctx->toml_path);
+    ctx->watch_styles = ctx->cfg->preview_styles == NULL ? NULL :
+      ccb_xstrdup(ctx->cfg->preview_styles);
+    ctx->watch_flow = ctx->cfg->preview_flow == NULL ? NULL :
+      ccb_xstrdup(ctx->cfg->preview_flow);
   }
-  free(path);
-  if (a->preview_diff != NULL) {
-    // Diff runs its own project load: it must report a project without
-    // a usable [preview] section as exit 2, not the plain preview's
-    // exit-0 "not applicable", so it branches before the
-    // not-applicable early return below. --screen overrides the
-    // positional screen, as in the normal render path.
-    const char *diff_screen = a->preview_screen != NULL ?
-      a->preview_screen : a->positional;
-    long diff_width = a->preview_width;
-    ccb_str out, err;
-    int drc = 0;
-    if (!a->preview_width_set && a->preview_device != NULL) {
-      diff_width = strcmp(a->preview_device, "tablet") == 0 ?
-        CCB_PREVIEW_TABLET_WIDTH : CCB_PREVIEW_PHONE_WIDTH;
-    }
-    ccb_str_init(&out);
-    ccb_str_init(&err);
-    drc = pv_diff_run(cfg, a->preview_diff, diff_screen, diff_width,
-      a->preview_ascii, a->preview_strict, a->json, &out, &err);
-    if (err.buf != NULL && err.buf[0] != '\0') {
-      fputs(err.buf, stderr);
-    }
-    if (drc == 0 || drc == 1) {
-      if (a->json) {
-        ccb_str_append(&out, "\n");
-      }
-      if (a->preview_output != NULL) {
-        int wrc = ccb_preview_write_file(a->preview_output,
-          out.buf != NULL ? out.buf : "",
-          strlen(out.buf != NULL ? out.buf : ""));
-        ccb_str_free(&out);
-        ccb_str_free(&err);
-        ccb_config_free(cfg);
-        ccb_diag_list_free(&diags);
-        ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-          watch_styles, watch_flow);
-        return wrc == 0 ? drc : 2;
-      }
-      fputs(out.buf != NULL ? out.buf : "", stdout);
-    }
-    ccb_str_free(&out);
-    ccb_str_free(&err);
-    ccb_config_free(cfg);
-    ccb_diag_list_free(&diags);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
-    return drc;
+  return 0;
+}
+
+// Diff runs its own project load: it must report a project without
+// a usable [preview] section as exit 2, not the plain preview's
+// exit-0 "not applicable", so it branches before the
+// not-applicable early return below. --screen overrides the
+// positional screen, as in the normal render path.
+static int ccb_preview_run_diff(ccb_args *a, ccb_preview_ctx *ctx, int *rc) {
+  const char *diff_screen = a->preview_screen != NULL ?
+    a->preview_screen : a->positional;
+  long diff_width = a->preview_width;
+  ccb_str out;
+  ccb_str err;
+  int drc = 0;
+  if (a->preview_diff == NULL) {
+    return 0;
   }
-  if (!cfg->has_preview || (cfg->preview_styles == NULL &&
-      cfg->preview_flow == NULL)) {
+  if (!a->preview_width_set && a->preview_device != NULL) {
+    diff_width = strcmp(a->preview_device, "tablet") == 0 ?
+      CCB_PREVIEW_TABLET_WIDTH : CCB_PREVIEW_PHONE_WIDTH;
+  }
+  ccb_str_init(&out);
+  ccb_str_init(&err);
+  drc = pv_diff_run(ctx->cfg, a->preview_diff, diff_screen, diff_width,
+    a->preview_ascii, a->preview_strict, a->json, &out, &err);
+  if (err.buf != NULL && err.buf[0] != '\0') {
+    fputs(err.buf, stderr);
+  }
+  if (drc == 0 || drc == 1) {
+    if (a->json) {
+      ccb_str_append(&out, "\n");
+    }
     if (a->preview_output != NULL) {
-      int rc = ccb_preview_write_file(a->preview_output,
+      int wrc = ccb_preview_write_file(a->preview_output,
+        out.buf != NULL ? out.buf : "",
+        strlen(out.buf != NULL ? out.buf : ""));
+      ccb_str_free(&out);
+      ccb_str_free(&err);
+      ccb_preview_ctx_free(ctx);
+      *rc = wrc == 0 ? drc : 2;
+      return 1;
+    }
+    fputs(out.buf != NULL ? out.buf : "", stdout);
+  }
+  ccb_str_free(&out);
+  ccb_str_free(&err);
+  ccb_preview_ctx_free(ctx);
+  *rc = drc;
+  return 1;
+}
+
+// The plain preview's "not applicable" early return.
+static int ccb_preview_check_applicable(ccb_args *a, ccb_preview_ctx *ctx, int *rc) {
+  if (pv_preview_applicable(ctx->cfg)) {
+    return 0;
+  }
+  if (a->preview_output != NULL) {
+    int wrc = ccb_preview_write_file(a->preview_output,
+      "preview not applicable to this project\n",
+      strlen("preview not applicable to this project\n"));
+    ccb_preview_ctx_free(ctx);
+    *rc = wrc == 0 ? 0 : 2;
+    return 1;
+  }
+  printf("preview not applicable to this project\n");
+  ccb_preview_ctx_free(ctx);
+  *rc = 0;
+  return 1;
+}
+
+// Resolves the scenario by name before the config is freed. An
+// unknown name is a usage error (exit 2), like an unknown --screen
+// — distinct from a scenario entry that matches nothing, which
+// warns (CCB-P1022) during the load.
+static int ccb_preview_resolve_scenario(ccb_args *a, ccb_preview_ctx *ctx, const ccb_scenario **scenario_out, int *rc) {
+  size_t i = 0;
+  *scenario_out = NULL;
+  if (a->preview_scenario == NULL) {
+    return 0;
+  }
+  *scenario_out = ccb_config_scenario(ctx->cfg, a->preview_scenario);
+  if (*scenario_out != NULL) {
+    return 0;
+  }
+  fprintf(stderr, "error: unknown scenario '%s'\n", a->preview_scenario);
+  fprintf(stderr, "available scenarios:");
+  for (i = 0; i < ctx->cfg->preview_scenario_count; i++) {
+    fprintf(stderr, " %s",
+      ctx->cfg->preview_scenarios[i].name != NULL ?
+      ctx->cfg->preview_scenarios[i].name : "?");
+  }
+  fprintf(stderr, "\n");
+  ccb_preview_ctx_free(ctx);
+  *rc = 2;
+  return 1;
+}
+
+// Reads and parses the --trace file. Returns 0 with *trace_out set,
+// or 2 after printing the usage error.
+static int ccb_preview_read_trace(ccb_args *a, pv_trace **trace_out) {
+  char *ttext = NULL;
+  size_t tlen = 0;
+  char *terr = NULL;
+  pv_trace *trace = NULL;
+  *trace_out = NULL;
+  if (ccb_read_file(a->preview_trace, &ttext, &tlen) != CCB_OK) {
+    fprintf(stderr, "error: cannot read trace file '%s'\n",
+      a->preview_trace);
+    return 2;
+  }
+  trace = pv_trace_parse(ttext, &terr);
+  free(ttext);
+  if (trace == NULL) {
+    fprintf(stderr, "error: invalid trace file '%s': %s\n",
+      a->preview_trace, terr != NULL ? terr : "parse error");
+    free(terr);
+    return 2;
+  }
+  *trace_out = trace;
+  return 0;
+}
+
+// Tree-live spawns the server instead of loading a project locally,
+// so it branches before the load. The scenario was already validated
+// above; the trace is validated here (read + parse, exit 2 on
+// failure) so a bad --trace is a usage error, not a server that dies
+// mid-session. The server root is re-discovered rather than kept
+// from the freed toml path, so this branch owns no extra lifetime.
+static int ccb_preview_run_tree_live(ccb_args *a, ccb_preview_ctx *ctx, int *rc) {
+  char *root_path = NULL;
+  char *root_dir = NULL;
+  const char *start = a->preview_screen != NULL ?
+    a->preview_screen : a->positional;
+  int trc = 0;
+  if (!a->preview_tree_live) {
+    return 0;
+  }
+  if (ccb_config_discover(ctx->cwd, a->config_path, &root_path) != CCB_OK) {
+    fprintf(stderr, "error: no ccb.toml found in this directory "
+      "or any parent\n");
+    ccb_preview_ctx_free(ctx);
+    *rc = 2;
+    return 1;
+  }
+  root_dir = ccb_dirname(root_path);
+  free(root_path);
+  if (a->preview_trace != NULL) {
+    pv_trace *trace = NULL;
+    if (ccb_preview_read_trace(a, &trace) != 0) {
+      free(root_dir);
+      ccb_preview_ctx_free(ctx);
+      *rc = 2;
+      return 1;
+    }
+    pv_trace_free(trace);
+  }
+  trc = pv_tree_run(NULL, root_dir, a->preview_scenario,
+    a->preview_trace, start);
+  free(root_dir);
+  ccb_preview_ctx_free(ctx);
+  *rc = trc;
+  return 1;
+}
+
+// Loads the project with the resolved scenario. On CCB_ERR_CONFIG
+// the project is not applicable, which is exit 0 like the plain
+// path. On success the config is freed and the diag list belongs to
+// the project.
+static int ccb_preview_load_project(ccb_args *a, ccb_preview_ctx *ctx, const ccb_scenario *scenario, pv_project **proj_out, int *rc) {
+  ccb_status lrc = CCB_OK;
+  pv_project *proj = NULL;
+  *proj_out = NULL;
+  lrc = pv_project_load_scenario(ctx->cfg, ctx->eff_width, a->preview_ascii,
+    a->preview_strict, &ctx->diags, scenario, &proj);
+  if (lrc == CCB_ERR_CONFIG) {
+    if (a->preview_output != NULL) {
+      int wrc = ccb_preview_write_file(a->preview_output,
         "preview not applicable to this project\n",
         strlen("preview not applicable to this project\n"));
-      ccb_config_free(cfg);
-      ccb_diag_list_free(&diags);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return rc == 0 ? 0 : 2;
+      ccb_preview_ctx_free(ctx);
+      *rc = wrc == 0 ? 0 : 2;
+      return 1;
     }
     printf("preview not applicable to this project\n");
-    ccb_config_free(cfg);
-    ccb_diag_list_free(&diags);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
+    ccb_preview_ctx_free(ctx);
+    *rc = 0;
+    return 1;
+  }
+  if (lrc != CCB_OK || proj == NULL) {
+    ccb_print_diags(a, &ctx->diags);
+    ccb_preview_ctx_free(ctx);
+    *rc = 2;
+    return 1;
+  }
+  // From here the diag list belongs to the project; the caller's list
+  // was left empty by pv_project_load, so it must not be freed again.
+  ctx->diags_owned = 0;
+  ccb_config_free(ctx->cfg);
+  ctx->cfg = NULL;
+  *proj_out = proj;
+  return 0;
+}
+
+// Applies the trace after load (marks and argument fills do not
+// affect layout, so post-load is fine) and before diagnose, so trace
+// warnings print with the rest. A missing or malformed trace file is
+// a usage error (exit 2); a step that matches nothing warns
+// (CCB-P1023) during apply and rendering continues. A scenario
+// applied at load keeps its values: the trace only fills slots still
+// unknown.
+static int ccb_preview_apply_trace(ccb_args *a, ccb_preview_ctx *ctx, pv_project *proj, int *rc) {
+  pv_trace *trace = NULL;
+  if (a->preview_trace == NULL) {
     return 0;
+  }
+  if (ccb_preview_read_trace(a, &trace) != 0) {
+    pv_project_free(proj);
+    ccb_preview_ctx_free(ctx);
+    *rc = 2;
+    return 1;
+  }
+  pv_trace_apply(proj, trace, &proj->diags);
+  pv_trace_free(trace);
+  return 0;
+}
+
+// Renders the storyboard's screen journey. Always finishes the
+// command when --storyboard is set.
+static int ccb_preview_run_storyboard(ccb_args *a, ccb_preview_ctx *ctx, pv_project *proj, long errors, int *rc) {
+  size_t njourney = 0;
+  pv_screen **journey = NULL;
+  int src = 0;
+  if (a->preview_storyboard == NULL) {
+    return 0;
+  }
+  journey = ccb_preview_storyboard_parse(proj, a->preview_storyboard, &njourney);
+  if (journey == NULL) {
+    pv_project_free(proj);
+    ccb_preview_ctx_free(ctx);
+    *rc = 2;
+    return 1;
+  }
+  src = ccb_preview_render_storyboard(a, proj, journey, njourney, errors);
+  free(journey);
+  pv_project_free(proj);
+  ccb_preview_ctx_free(ctx);
+  *rc = src;
+  return 1;
+}
+
+// Screen selection: --screen overrides the positional argument. An
+// unknown screen is exit 1 with the available screens listed.
+static int ccb_preview_select_screen(ccb_preview_ctx *ctx, pv_project *proj, const char *selected, pv_screen **screen_out, int *rc) {
+  pv_screen *selected_screen = NULL;
+  size_t i = 0;
+  *screen_out = NULL;
+  if (selected == NULL) {
+    return 0;
+  }
+  for (i = 0; i < proj->nscreens; i++) {
+    if (proj->screens[i]->name != NULL &&
+        strcmp(proj->screens[i]->name, selected) == 0) {
+      selected_screen = proj->screens[i];
+      break;
+    }
+  }
+  if (selected_screen != NULL) {
+    *screen_out = selected_screen;
+    return 0;
+  }
+  fprintf(stderr, "error: no screen named '%s'\n", selected);
+  fprintf(stderr, "available screens:");
+  for (i = 0; i < proj->nscreens; i++) {
+    fprintf(stderr, " %s",
+      proj->screens[i]->name != NULL ? proj->screens[i]->name : "?");
+  }
+  fprintf(stderr, "\nusage: ccb preview [--screen NAME] [--walk] [screen]\n");
+  pv_project_free(proj);
+  ccb_preview_ctx_free(ctx);
+  *rc = 1;
+  return 1;
+}
+
+// Interactive walk mode. Always finishes the command when --walk
+// is set.
+static int ccb_preview_run_walk(ccb_args *a, ccb_preview_ctx *ctx, pv_project *proj, pv_screen *selected_screen, int *rc) {
+  int color = 0;
+  int wrc = 0;
+  if (!a->preview_walk) {
+    return 0;
+  }
+  if (!a->preview_ascii && getenv("NO_COLOR") == NULL) {
+    const char *term = getenv("TERM");
+    color = term == NULL || strcmp(term, "dumb") != 0;
+  }
+  wrc = pv_walk_run(proj,
+    selected_screen != NULL ? selected_screen->name : NULL,
+    proj->frame_width, a->preview_ascii, color, a->preview_record);
+  pv_project_free(proj);
+  ccb_preview_ctx_free(ctx);
+  *rc = wrc;
+  return 1;
+}
+
+// Watch mode: the loop takes proj, and the caller's path copies are
+// freed after it returns. Always finishes the command when --watch
+// is set.
+static int ccb_preview_run_watch(ccb_args *a, ccb_preview_ctx *ctx, pv_project *proj, long errors, const char *selected, int *rc) {
+  int wrc = 0;
+  if (!a->preview_watch) {
+    return 0;
+  }
+  wrc = ccb_preview_watch_loop(a, ctx->watch_toml, ctx->watch_config_dir,
+    ctx->watch_styles, ctx->watch_flow, ctx->eff_width, proj, errors, selected);
+  ccb_preview_ctx_free(ctx);
+  *rc = wrc;
+  return 1;
+}
+
+// Golden update mode. A write failure (2) dominates; otherwise
+// preview errors (1) still surface, matching a plain preview run.
+// Always finishes the command when --update-goldens is set.
+static int ccb_preview_run_goldens(ccb_args *a, ccb_preview_ctx *ctx, pv_project *proj, long errors, int *rc) {
+  char *golden_dir = NULL;
+  int grc = 0;
+  if (!a->preview_update_goldens) {
+    return 0;
+  }
+  golden_dir = ccb_preview_golden_dir(ctx->cwd);
+  if (golden_dir == NULL) {
+    pv_project_free(proj);
+    ccb_preview_ctx_free(ctx);
+    *rc = 2;
+    return 1;
+  }
+  grc = ccb_preview_update_goldens(proj, a->preview_ascii, golden_dir);
+  free(golden_dir);
+  pv_project_free(proj);
+  ccb_preview_ctx_free(ctx);
+  *rc = grc != 0 ? grc : (errors > 0 ? 1 : 0);
+  return 1;
+}
+
+static int ccb_cmd_preview(ccb_args *a) {
+  ccb_preview_ctx ctx;
+  pv_project *proj = NULL;
+  const ccb_scenario *scenario = NULL;
+  const char *selected = NULL;
+  pv_screen *selected_screen = NULL;
+  long errors = 0;
+  int rc = 0;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.a = a;
+  // --dry-run and --explain are ignored for preview: it never builds.
+  CCB_UNUSED(a->dry_run);
+  CCB_UNUSED(a->explain);
+  if (ccb_preview_check_flags(a, &rc)) {
+    return rc;
+  }
+  if (ccb_preview_discover_config(a, &ctx, &rc)) {
+    return rc;
+  }
+  if (ccb_preview_load_config(a, &ctx, &rc)) {
+    return rc;
+  }
+  if (ccb_preview_run_diff(a, &ctx, &rc)) {
+    return rc;
+  }
+  if (ccb_preview_check_applicable(a, &ctx, &rc)) {
+    return rc;
   }
   // Effective frame width: an explicit --width always wins over
   // --device; otherwise the device preset applies (phone = the
   // default 40, tablet = 80); with neither, 0 lets load use its
   // default. Hoisted out of the block so the watch loop reuses the
   // same width on every reload.
-  long eff_width = a->preview_width;
+  ctx.eff_width = a->preview_width;
   if (!a->preview_width_set && a->preview_device != NULL) {
-    eff_width = strcmp(a->preview_device, "tablet") == 0 ?
+    ctx.eff_width = strcmp(a->preview_device, "tablet") == 0 ?
       CCB_PREVIEW_TABLET_WIDTH : CCB_PREVIEW_PHONE_WIDTH;
   }
-  // Chunk 1: resolve the scenario by name before the config is
-  // freed. An unknown name is a usage error (exit 2), like an
-  // unknown --screen — distinct from a scenario entry that matches
-  // nothing, which warns (CCB-P1022) during the load.
-  const ccb_scenario *scenario = NULL;
-  if (a->preview_scenario != NULL) {
-    scenario = ccb_config_scenario(cfg, a->preview_scenario);
-    if (scenario == NULL) {
-      fprintf(stderr, "error: unknown scenario '%s'\n",
-        a->preview_scenario);
-      fprintf(stderr, "available scenarios:");
-      for (i = 0; i < cfg->preview_scenario_count; i++) {
-        fprintf(stderr, " %s",
-          cfg->preview_scenarios[i].name != NULL ?
-          cfg->preview_scenarios[i].name : "?");
-      }
-      fprintf(stderr, "\n");
-      ccb_config_free(cfg);
-      ccb_diag_list_free(&diags);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return 2;
-    }
+  if (ccb_preview_resolve_scenario(a, &ctx, &scenario, &rc)) {
+    return rc;
   }
-  // Chunk 4: tree-live spawns the server instead of loading a
-  // project locally, so it branches before the load. The scenario
-  // was already validated above; the trace is validated here
-  // (read + parse, exit 2 on failure) so a bad --trace is a usage
-  // error, not a server that dies mid-session. The server root is
-  // re-discovered rather than kept from the freed toml path, so
-  // this branch owns no extra lifetime.
-  if (a->preview_tree_live) {
-    char *root_path = NULL;
-    char *root_dir = NULL;
-    const char *start = a->preview_screen != NULL ?
-      a->preview_screen : a->positional;
-    int trc = 0;
-    if (ccb_config_discover(cwd, a->config_path, &root_path) !=
-        CCB_OK) {
-      fprintf(stderr, "error: no ccb.toml found in this directory "
-        "or any parent\n");
-      ccb_config_free(cfg);
-      ccb_diag_list_free(&diags);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return 2;
-    }
-    root_dir = ccb_dirname(root_path);
-    free(root_path);
-    if (a->preview_trace != NULL) {
-      char *ttext = NULL;
-      size_t tlen = 0;
-      char *terr = NULL;
-      pv_trace *trace = NULL;
-      if (ccb_read_file(a->preview_trace, &ttext, &tlen) != CCB_OK) {
-        fprintf(stderr, "error: cannot read trace file '%s'\n",
-          a->preview_trace);
-        free(root_dir);
-        ccb_config_free(cfg);
-        ccb_diag_list_free(&diags);
-        ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-          watch_styles, watch_flow);
-        return 2;
-      }
-      trace = pv_trace_parse(ttext, &terr);
-      free(ttext);
-      if (trace == NULL) {
-        fprintf(stderr, "error: invalid trace file '%s': %s\n",
-          a->preview_trace, terr != NULL ? terr : "parse error");
-        free(terr);
-        free(root_dir);
-        ccb_config_free(cfg);
-        ccb_diag_list_free(&diags);
-        ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-          watch_styles, watch_flow);
-        return 2;
-      }
-      pv_trace_free(trace);
-    }
-    trc = pv_tree_run(NULL, root_dir, a->preview_scenario,
-      a->preview_trace, start);
-    free(root_dir);
-    ccb_config_free(cfg);
-    ccb_diag_list_free(&diags);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
-    return trc;
+  if (ccb_preview_run_tree_live(a, &ctx, &rc)) {
+    return rc;
   }
-  lrc = pv_project_load_scenario(cfg, eff_width, a->preview_ascii,
-    a->preview_strict, &diags, scenario, &proj);
-  if (lrc == CCB_ERR_CONFIG) {
-    if (a->preview_output != NULL) {
-      int rc = ccb_preview_write_file(a->preview_output,
-        "preview not applicable to this project\n",
-        strlen("preview not applicable to this project\n"));
-      ccb_diag_list_free(&diags);
-      ccb_config_free(cfg);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return rc == 0 ? 0 : 2;
-    }
-    printf("preview not applicable to this project\n");
-    ccb_diag_list_free(&diags);
-    ccb_config_free(cfg);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
-    return 0;
+  if (ccb_preview_load_project(a, &ctx, scenario, &proj, &rc)) {
+    return rc;
   }
-  if (lrc != CCB_OK || proj == NULL) {
-    ccb_print_diags(a, &diags);
-    ccb_diag_list_free(&diags);
-    ccb_config_free(cfg);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
-    return 2;
-  }
-  // From here the diag list belongs to the project; the caller's list
-  // was left empty by pv_project_load, so it must not be freed again.
-  ccb_config_free(cfg);
-  // Chunk 2: apply the trace after load (marks and argument fills
-  // do not affect layout, so post-load is fine) and before
-  // diagnose, so trace warnings print with the rest. A missing or
-  // malformed trace file is a usage error (exit 2); a step that
-  // matches nothing warns (CCB-P1023) during apply and rendering
-  // continues. A scenario applied at load keeps its values: the
-  // trace only fills slots still unknown.
-  if (a->preview_trace != NULL) {
-    char *ttext = NULL;
-    size_t tlen = 0;
-    char *terr = NULL;
-    pv_trace *trace = NULL;
-    if (ccb_read_file(a->preview_trace, &ttext, &tlen) != CCB_OK) {
-      fprintf(stderr, "error: cannot read trace file '%s'\n",
-        a->preview_trace);
-      pv_project_free(proj);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return 2;
-    }
-    trace = pv_trace_parse(ttext, &terr);
-    free(ttext);
-    if (trace == NULL) {
-      fprintf(stderr, "error: invalid trace file '%s': %s\n",
-        a->preview_trace, terr != NULL ? terr : "parse error");
-      free(terr);
-      pv_project_free(proj);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return 2;
-    }
-    pv_trace_apply(proj, trace, &proj->diags);
-    pv_trace_free(trace);
+  if (ccb_preview_apply_trace(a, &ctx, proj, &rc)) {
+    return rc;
   }
   errors = pv_project_diagnose(proj);
-  if (a->preview_storyboard != NULL) {
-    size_t njourney = 0;
-    pv_screen **journey = ccb_preview_storyboard_parse(proj,
-      a->preview_storyboard, &njourney);
-    int rc = 0;
-    if (journey == NULL) {
-      pv_project_free(proj);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return 2;
-    }
-    rc = ccb_preview_render_storyboard(a, proj, journey, njourney,
-      errors);
-    free(journey);
-    pv_project_free(proj);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
+  if (ccb_preview_run_storyboard(a, &ctx, proj, errors, &rc)) {
     return rc;
   }
   // Screen selection: --screen overrides the positional argument.
   selected = a->preview_screen != NULL ? a->preview_screen : a->positional;
-  if (selected != NULL) {
-    for (i = 0; i < proj->nscreens; i++) {
-      if (proj->screens[i]->name != NULL &&
-          strcmp(proj->screens[i]->name, selected) == 0) {
-        selected_screen = proj->screens[i];
-        break;
-      }
-    }
-    if (selected_screen == NULL) {
-      fprintf(stderr, "error: no screen named '%s'\n", selected);
-      fprintf(stderr, "available screens:");
-      for (i = 0; i < proj->nscreens; i++) {
-        fprintf(stderr, " %s",
-          proj->screens[i]->name != NULL ? proj->screens[i]->name : "?");
-      }
-      fprintf(stderr, "\nusage: ccb preview [--screen NAME] [--walk] [screen]\n");
-      pv_project_free(proj);
-      ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-        watch_styles, watch_flow);
-      return 1;
-    }
-  }
-  if (a->preview_walk) {
-    int wrc = 0;
-    int color = 0;
-    const char *term = NULL;
-    if (!a->preview_ascii && getenv("NO_COLOR") == NULL) {
-      term = getenv("TERM");
-      color = term == NULL || strcmp(term, "dumb") != 0;
-    }
-    wrc = pv_walk_run(proj,
-      selected_screen != NULL ? selected_screen->name : NULL,
-      proj->frame_width, a->preview_ascii, color, a->preview_record);
-    pv_project_free(proj);
-    return wrc;
-  }
-  if (a->preview_watch) {
-    // The loop takes proj; the caller's path copies are freed here.
-    int wrc = ccb_preview_watch_loop(a, watch_toml, watch_config_dir,
-      watch_styles, watch_flow, eff_width, proj, errors, selected);
-    ccb_preview_watch_paths_free(watch_toml, watch_config_dir,
-      watch_styles, watch_flow);
-    return wrc;
-  }
-  if (a->preview_update_goldens) {
-    char *golden_dir = ccb_preview_golden_dir(cwd);
-    int rc = 0;
-    if (golden_dir == NULL) {
-      pv_project_free(proj);
-      return 2;
-    }
-    rc = ccb_preview_update_goldens(proj, a->preview_ascii, golden_dir);
-    free(golden_dir);
-    pv_project_free(proj);
-    // A write failure (2) dominates; otherwise preview errors (1)
-    // still surface, matching a plain preview run.
-    return rc != 0 ? rc : (errors > 0 ? 1 : 0);
-  }
-  // Single render, shared with the watch loop's initial render.
-  {
-    int rc = ccb_preview_render_once(a, proj, selected_screen, errors);
-    pv_project_free(proj);
+  if (ccb_preview_select_screen(&ctx, proj, selected, &selected_screen, &rc)) {
     return rc;
   }
+  if (ccb_preview_run_walk(a, &ctx, proj, selected_screen, &rc)) {
+    return rc;
+  }
+  if (ccb_preview_run_watch(a, &ctx, proj, errors, selected, &rc)) {
+    return rc;
+  }
+  if (ccb_preview_run_goldens(a, &ctx, proj, errors, &rc)) {
+    return rc;
+  }
+  // Single render, shared with the watch loop's initial render.
+  rc = ccb_preview_render_once(a, proj, selected_screen, errors);
+  pv_project_free(proj);
+  ccb_preview_ctx_free(&ctx);
+  return rc;
 }
 
 // ---------- dispatch ----------
@@ -3896,6 +4395,10 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
         a->preview_gate_on = 1;
       } else if (strcmp(flag, "--no-preview-gate") == 0) {
         a->preview_gate_off = 1;
+      } else if (strcmp(flag, "--kotlinc-daemon") == 0) {
+        a->kotlinc_daemon_on = 1;
+      } else if (strcmp(flag, "--no-kotlinc-daemon") == 0) {
+        a->kotlinc_daemon_off = 1;
       } else {
         return -1;
       }
@@ -3979,6 +4482,9 @@ int ccb_cli_main(int argc, char **argv) {
   }
   if (strcmp(a.command, "clean") == 0) {
     return ccb_cmd_clean(&a);
+  }
+  if (strcmp(a.command, "daemon") == 0) {
+    return ccb_cmd_daemon(&a);
   }
   if (strcmp(a.command, "doctor") == 0) {
     return ccb_cmd_doctor(&a);

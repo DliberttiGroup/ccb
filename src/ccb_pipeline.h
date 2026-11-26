@@ -18,6 +18,8 @@ typedef struct {
   int verbose;
   int explain;
   int aab;
+  int kotlinc_daemon_on;
+  int kotlinc_daemon_off;
   const char *variant_override;
   const char *config_path;
   const char *workdir;
@@ -30,6 +32,15 @@ typedef struct {
   int aab;
   char *apk_path;
 } ccb_build_result;
+
+// d8 heap sizing (see ccb_d8_heap_mb in ccb_pipeline.c).
+#define CCB_D8_HEAP_FLOOR_MB 256
+#define CCB_D8_HEAP_CAP_MB 1024
+#define CCB_D8_HEAP_MB_PER_MIB 16
+
+// d8 heap in MB for input_bytes of dex program inputs: 256MB floor
+// + 16MB per MiB, capped at 1024MB.
+long ccb_d8_heap_mb(uint64_t input_bytes);
 
 // Run a build. Returns CCB_OK or a spec §6.4 status; diags filled on
 // failure. In explain mode nothing is executed and result is empty.

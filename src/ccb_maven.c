@@ -462,77 +462,103 @@ static void mv_set_field(char **field, const char *val) {
   }
 }
 
+// Decode a numeric character reference (&#...; or &#x...;). Returns 1
+// with *out set when the value is a valid ASCII character, else 0.
+// An invalid digit or an out-of-range value fails the whole entity,
+// so the caller keeps the '&' literally.
+static int mv_numeric_entity(const char *ent, size_t elen, char *out) {
+  long v = 0;
+  int ok = 1;
+  if (ent[1] == 'x' || ent[1] == 'X') {
+    for (size_t k = 2; k < elen; k++) {
+      char ch = ent[k];
+      v *= 16;
+      if (ch >= '0' && ch <= '9') {
+        v += ch - '0';
+      } else if (ch >= 'a' && ch <= 'f') {
+        v += ch - 'a' + 10;
+      } else if (ch >= 'A' && ch <= 'F') {
+        v += ch - 'A' + 10;
+      } else {
+        ok = 0;
+        break;
+      }
+    }
+  } else {
+    for (size_t k = 1; k < elen; k++) {
+      if (ent[k] < '0' || ent[k] > '9') {
+        ok = 0;
+        break;
+      }
+      v = v * 10 + (ent[k] - '0');
+    }
+  }
+  if (ok && v > 0 && v < 0x80) {
+    *out = (char)v;
+    return 1;
+  }
+  return 0;
+}
+
+// Decode one entity body (between '&' and ';'): the five named
+// entities, or a numeric reference. Returns 1 with *out set, else 0.
+static int mv_entity_char(const char *ent, size_t elen, char *out) {
+  if (elen == 3 && memcmp(ent, "amp", 3) == 0) {
+    *out = '&';
+    return 1;
+  }
+  if (elen == 2 && memcmp(ent, "lt", 2) == 0) {
+    *out = '<';
+    return 1;
+  }
+  if (elen == 2 && memcmp(ent, "gt", 2) == 0) {
+    *out = '>';
+    return 1;
+  }
+  if (elen == 4 && memcmp(ent, "quot", 4) == 0) {
+    *out = '"';
+    return 1;
+  }
+  if (elen == 4 && memcmp(ent, "apos", 4) == 0) {
+    *out = '\'';
+    return 1;
+  }
+  if (elen > 1 && ent[0] == '#') {
+    return mv_numeric_entity(ent, elen, out);
+  }
+  return 0;
+}
+
+// Try to decode the entity starting at text[i] ('&'). Returns 1 with
+// *out set and *next past the ';' on success, else 0.
+static int mv_try_entity(const char *text, size_t len, size_t i, char *out,
+    size_t *next) {
+  size_t semi = i + 1;
+  while (semi < len && text[semi] != ';' && semi - i <= 10) {
+    semi++;
+  }
+  if (semi >= len || text[semi] != ';') {
+    return 0;
+  }
+  if (!mv_entity_char(text + i + 1, semi - (i + 1), out)) {
+    return 0;
+  }
+  *next = semi + 1;
+  return 1;
+}
+
 static char *mv_decode_entities(mv_parser *x, const char *text, size_t len) {
   ccb_str s;
   ccb_str_init(&s);
   size_t i = 0;
   while (i < len) {
     if (text[i] == '&') {
-      size_t semi = i + 1;
-      while (semi < len && text[semi] != ';' && semi - i <= 10) {
-        semi++;
-      }
-      if (semi < len && text[semi] == ';') {
-        size_t elen = semi - (i + 1);
-        const char *ent = text + i + 1;
-        if (elen == 3 && memcmp(ent, "amp", 3) == 0) {
-          ccb_str_append_c(&s, '&');
-          i = semi + 1;
-          continue;
-        }
-        if (elen == 2 && memcmp(ent, "lt", 2) == 0) {
-          ccb_str_append_c(&s, '<');
-          i = semi + 1;
-          continue;
-        }
-        if (elen == 2 && memcmp(ent, "gt", 2) == 0) {
-          ccb_str_append_c(&s, '>');
-          i = semi + 1;
-          continue;
-        }
-        if (elen == 4 && memcmp(ent, "quot", 4) == 0) {
-          ccb_str_append_c(&s, '"');
-          i = semi + 1;
-          continue;
-        }
-        if (elen == 4 && memcmp(ent, "apos", 4) == 0) {
-          ccb_str_append_c(&s, '\'');
-          i = semi + 1;
-          continue;
-        }
-        if (elen > 1 && ent[0] == '#') {
-          long v = 0;
-          int ok = 1;
-          if (ent[1] == 'x' || ent[1] == 'X') {
-            for (size_t k = 2; k < elen; k++) {
-              char ch = ent[k];
-              v *= 16;
-              if (ch >= '0' && ch <= '9') {
-                v += ch - '0';
-              } else if (ch >= 'a' && ch <= 'f') {
-                v += ch - 'a' + 10;
-              } else if (ch >= 'A' && ch <= 'F') {
-                v += ch - 'A' + 10;
-              } else {
-                ok = 0;
-                break;
-              }
-            }
-          } else {
-            for (size_t k = 1; k < elen; k++) {
-              if (ent[k] < '0' || ent[k] > '9') {
-                ok = 0;
-                break;
-              }
-              v = v * 10 + (ent[k] - '0');
-            }
-          }
-          if (ok && v > 0 && v < 0x80) {
-            ccb_str_append_c(&s, (char)v);
-            i = semi + 1;
-            continue;
-          }
-        }
+      char ch = '\0';
+      size_t next = 0;
+      if (mv_try_entity(text, len, i, &ch, &next)) {
+        ccb_str_append_c(&s, ch);
+        i = next;
+        continue;
       }
       // Unknown or malformed entity: keep the '&' literally.
       ccb_str_append_c(&s, '&');
@@ -701,6 +727,149 @@ static void mv_close(mv_parser *x, const char *name) {
   x->depth--;
 }
 
+// Find the end of a "<!-- ... -->" comment starting at q (past
+// "<!--"). Returns the pointer past "-->", or NULL when unterminated.
+static const char *mv_skip_comment(const char *end, const char *q) {
+  for (; q + 2 < end; q++) {
+    if (memcmp(q, "-->", 3) == 0) {
+      return q + 3;
+    }
+  }
+  return NULL;
+}
+
+// Find the end of a "<? ... ?>" processing instruction starting at q
+// (past "<?"). Returns the pointer past "?>", or NULL when unterminated.
+static const char *mv_skip_pi(const char *end, const char *q) {
+  for (; q + 1 < end; q++) {
+    if (memcmp(q, "?>", 2) == 0) {
+      return q + 2;
+    }
+  }
+  return NULL;
+}
+
+// Find the end of a "<! ... >" declaration starting at q (past "<!").
+// Skips to '>', honoring an internal subset in [ ... ]. Returns the
+// pointer past '>', or NULL when unterminated.
+static const char *mv_skip_decl(const char *end, const char *q) {
+  int bracket = 0;
+  while (q < end) {
+    if (*q == '[') {
+      bracket = 1;
+    } else if (*q == ']') {
+      bracket = 0;
+    } else if (*q == '>' && !bracket) {
+      return q + 1;
+    }
+    q++;
+  }
+  return NULL;
+}
+
+// Parse a "</name ...>" close tag starting at p (past '<', at '/').
+// Advances x->p past '>' and closes the element. Returns 0 on
+// success, -1 on malformed XML.
+static int mv_parse_close_tag(mv_parser *x, const char *p) {
+  const char *q = p + 1;
+  char name[64];
+  if (!mv_read_name(x, &q, name, sizeof(name))) {
+    return -1;
+  }
+  while (q < x->end && *q != '>') {
+    q++;
+  }
+  if (q >= x->end) {
+    return -1;
+  }
+  mv_close(x, name);
+  x->p = q + 1;
+  return 0;
+}
+
+// Parse an open tag starting at p (past '<'). Reads the name, skips
+// attributes quote-aware, and detects a self-closing "/>". Advances
+// x->p and opens (and, for self-closing tags, closes) the element.
+// Returns 0 on success, -1 on malformed XML.
+static int mv_parse_open_tag(mv_parser *x, const char *p) {
+  const char *q = p;
+  char name[64];
+  if (!mv_read_name(x, &q, name, sizeof(name))) {
+    return -1;
+  }
+  int self_close = 0;
+  while (q < x->end) {
+    char ch = *q;
+    if (ch == '"' || ch == '\'') {
+      const char *e = memchr(q + 1, ch, (size_t)(x->end - (q + 1)));
+      if (e == NULL) {
+        return -1;
+      }
+      q = e + 1;
+      continue;
+    }
+    if (ch == '/' && q + 1 < x->end && q[1] == '>') {
+      self_close = 1;
+      q += 2;
+      break;
+    }
+    if (ch == '>') {
+      q++;
+      break;
+    }
+    q++;
+  }
+  if (q > x->end) {
+    return -1;
+  }
+  mv_open(x, name);
+  if (self_close) {
+    mv_close(x, name);
+  }
+  x->p = q;
+  return 0;
+}
+
+// Parse one markup item starting at x->p ('<'): a comment, a
+// processing instruction, a declaration, a close tag, or an open tag.
+// Advances x->p past the item. Returns 0 on success, -1 on
+// malformed XML.
+static int mv_parse_markup(mv_parser *x) {
+  const char *p = x->p + 1;
+  if (p + 2 < x->end && memcmp(p, "!--", 3) == 0) {
+    const char *e = mv_skip_comment(x->end, p + 3);
+    if (e == NULL) {
+      return -1;
+    }
+    x->p = e;
+    return 0;
+  }
+  if (p < x->end && *p == '?') {
+    const char *e = mv_skip_pi(x->end, p + 1);
+    if (e == NULL) {
+      return -1;
+    }
+    x->p = e;
+    return 0;
+  }
+  if (p < x->end && *p == '!') {
+    // DOCTYPE or another declaration: skip to '>', honoring an
+    // internal subset in [ ... ].
+    const char *e = mv_skip_decl(x->end, p + 1);
+    if (e == NULL) {
+      return -1;
+    }
+    x->p = e;
+    return 0;
+  }
+  if (p < x->end && *p == '/') {
+    return mv_parse_close_tag(x, p);
+  }
+  // Open tag: read the name, skip attributes quote-aware, and
+  // detect a self-closing "/>".
+  return mv_parse_open_tag(x, p);
+}
+
 // Parse a POM document. Returns 0 on success, -1 on malformed XML.
 static int mv_parse_pom(ccb_arena *a, const char *text, size_t len, mv_pom *pom) {
   mv_parser x;
@@ -712,109 +881,9 @@ static int mv_parse_pom(ccb_arena *a, const char *text, size_t len, mv_pom *pom)
   memset(pom, 0, sizeof(*pom));
   while (x.p < x.end && !x.failed) {
     if (*x.p == '<') {
-      const char *p = x.p + 1;
-      if (p + 2 < x.end && memcmp(p, "!--", 3) == 0) {
-        const char *e = NULL;
-        for (const char *q = p + 3; q + 2 < x.end; q++) {
-          if (memcmp(q, "-->", 3) == 0) {
-            e = q + 3;
-            break;
-          }
-        }
-        if (e == NULL) {
-          return -1;
-        }
-        x.p = e;
-        continue;
-      }
-      if (p < x.end && *p == '?') {
-        const char *e = NULL;
-        for (const char *q = p + 1; q + 1 < x.end; q++) {
-          if (memcmp(q, "?>", 2) == 0) {
-            e = q + 2;
-            break;
-          }
-        }
-        if (e == NULL) {
-          return -1;
-        }
-        x.p = e;
-        continue;
-      }
-      if (p < x.end && *p == '!') {
-        // DOCTYPE or another declaration: skip to '>', honoring an
-        // internal subset in [ ... ].
-        const char *q = p + 1;
-        int bracket = 0;
-        while (q < x.end) {
-          if (*q == '[') {
-            bracket = 1;
-          } else if (*q == ']') {
-            bracket = 0;
-          } else if (*q == '>' && !bracket) {
-            break;
-          }
-          q++;
-        }
-        if (q >= x.end) {
-          return -1;
-        }
-        x.p = q + 1;
-        continue;
-      }
-      if (p < x.end && *p == '/') {
-        const char *q = p + 1;
-        char name[64];
-        if (!mv_read_name(&x, &q, name, sizeof(name))) {
-          return -1;
-        }
-        while (q < x.end && *q != '>') {
-          q++;
-        }
-        if (q >= x.end) {
-          return -1;
-        }
-        mv_close(&x, name);
-        x.p = q + 1;
-        continue;
-      }
-      // Open tag: read the name, skip attributes quote-aware, and
-      // detect a self-closing "/>".
-      const char *q = p;
-      char name[64];
-      if (!mv_read_name(&x, &q, name, sizeof(name))) {
+      if (mv_parse_markup(&x) != 0) {
         return -1;
       }
-      int self_close = 0;
-      while (q < x.end) {
-        char ch = *q;
-        if (ch == '"' || ch == '\'') {
-          const char *e = memchr(q + 1, ch, (size_t)(x.end - (q + 1)));
-          if (e == NULL) {
-            return -1;
-          }
-          q = e + 1;
-          continue;
-        }
-        if (ch == '/' && q + 1 < x.end && q[1] == '>') {
-          self_close = 1;
-          q += 2;
-          break;
-        }
-        if (ch == '>') {
-          q++;
-          break;
-        }
-        q++;
-      }
-      if (q > x.end) {
-        return -1;
-      }
-      mv_open(&x, name);
-      if (self_close) {
-        mv_close(&x, name);
-      }
-      x.p = q;
       continue;
     }
     const char *lt = memchr(x.p, '<', (size_t)(x.end - x.p));
@@ -1201,6 +1270,58 @@ static int mv_hex64_ok(const char *s) {
   return 1;
 }
 
+// Push the "malformed line N in ccb.lock" diagnostic. Returns -1.
+static int mv_lock_bad(ccb_diag_list *diags, size_t line_no) {
+  ccb_str m;
+  ccb_str_init(&m);
+  ccb_str_appendf(&m, "malformed line %zu in ccb.lock", line_no);
+  mv_diag(diags, "CCB-E3023", "ccb.lock", m.buf);
+  ccb_str_free(&m);
+  return -1;
+}
+
+// Parse one non-blank, non-comment lockfile line (p..le) and append
+// it to *ents. Returns 0 on success, -1 with a diagnostic on
+// malformed content.
+static int mv_lock_line(ccb_arena *a, mv_lock_entry **ents, size_t *n,
+    size_t *cap, const char *p, const char *le, size_t line_no,
+    ccb_diag_list *diags) {
+  // Fields: coord, packaging, sha256, separated by spaces.
+  const char *s1 = memchr(p, ' ', (size_t)(le - p));
+  const char *s2 = s1 != NULL ?
+    memchr(s1 + 1, ' ', (size_t)(le - (s1 + 1))) : NULL;
+  if (s1 == NULL || s2 == NULL || s2 + 1 >= le) {
+    return mv_lock_bad(diags, line_no);
+  }
+  const char *c1 = memchr(p, ':', (size_t)(s1 - p));
+  const char *c2 = c1 != NULL ?
+    memchr(c1 + 1, ':', (size_t)(s1 - (c1 + 1))) : NULL;
+  if (c1 == NULL || c2 == NULL ||
+      !mv_part_ok(p, (size_t)(c1 - p)) ||
+      !mv_part_ok(c1 + 1, (size_t)(c2 - (c1 + 1))) ||
+      !mv_part_ok(c2 + 1, (size_t)(s1 - (c2 + 1)))) {
+    return mv_lock_bad(diags, line_no);
+  }
+  char *g = ccb_arena_strndup(a, p, (size_t)(c1 - p));
+  char *art = ccb_arena_strndup(a, c1 + 1, (size_t)(c2 - (c1 + 1)));
+  char *v = ccb_arena_strndup(a, c2 + 1, (size_t)(s1 - (c2 + 1)));
+  char *pack = ccb_arena_strndup(a, s1 + 1, (size_t)(s2 - (s1 + 1)));
+  char *sha = ccb_arena_strndup(a, s2 + 1, (size_t)(le - (s2 + 1)));
+  if ((strcmp(pack, "aar") != 0 && strcmp(pack, "jar") != 0 &&
+       strcmp(pack, "pom") != 0) || !mv_hex64_ok(sha) ||
+      mv_lock_find(*ents, *n, g, art) != NULL) {
+    return mv_lock_bad(diags, line_no);
+  }
+  MV_GROW(a, *ents, *n, *cap, mv_lock_entry);
+  (*ents)[*n].group = g;
+  (*ents)[*n].artifact = art;
+  (*ents)[*n].version = v;
+  (*ents)[*n].packaging = pack;
+  (*ents)[*n].sha256 = sha;
+  (*n)++;
+  return 0;
+}
+
 // Load ccb.lock. Returns 0 on success (entries arena-allocated),
 // -1 with a CCB-E3023 diagnostic on any malformed content.
 static int mv_lock_load(ccb_arena *a, const char *path,
@@ -1226,56 +1347,10 @@ static int mv_lock_load(ccb_arena *a, const char *path,
       le--;
     }
     if (le > p && p[0] != '#') {
-      // Fields: coord, packaging, sha256, separated by spaces.
-      const char *s1 = memchr(p, ' ', (size_t)(le - p));
-      const char *s2 = s1 != NULL ?
-        memchr(s1 + 1, ' ', (size_t)(le - (s1 + 1))) : NULL;
-      int bad = 0;
-      char *g = NULL;
-      char *art = NULL;
-      char *v = NULL;
-      char *pack = NULL;
-      char *sha = NULL;
-      if (s1 == NULL || s2 == NULL || s2 + 1 >= le) {
-        bad = 1;
-      } else {
-        const char *c1 = memchr(p, ':', (size_t)(s1 - p));
-        const char *c2 = c1 != NULL ?
-          memchr(c1 + 1, ':', (size_t)(s1 - (c1 + 1))) : NULL;
-        if (c1 == NULL || c2 == NULL ||
-            !mv_part_ok(p, (size_t)(c1 - p)) ||
-            !mv_part_ok(c1 + 1, (size_t)(c2 - (c1 + 1))) ||
-            !mv_part_ok(c2 + 1, (size_t)(s1 - (c2 + 1)))) {
-          bad = 1;
-        } else {
-          g = ccb_arena_strndup(a, p, (size_t)(c1 - p));
-          art = ccb_arena_strndup(a, c1 + 1, (size_t)(c2 - (c1 + 1)));
-          v = ccb_arena_strndup(a, c2 + 1, (size_t)(s1 - (c2 + 1)));
-          pack = ccb_arena_strndup(a, s1 + 1, (size_t)(s2 - (s1 + 1)));
-          sha = ccb_arena_strndup(a, s2 + 1, (size_t)(le - (s2 + 1)));
-          if ((strcmp(pack, "aar") != 0 && strcmp(pack, "jar") != 0 &&
-               strcmp(pack, "pom") != 0) || !mv_hex64_ok(sha) ||
-              mv_lock_find(ents, n, g, art) != NULL) {
-            bad = 1;
-          }
-        }
-      }
-      if (bad) {
-        ccb_str m;
-        ccb_str_init(&m);
-        ccb_str_appendf(&m, "malformed line %zu in ccb.lock", line_no);
-        mv_diag(diags, "CCB-E3023", "ccb.lock", m.buf);
-        ccb_str_free(&m);
+      if (mv_lock_line(a, &ents, &n, &cap, p, le, line_no, diags) != 0) {
         free(text);
         return -1;
       }
-      MV_GROW(a, ents, n, cap, mv_lock_entry);
-      ents[n].group = g;
-      ents[n].artifact = art;
-      ents[n].version = v;
-      ents[n].packaging = pack;
-      ents[n].sha256 = sha;
-      n++;
     }
     p = nl != NULL ? nl + 1 : end;
   }
@@ -1539,6 +1614,370 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, char **repos,
   return 0;
 }
 
+// Mutable state for one resolution run, shared by the helpers below.
+typedef struct {
+  ccb_arena *arena;
+  const char *cache;
+  char **repos;
+  size_t repos_count;
+  int prefetch;
+  int readonly;
+  int verbose;
+  mv_excl *excls;
+  size_t excl_count;
+  mv_qitem *queue;
+  size_t qcount;
+  size_t qcap;
+  mv_seen *seen;
+  size_t seen_count;
+  size_t seen_cap;
+  size_t res_aars_cap;
+  size_t res_jars_cap;
+  size_t res_entries_cap;
+  ccb_maven_result *out;
+  ccb_diag_list *diags;
+} mv_resolve;
+
+// Seed the queue with the direct coordinates, in declared order.
+// Returns 0 on success, -1 with a diagnostic on a malformed
+// coordinate.
+static int mv_seed_queue(mv_resolve *r, const ccb_config *cfg) {
+  for (size_t i = 0; i < cfg->maven_count; i++) {
+    char *g = NULL;
+    char *art = NULL;
+    char *v = NULL;
+    if (!ccb_maven_parse_coord(cfg->maven[i], &g, &art, &v)) {
+      mv_diag(r->diags, "CCB-E3019", cfg->maven[i], "malformed coordinate");
+      free(g);
+      free(art);
+      free(v);
+      return -1;
+    }
+    ccb_str ks;
+    ccb_str_init(&ks);
+    ccb_str_append(&ks, g);
+    ccb_str_append_c(&ks, ':');
+    ccb_str_append(&ks, art);
+    char *key = ccb_arena_strdup(r->arena, ks.buf);
+    ccb_str_free(&ks);
+    mv_seen *prev = mv_seen_find(r->seen, r->seen_count, key);
+    if (prev != NULL) {
+      if (r->verbose && strcmp(prev->version, v) != 0) {
+        printf("maven: %s: requested %s, using nearest %s\n", key, v,
+          prev->version);
+      }
+    } else {
+      MV_GROW(r->arena, r->seen, r->seen_count, r->seen_cap, mv_seen);
+      r->seen[r->seen_count].key = key;
+      r->seen[r->seen_count].version = ccb_arena_strdup(r->arena, v);
+      r->seen_count++;
+      MV_GROW(r->arena, r->queue, r->qcount, r->qcap, mv_qitem);
+      r->queue[r->qcount].group = ccb_arena_strdup(r->arena, g);
+      r->queue[r->qcount].artifact = ccb_arena_strdup(r->arena, art);
+      r->queue[r->qcount].version = ccb_arena_strdup(r->arena, v);
+      r->queue[r->qcount].depth = 0;
+      r->qcount++;
+    }
+    free(g);
+    free(art);
+    free(v);
+  }
+  return 0;
+}
+
+// Resolve a dependency's version from this POM's dependencyManagement
+// entry for the same group:artifact. Returns the substituted version,
+// or NULL when there is no matching entry (or its version fails to
+// substitute, with *dbad set). The first matching entry wins.
+static char *mv_resolve_version_from_mgmt(ccb_arena *a, mv_pom *pom,
+    const char *eff_group, const char *eff_artifact, const char *eff_version,
+    const char *dg, const char *da, int *dbad) {
+  *dbad = 0;
+  for (size_t m = 0; m < pom->mgmt_count; m++) {
+    mv_dep *mg = &pom->mgmt[m];
+    int mbad = 0;
+    char *mg_g = mv_subst(a, pom, eff_group, eff_artifact, eff_version,
+      mg->group, &mbad);
+    char *mg_a = mv_subst(a, pom, eff_group, eff_artifact, eff_version,
+      mg->artifact, &mbad);
+    if (mbad || mg_g == NULL || mg_a == NULL) {
+      continue;
+    }
+    if (strcmp(mg_g, dg) == 0 && strcmp(mg_a, da) == 0 &&
+        mg->version != NULL) {
+      char *dv = mv_subst(a, pom, eff_group, eff_artifact, eff_version,
+        mg->version, dbad);
+      if (*dbad) {
+        return NULL;
+      }
+      return dv;
+    }
+  }
+  return NULL;
+}
+
+// Resolve a POM's effective coordinates: its own values, else the
+// embedded parent block. Returns 0 on success, -1 with a diagnostic.
+static int mv_effective_coords(ccb_arena *a, mv_pom *pom, const char *coord,
+    ccb_diag_list *diags, char **eff_group, char **eff_artifact,
+    char **eff_version) {
+  int bad = 0;
+  const char *raw_group = pom->group != NULL ? pom->group : pom->parent_group;
+  const char *raw_version = pom->version != NULL ? pom->version : pom->parent_version;
+  *eff_group = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+    raw_group, &bad);
+  *eff_artifact = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+    pom->artifact, &bad);
+  *eff_version = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+    raw_version, &bad);
+  if (bad || *eff_group == NULL || *eff_artifact == NULL ||
+      *eff_version == NULL) {
+    mv_diag(diags, "CCB-E3019", coord,
+      "POM coordinates cannot be resolved (missing value or unresolvable property)");
+    return -1;
+  }
+  return 0;
+}
+
+// Resolve a POM's packaging to the artifact extension to fetch:
+// "aar" or "jar", or NULL for pom packaging (no artifact file).
+// Returns 0 on success, -1 with a diagnostic.
+static int mv_packaging_ext(ccb_arena *a, mv_pom *pom, const char *eff_group,
+    const char *eff_artifact, const char *eff_version, const char *coord,
+    ccb_diag_list *diags, const char **ext_out, int *is_aar_out) {
+  const char *packaging = "jar";
+  if (pom->packaging != NULL) {
+    int pbad = 0;
+    char *p = mv_subst(a, pom, eff_group, eff_artifact, eff_version,
+      pom->packaging, &pbad);
+    if (pbad || p == NULL) {
+      mv_diag(diags, "CCB-E3019", coord, "packaging cannot be resolved");
+      return -1;
+    }
+    packaging = p;
+  }
+  const char *ext = NULL;
+  int is_aar = 0;
+  if (strcmp(packaging, "aar") == 0) {
+    ext = "aar";
+    is_aar = 1;
+  } else if (strcmp(packaging, "jar") == 0) {
+    ext = "jar";
+  } else if (strcmp(packaging, "pom") == 0) {
+    ext = NULL;
+  } else {
+    ccb_str m;
+    ccb_str_init(&m);
+    ccb_str_append(&m, "unsupported packaging '");
+    ccb_str_append(&m, packaging);
+    ccb_str_append(&m, "'");
+    mv_diag(diags, "CCB-E3019", coord, m.buf);
+    ccb_str_free(&m);
+    return -1;
+  }
+  *ext_out = ext;
+  *is_aar_out = is_aar;
+  return 0;
+}
+
+// Resolve one transitive dependency of a POM: skip test/provided/
+// system/import scopes and optional dependencies, fall back to
+// dependencyManagement for a missing version, skip excluded and
+// already-seen artifacts (nearest wins), else enqueue it. Returns 0
+// when the dependency is queued or skipped, -1 with a diagnostic on
+// failure.
+static int mv_queue_dep(mv_resolve *r, mv_pom *pom, const char *eff_group,
+    const char *eff_artifact, const char *eff_version, const char *coord,
+    mv_dep *dep, int item_depth) {
+  int dbad = 0;
+  char *scope = dep->scope != NULL ?
+    mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+      dep->scope, &dbad) : (char *)"compile";
+  if (dbad) {
+    mv_diag(r->diags, "CCB-E3019", coord,
+      "dependency scope cannot be resolved");
+    return -1;
+  }
+  if (strcmp(scope, "test") == 0 || strcmp(scope, "provided") == 0 ||
+      strcmp(scope, "system") == 0 || strcmp(scope, "import") == 0) {
+    return 0;
+  }
+  char *optional = dep->optional != NULL ?
+    mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+      dep->optional, &dbad) : NULL;
+  if (dbad) {
+    mv_diag(r->diags, "CCB-E3019", coord,
+      "dependency optional flag cannot be resolved");
+    return -1;
+  }
+  if (optional != NULL && strcmp(optional, "true") == 0) {
+    return 0;
+  }
+  char *dg = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+    dep->group, &dbad);
+  char *da = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+    dep->artifact, &dbad);
+  char *dv = dep->version != NULL ?
+    mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+      dep->version, &dbad) : NULL;
+  if (dbad || dg == NULL || da == NULL ||
+      !mv_part_ok(dg, strlen(dg)) || !mv_part_ok(da, strlen(da))) {
+    mv_diag(r->diags, "CCB-E3019", coord,
+      "dependency coordinates cannot be resolved");
+    return -1;
+  }
+  if (dv != NULL && !mv_part_ok(dv, strlen(dv))) {
+    mv_diag(r->diags, "CCB-E3019", coord,
+      "dependency version is path-unsafe");
+    return -1;
+  }
+  if (dv == NULL || dv[0] == '\0') {
+    // Fall back to this POM's dependencyManagement entry.
+    dv = mv_resolve_version_from_mgmt(r->arena, pom, eff_group, eff_artifact,
+      eff_version, dg, da, &dbad);
+  }
+  if (dv == NULL || dv[0] == '\0') {
+    ccb_str m;
+    ccb_str_init(&m);
+    ccb_str_append(&m, "dependency ");
+    ccb_str_append(&m, dg);
+    ccb_str_append_c(&m, ':');
+    ccb_str_append(&m, da);
+    ccb_str_append(&m,
+      " has no version and no dependencyManagement entry");
+    mv_diag(r->diags, "CCB-E3019", coord, m.buf);
+    ccb_str_free(&m);
+    return -1;
+  }
+  // Exclusions are checked before nearest-wins: an excluded
+  // artifact never enters the seen set, so an excluded version
+  // can never win and another version from a later path can.
+  // The subtree is pruned with it: an excluded artifact's own
+  // dependencies are never queued.
+  if (mv_is_excluded(r->excls, r->excl_count, dg, da, dv)) {
+    if (r->verbose) {
+      printf("maven: %s:%s:%s: excluded, skipping\n", dg, da, dv);
+    }
+    return 0;
+  }
+  ccb_str ks;
+  ccb_str_init(&ks);
+  ccb_str_append(&ks, dg);
+  ccb_str_append_c(&ks, ':');
+  ccb_str_append(&ks, da);
+  char *key = ccb_arena_strdup(r->arena, ks.buf);
+  ccb_str_free(&ks);
+  mv_seen *prev = mv_seen_find(r->seen, r->seen_count, key);
+  if (prev != NULL) {
+    if (r->verbose && strcmp(prev->version, dv) != 0) {
+      printf("maven: %s: requested %s, using nearest %s\n", key, dv,
+        prev->version);
+    }
+    return 0;
+  }
+  MV_GROW(r->arena, r->seen, r->seen_count, r->seen_cap, mv_seen);
+  r->seen[r->seen_count].key = key;
+  r->seen[r->seen_count].version = ccb_arena_strdup(r->arena, dv);
+  r->seen_count++;
+  MV_GROW(r->arena, r->queue, r->qcount, r->qcap, mv_qitem);
+  r->queue[r->qcount].group = dg;
+  r->queue[r->qcount].artifact = da;
+  r->queue[r->qcount].version = dv;
+  r->queue[r->qcount].depth = item_depth + 1;
+  r->qcount++;
+  return 0;
+}
+
+// Resolve one queued coordinate: fetch and parse its POM, merge its
+// parent chain, fetch its artifact, record it, and queue its
+// transitive dependencies. Returns 0 on success, -1 with a
+// diagnostic on failure.
+static int mv_resolve_one(mv_resolve *r, mv_qitem item) {
+  const char *coord = mv_coord_str(r->arena, item.group, item.artifact,
+    item.version);
+  char *pom_path = NULL;
+  int rc = mv_fetch(r->arena, r->cache, r->repos, r->repos_count, item.group,
+    item.artifact, item.version, "pom", r->prefetch, r->readonly, &pom_path);
+  if (rc != 0) {
+    mv_fetch_fail(r->diags, rc, coord, "POM");
+    return -1;
+  }
+  char *pom_text = NULL;
+  size_t pom_len = 0;
+  if (ccb_read_file(pom_path, &pom_text, &pom_len) != CCB_OK) {
+    mv_diag(r->diags, "CCB-E3019", coord, "cached POM cannot be read");
+    return -1;
+  }
+  mv_pom pom;
+  if (mv_parse_pom(r->arena, pom_text, pom_len, &pom) != 0) {
+    free(pom_text);
+    mv_diag(r->diags, "CCB-E3019", coord, "malformed POM");
+    return -1;
+  }
+  free(pom_text);
+  // Fetch the parent chain and merge its properties and
+  // dependencyManagement into this POM (child entries win).
+  if (mv_merge_parents(r->arena, r->cache, r->repos, r->repos_count, &pom,
+      coord, r->prefetch, r->readonly, r->diags) != 0) {
+    return -1;
+  }
+  char *eff_group = NULL;
+  char *eff_artifact = NULL;
+  char *eff_version = NULL;
+  if (mv_effective_coords(r->arena, &pom, coord, r->diags, &eff_group,
+      &eff_artifact, &eff_version) != 0) {
+    return -1;
+  }
+  const char *ext = NULL;
+  int is_aar = 0;
+  if (mv_packaging_ext(r->arena, &pom, eff_group, eff_artifact, eff_version,
+      coord, r->diags, &ext, &is_aar) != 0) {
+    return -1;
+  }
+  if (ext != NULL) {
+    char *art_path = NULL;
+    rc = mv_fetch(r->arena, r->cache, r->repos, r->repos_count, item.group,
+      item.artifact, item.version, ext, r->prefetch, r->readonly, &art_path);
+    if (rc != 0) {
+      mv_fetch_fail(r->diags, rc, coord, ext);
+      return -1;
+    }
+    if (is_aar) {
+      mv_push_result(&r->out->aars, &r->out->aars_count, &r->res_aars_cap,
+        art_path);
+    } else {
+      mv_push_result(&r->out->jars, &r->out->jars_count, &r->res_jars_cap,
+        art_path);
+    }
+    // Lockfile entry: hash of the artifact file.
+    char hex[65];
+    if (ccb_sha256_file(art_path, hex) != CCB_OK) {
+      mv_diag(r->diags, "CCB-E3019", coord, "resolved file cannot be read");
+      return -1;
+    }
+    mv_push_entry(r->out, &r->res_entries_cap, item.group, item.artifact,
+      item.version, ext, hex, art_path);
+  } else {
+    // Pom packaging has no artifact file: the lockfile records the
+    // POM's hash, so a changed BOM still fails enforcement.
+    char hex[65];
+    if (ccb_sha256_file(pom_path, hex) != CCB_OK) {
+      mv_diag(r->diags, "CCB-E3019", coord, "resolved POM cannot be read");
+      return -1;
+    }
+    mv_push_entry(r->out, &r->res_entries_cap, item.group, item.artifact,
+      item.version, "pom", hex, pom_path);
+  }
+  // Transitive dependencies of this POM.
+  for (size_t d = 0; d < pom.deps_count; d++) {
+    if (mv_queue_dep(r, &pom, eff_group, eff_artifact, eff_version, coord,
+        &pom.deps[d], item.depth) != 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
 ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
     int readonly, ccb_maven_result *out, ccb_diag_list *diags) {
   memset(out, 0, sizeof(*out));
@@ -1557,288 +1996,33 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
   size_t excl_count = 0;
   mv_excl *excls = mv_exclusions(arena, cfg, &excl_count);
 
-  mv_qitem *queue = NULL;
-  size_t qcount = 0;
-  size_t qcap = 0;
-  mv_seen *seen = NULL;
-  size_t seen_count = 0;
-  size_t seen_cap = 0;
-  size_t res_aars_cap = 0;
-  size_t res_jars_cap = 0;
-  size_t res_entries_cap = 0;
+  mv_resolve r;
+  memset(&r, 0, sizeof(r));
+  r.arena = arena;
+  r.cache = cache;
+  r.repos = repos;
+  r.repos_count = repos_count;
+  r.prefetch = prefetch;
+  r.readonly = readonly;
+  r.verbose = verbose;
+  r.excls = excls;
+  r.excl_count = excl_count;
+  r.out = out;
+  r.diags = diags;
 
   // Seed the queue with the direct coordinates, in declared order.
-  for (size_t i = 0; i < cfg->maven_count; i++) {
-    char *g = NULL;
-    char *art = NULL;
-    char *v = NULL;
-    if (!ccb_maven_parse_coord(cfg->maven[i], &g, &art, &v)) {
-      mv_diag(diags, "CCB-E3019", cfg->maven[i], "malformed coordinate");
-      free(g);
-      free(art);
-      free(v);
-      goto fail;
-    }
-    ccb_str ks;
-    ccb_str_init(&ks);
-    ccb_str_append(&ks, g);
-    ccb_str_append_c(&ks, ':');
-    ccb_str_append(&ks, art);
-    char *key = ccb_arena_strdup(arena, ks.buf);
-    ccb_str_free(&ks);
-    mv_seen *prev = mv_seen_find(seen, seen_count, key);
-    if (prev != NULL) {
-      if (verbose && strcmp(prev->version, v) != 0) {
-        printf("maven: %s: requested %s, using nearest %s\n", key, v,
-          prev->version);
-      }
-    } else {
-      MV_GROW(arena, seen, seen_count, seen_cap, mv_seen);
-      seen[seen_count].key = key;
-      seen[seen_count].version = ccb_arena_strdup(arena, v);
-      seen_count++;
-      MV_GROW(arena, queue, qcount, qcap, mv_qitem);
-      queue[qcount].group = ccb_arena_strdup(arena, g);
-      queue[qcount].artifact = ccb_arena_strdup(arena, art);
-      queue[qcount].version = ccb_arena_strdup(arena, v);
-      queue[qcount].depth = 0;
-      qcount++;
-    }
-    free(g);
-    free(art);
-    free(v);
+  if (mv_seed_queue(&r, cfg) != 0) {
+    goto fail;
   }
 
   // Breadth-first walk: the first visit to a group:artifact is the
   // nearest, so it wins and later (deeper or later-declared) versions
   // are skipped.
   size_t head = 0;
-  while (head < qcount) {
-    mv_qitem item = queue[head++];
-    const char *coord = mv_coord_str(arena, item.group, item.artifact,
-      item.version);
-    char *pom_path = NULL;
-    int rc = mv_fetch(arena, cache, repos, repos_count, item.group,
-      item.artifact, item.version, "pom", prefetch, readonly, &pom_path);
-    if (rc != 0) {
-      mv_fetch_fail(diags, rc, coord, "POM");
+  while (head < r.qcount) {
+    mv_qitem item = r.queue[head++];
+    if (mv_resolve_one(&r, item) != 0) {
       goto fail;
-    }
-    char *pom_text = NULL;
-    size_t pom_len = 0;
-    if (ccb_read_file(pom_path, &pom_text, &pom_len) != CCB_OK) {
-      mv_diag(diags, "CCB-E3019", coord, "cached POM cannot be read");
-      goto fail;
-    }
-    mv_pom pom;
-    if (mv_parse_pom(arena, pom_text, pom_len, &pom) != 0) {
-      free(pom_text);
-      mv_diag(diags, "CCB-E3019", coord, "malformed POM");
-      goto fail;
-    }
-    free(pom_text);
-    // Fetch the parent chain and merge its properties and
-    // dependencyManagement into this POM (child entries win).
-    if (mv_merge_parents(arena, cache, repos, repos_count, &pom, coord,
-        prefetch, readonly, diags) != 0) {
-      goto fail;
-    }
-    // Effective coordinates: own values, else the embedded parent
-    // block (whose POM was fetched and merged above).
-    int bad = 0;
-    const char *raw_group = pom.group != NULL ? pom.group : pom.parent_group;
-    const char *raw_version = pom.version != NULL ? pom.version : pom.parent_version;
-    char *eff_group = mv_subst(arena, &pom, raw_group, pom.artifact,
-      raw_version, raw_group, &bad);
-    char *eff_artifact = mv_subst(arena, &pom, raw_group, pom.artifact,
-      raw_version, pom.artifact, &bad);
-    char *eff_version = mv_subst(arena, &pom, raw_group, pom.artifact,
-      raw_version, raw_version, &bad);
-    if (bad || eff_group == NULL || eff_artifact == NULL ||
-        eff_version == NULL) {
-      mv_diag(diags, "CCB-E3019", coord,
-        "POM coordinates cannot be resolved (missing value or unresolvable property)");
-      goto fail;
-    }
-    const char *packaging = "jar";
-    if (pom.packaging != NULL) {
-      int pbad = 0;
-      char *p = mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-        pom.packaging, &pbad);
-      if (pbad || p == NULL) {
-        mv_diag(diags, "CCB-E3019", coord, "packaging cannot be resolved");
-        goto fail;
-      }
-      packaging = p;
-    }
-    const char *ext = NULL;
-    int is_aar = 0;
-    if (strcmp(packaging, "aar") == 0) {
-      ext = "aar";
-      is_aar = 1;
-    } else if (strcmp(packaging, "jar") == 0) {
-      ext = "jar";
-    } else if (strcmp(packaging, "pom") == 0) {
-      ext = NULL;
-    } else {
-      ccb_str m;
-      ccb_str_init(&m);
-      ccb_str_append(&m, "unsupported packaging '");
-      ccb_str_append(&m, packaging);
-      ccb_str_append(&m, "'");
-      mv_diag(diags, "CCB-E3019", coord, m.buf);
-      ccb_str_free(&m);
-      goto fail;
-    }
-    if (ext != NULL) {
-      char *art_path = NULL;
-      rc = mv_fetch(arena, cache, repos, repos_count, item.group,
-        item.artifact, item.version, ext, prefetch, readonly, &art_path);
-      if (rc != 0) {
-        mv_fetch_fail(diags, rc, coord, ext);
-        goto fail;
-      }
-      if (is_aar) {
-        mv_push_result(&out->aars, &out->aars_count, &res_aars_cap, art_path);
-      } else {
-        mv_push_result(&out->jars, &out->jars_count, &res_jars_cap, art_path);
-      }
-      // Lockfile entry: hash of the artifact file.
-      char hex[65];
-      if (ccb_sha256_file(art_path, hex) != CCB_OK) {
-        mv_diag(diags, "CCB-E3019", coord, "resolved file cannot be read");
-        goto fail;
-      }
-      mv_push_entry(out, &res_entries_cap, item.group, item.artifact,
-        item.version, ext, hex, art_path);
-    } else {
-      // Pom packaging has no artifact file: the lockfile records the
-      // POM's hash, so a changed BOM still fails enforcement.
-      char hex[65];
-      if (ccb_sha256_file(pom_path, hex) != CCB_OK) {
-        mv_diag(diags, "CCB-E3019", coord, "resolved POM cannot be read");
-        goto fail;
-      }
-      mv_push_entry(out, &res_entries_cap, item.group, item.artifact,
-        item.version, "pom", hex, pom_path);
-    }
-    // Transitive dependencies of this POM.
-    for (size_t d = 0; d < pom.deps_count; d++) {
-      mv_dep *dep = &pom.deps[d];
-      int dbad = 0;
-      char *scope = dep->scope != NULL ?
-        mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-          dep->scope, &dbad) : (char *)"compile";
-      if (dbad) {
-        mv_diag(diags, "CCB-E3019", coord,
-          "dependency scope cannot be resolved");
-        goto fail;
-      }
-      if (strcmp(scope, "test") == 0 || strcmp(scope, "provided") == 0 ||
-          strcmp(scope, "system") == 0 || strcmp(scope, "import") == 0) {
-        continue;
-      }
-      char *optional = dep->optional != NULL ?
-        mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-          dep->optional, &dbad) : NULL;
-      if (dbad) {
-        mv_diag(diags, "CCB-E3019", coord,
-          "dependency optional flag cannot be resolved");
-        goto fail;
-      }
-      if (optional != NULL && strcmp(optional, "true") == 0) {
-        continue;
-      }
-      char *dg = mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-        dep->group, &dbad);
-      char *da = mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-        dep->artifact, &dbad);
-      char *dv = dep->version != NULL ?
-        mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-          dep->version, &dbad) : NULL;
-      if (dbad || dg == NULL || da == NULL ||
-          !mv_part_ok(dg, strlen(dg)) || !mv_part_ok(da, strlen(da))) {
-        mv_diag(diags, "CCB-E3019", coord,
-          "dependency coordinates cannot be resolved");
-        goto fail;
-      }
-      if (dv != NULL && !mv_part_ok(dv, strlen(dv))) {
-        mv_diag(diags, "CCB-E3019", coord,
-          "dependency version is path-unsafe");
-        goto fail;
-      }
-      if (dv == NULL || dv[0] == '\0') {
-        // Fall back to this POM's dependencyManagement entry.
-        for (size_t m = 0; m < pom.mgmt_count; m++) {
-          mv_dep *mg = &pom.mgmt[m];
-          int mbad = 0;
-          char *mg_g = mv_subst(arena, &pom, eff_group, eff_artifact,
-            eff_version, mg->group, &mbad);
-          char *mg_a = mv_subst(arena, &pom, eff_group, eff_artifact,
-            eff_version, mg->artifact, &mbad);
-          if (mbad || mg_g == NULL || mg_a == NULL) {
-            continue;
-          }
-          if (strcmp(mg_g, dg) == 0 && strcmp(mg_a, da) == 0 &&
-              mg->version != NULL) {
-            dv = mv_subst(arena, &pom, eff_group, eff_artifact, eff_version,
-              mg->version, &dbad);
-            if (dbad) {
-              dv = NULL;
-            }
-            break;
-          }
-        }
-      }
-      if (dv == NULL || dv[0] == '\0') {
-        ccb_str m;
-        ccb_str_init(&m);
-        ccb_str_append(&m, "dependency ");
-        ccb_str_append(&m, dg);
-        ccb_str_append_c(&m, ':');
-        ccb_str_append(&m, da);
-        ccb_str_append(&m,
-          " has no version and no dependencyManagement entry");
-        mv_diag(diags, "CCB-E3019", coord, m.buf);
-        ccb_str_free(&m);
-        goto fail;
-      }
-      // Exclusions are checked before nearest-wins: an excluded
-      // artifact never enters the seen set, so an excluded version
-      // can never win and another version from a later path can.
-      // The subtree is pruned with it: an excluded artifact's own
-      // dependencies are never queued.
-      if (mv_is_excluded(excls, excl_count, dg, da, dv)) {
-        if (verbose) {
-          printf("maven: %s:%s:%s: excluded, skipping\n", dg, da, dv);
-        }
-        continue;
-      }
-      ccb_str ks;
-      ccb_str_init(&ks);
-      ccb_str_append(&ks, dg);
-      ccb_str_append_c(&ks, ':');
-      ccb_str_append(&ks, da);
-      char *key = ccb_arena_strdup(arena, ks.buf);
-      ccb_str_free(&ks);
-      mv_seen *prev = mv_seen_find(seen, seen_count, key);
-      if (prev != NULL) {
-        if (verbose && strcmp(prev->version, dv) != 0) {
-          printf("maven: %s: requested %s, using nearest %s\n", key, dv,
-            prev->version);
-        }
-        continue;
-      }
-      MV_GROW(arena, seen, seen_count, seen_cap, mv_seen);
-      seen[seen_count].key = key;
-      seen[seen_count].version = ccb_arena_strdup(arena, dv);
-      seen_count++;
-      MV_GROW(arena, queue, qcount, qcap, mv_qitem);
-      queue[qcount].group = dg;
-      queue[qcount].artifact = da;
-      queue[qcount].version = dv;
-      queue[qcount].depth = item.depth + 1;
-      qcount++;
     }
   }
   // Lockfile enforcement (cache-only mode only): `ccb setup` writes

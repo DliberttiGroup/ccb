@@ -1,7 +1,8 @@
 // Tests for remote Maven dependency resolution (ccb_maven).
-// Fixture repositories live under /tmp/ccb_test_maven/repo in Maven
-// layout and are reached through CCB_MAVEN_REPOS=file://... plus
-// CCB_MAVEN_CACHE, so no test touches the network. The black-box
+// Fixture repositories live under <tmpdir>/repo in Maven layout
+// (tmpdir is a per-process mkdtemp dir, see test.h) and are reached
+// through CCB_MAVEN_REPOS=file://... plus CCB_MAVEN_CACHE, so no
+// test touches the network. The black-box
 // end-to-end build needs a runnable SDK toolchain (same env fallback
 // convention as test_aab.c) and skips gracefully without one.
 #include "ccb_common.h"
@@ -17,9 +18,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define BASE "/tmp/ccb_test_maven"
-#define REPO BASE "/repo"
-#define CACHE BASE "/cache"
+static char BASE[256];
+#define B(rel) ccb_test_path(BASE, rel)
+#define REPO B("repo")
+#define CACHE B("cache")
 
 static void write_text(const char *path, const char *text) {
   CHECK(ccb_write_file(path, text, strlen(text)) == CCB_OK);
@@ -556,8 +558,8 @@ static void test_cache_only(void) {
 
 // ---------- parent POMs ----------
 
-#define REPO_P BASE "/repo_parents"
-#define CACHE_P BASE "/cache_parents"
+#define REPO_P B("repo_parents")
+#define CACHE_P B("cache_parents")
 
 // put_artifact rooted at REPO_P (same layout, no published checksums:
 // the parents tests never need them).
@@ -891,7 +893,7 @@ static void test_parents(void) {
 
 // ---------- config-load validation ----------
 
-#define PROJ_CFG BASE "/proj_cfg"
+#define PROJ_CFG B("proj_cfg")
 
 static void write_cfg_toml(const char *coord) {
   ccb_str s;
@@ -918,14 +920,14 @@ static void write_cfg_toml(const char *coord) {
   ccb_str_append(&s, coord);
   ccb_str_append(&s, "\"]\n");
   char *toml = ccb_str_steal(&s);
-  write_text(PROJ_CFG "/ccb.toml", toml);
+  write_text(B("proj_cfg/ccb.toml"), toml);
   free(toml);
 }
 
 static void test_config_validation(void) {
-  mkdir_or_fail(PROJ_CFG "/src/main/res/values");
-  mkdir_or_fail(PROJ_CFG "/src/main/kotlin");
-  write_text(PROJ_CFG "/src/main/AndroidManifest.xml",
+  mkdir_or_fail(B("proj_cfg/src/main/res/values"));
+  mkdir_or_fail(B("proj_cfg/src/main/kotlin"));
+  write_text(B("proj_cfg/src/main/AndroidManifest.xml"),
     "<manifest package=\"com.example.hello\" />\n");
   static const char *bad[] = {
     "com.example:lib",
@@ -942,7 +944,7 @@ static void test_config_validation(void) {
     ccb_config *cfg = NULL;
     ccb_diag_list diags;
     ccb_diag_list_init(&diags);
-    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) != CCB_OK);
+    CHECK(ccb_config_load(B("proj_cfg/ccb.toml"), NULL, &cfg, &diags) != CCB_OK);
     CHECK(cfg == NULL);
     CHECK(has_code(&diags, "CCB-E1005"));
     ccb_diag_list_free(&diags);
@@ -952,7 +954,7 @@ static void test_config_validation(void) {
     ccb_config *cfg = NULL;
     ccb_diag_list diags;
     ccb_diag_list_init(&diags);
-    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) == CCB_OK);
+    CHECK(ccb_config_load(B("proj_cfg/ccb.toml"), NULL, &cfg, &diags) == CCB_OK);
     CHECK(cfg != NULL && cfg->maven_count == 1);
     CHECK_STR_EQ(cfg->maven[0], "com.example:lib:1.0");
     ccb_config_free(cfg);
@@ -962,9 +964,9 @@ static void test_config_validation(void) {
 
 // ---------- exclusions + lockfile (v2 follow-ups) ----------
 
-#define REPO_X BASE "/repo_x"
-#define CACHE_X BASE "/cache_x"
-#define PROJ_X BASE "/proj_x"
+#define REPO_X B("repo_x")
+#define CACHE_X B("cache_x")
+#define PROJ_X B("proj_x")
 
 static char *repo_x_leaf_path(const char *group, const char *artifact,
     const char *version, const char *leaf) {
@@ -1202,14 +1204,14 @@ static void write_cfg_toml_x(const char *coord, const char *exclude) {
     ccb_str_append(&s, "\"]\n");
   }
   char *toml = ccb_str_steal(&s);
-  write_text(PROJ_CFG "/ccb.toml", toml);
+  write_text(B("proj_cfg/ccb.toml"), toml);
   free(toml);
 }
 
 static void test_exclusion_config(void) {
-  mkdir_or_fail(PROJ_CFG "/src/main/res/values");
-  mkdir_or_fail(PROJ_CFG "/src/main/kotlin");
-  write_text(PROJ_CFG "/src/main/AndroidManifest.xml",
+  mkdir_or_fail(B("proj_cfg/src/main/res/values"));
+  mkdir_or_fail(B("proj_cfg/src/main/kotlin"));
+  write_text(B("proj_cfg/src/main/AndroidManifest.xml"),
     "<manifest package=\"com.example.hello\" />\n");
   // Excluding a direct dependency (unversioned or exact version) is
   // a config error naming it.
@@ -1222,7 +1224,7 @@ static void test_exclusion_config(void) {
     ccb_config *cfg = NULL;
     ccb_diag_list diags;
     ccb_diag_list_init(&diags);
-    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) != CCB_OK);
+    CHECK(ccb_config_load(B("proj_cfg/ccb.toml"), NULL, &cfg, &diags) != CCB_OK);
     CHECK(cfg == NULL);
     CHECK(has_code(&diags, "CCB-E1005"));
     ccb_diag_list_free(&diags);
@@ -1239,7 +1241,7 @@ static void test_exclusion_config(void) {
     ccb_config *cfg = NULL;
     ccb_diag_list diags;
     ccb_diag_list_init(&diags);
-    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) == CCB_OK);
+    CHECK(ccb_config_load(B("proj_cfg/ccb.toml"), NULL, &cfg, &diags) == CCB_OK);
     CHECK(cfg != NULL && cfg->maven_count == 1);
     ccb_config_free(cfg);
     ccb_diag_list_free(&diags);
@@ -1256,7 +1258,7 @@ static void test_exclusion_config(void) {
     ccb_config *cfg = NULL;
     ccb_diag_list diags;
     ccb_diag_list_init(&diags);
-    CHECK(ccb_config_load(PROJ_CFG "/ccb.toml", NULL, &cfg, &diags) != CCB_OK);
+    CHECK(ccb_config_load(B("proj_cfg/ccb.toml"), NULL, &cfg, &diags) != CCB_OK);
     CHECK(cfg == NULL);
     CHECK(has_code(&diags, "CCB-E1005"));
     ccb_diag_list_free(&diags);
@@ -1324,7 +1326,7 @@ static void test_lockfile(void) {
   ccb_diag_list diags;
   // Prefetch ignores a stale lockfile (setup is the update path):
   // write a bogus one first, prefetch still succeeds.
-  write_text(PROJ_X "/ccb.lock", "bogus line\n");
+  write_text(B("proj_x/ccb.lock"), "bogus line\n");
   ccb_diag_list_init(&diags);
   CHECK(resolve_x(coords, 1, 1, NULL, 0, PROJ_X, &out, &diags) == CCB_OK);
   // Generation: exact contents, sorted, transitive versions + hashes.
@@ -1361,7 +1363,7 @@ static void test_lockfile(void) {
     ccb_str_append_c(&want, '\n');
     char *got = NULL;
     size_t got_len = 0;
-    CHECK(ccb_read_file(PROJ_X "/ccb.lock", &got, &got_len) == CCB_OK);
+    CHECK(ccb_read_file(B("proj_x/ccb.lock"), &got, &got_len) == CCB_OK);
     CHECK(got_len == strlen(want.buf));
     CHECK(memcmp(got, want.buf, got_len) == 0);
     free(got);
@@ -1379,7 +1381,7 @@ static void test_lockfile(void) {
   ccb_diag_list_free(&diags);
   // Mismatch cases, each failing with CCB-E3023 naming the coordinate.
   // Version drift: the lockfile pins deep:9.9, resolution finds 2.0.
-  write_text(PROJ_X "/ccb.lock",
+  write_text(B("proj_x/ccb.lock"),
     "com.example:deep:9.9 jar 0000000000000000000000000000000000000000000000000000000000000000\n"
     "com.example:mid:1.0 jar 0000000000000000000000000000000000000000000000000000000000000000\n"
     "com.example:top:1.0 jar 0000000000000000000000000000000000000000000000000000000000000000\n");
@@ -1396,7 +1398,7 @@ static void test_lockfile(void) {
     char *sp2 = sp != NULL ? strchr(sp + 1, ' ') : NULL;
     CHECK(sp2 != NULL);
     memset(sp2 + 1, '0', 64);
-    write_text(PROJ_X "/ccb.lock", lock_text);
+    write_text(B("proj_x/ccb.lock"), lock_text);
     free(lock_text);
   }
   ccb_diag_list_init(&diags);
@@ -1407,7 +1409,7 @@ static void test_lockfile(void) {
   // other lines match, so only the missing line can fail).
   {
     char *lock_text = lock_text_real(1, NULL);
-    write_text(PROJ_X "/ccb.lock", lock_text);
+    write_text(B("proj_x/ccb.lock"), lock_text);
     free(lock_text);
   }
   ccb_diag_list_init(&diags);
@@ -1419,7 +1421,7 @@ static void test_lockfile(void) {
   {
     char *lock_text = lock_text_real(0,
       "com.example:gone:1.0 jar 0000000000000000000000000000000000000000000000000000000000000000\n");
-    write_text(PROJ_X "/ccb.lock", lock_text);
+    write_text(B("proj_x/ccb.lock"), lock_text);
     free(lock_text);
   }
   ccb_diag_list_init(&diags);
@@ -1427,13 +1429,13 @@ static void test_lockfile(void) {
   CHECK(has_code(&diags, "CCB-E3023"));
   ccb_diag_list_free(&diags);
   // Malformed lockfile.
-  write_text(PROJ_X "/ccb.lock", "this is not a lockfile line\n");
+  write_text(B("proj_x/ccb.lock"), "this is not a lockfile line\n");
   ccb_diag_list_init(&diags);
   CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) != CCB_OK);
   CHECK(has_code(&diags, "CCB-E3023"));
   ccb_diag_list_free(&diags);
   // No lockfile: pre-lockfile behavior, cache-only resolve succeeds.
-  CHECK(remove(PROJ_X "/ccb.lock") == 0);
+  CHECK(remove(B("proj_x/ccb.lock")) == 0);
   ccb_diag_list_init(&diags);
   CHECK(resolve_x(coords, 1, 0, NULL, 0, PROJ_X, &out, &diags) == CCB_OK);
   CHECK(result_has(&out, "deep-2.0.jar"));
@@ -1444,13 +1446,13 @@ static void test_lockfile(void) {
 
 // ---------- end-to-end build ----------
 
-#define REPO_E2E BASE "/repo_e2e"
-#define CACHE_E2E BASE "/cache_e2e"
-#define PROJ_E2E BASE "/proj_e2e"
-#define APK_E2E PROJ_E2E "/build/outputs/debug/app.apk"
-#define CACHE_E2E_P BASE "/cache_e2e_parents"
-#define PROJ_E2E_P BASE "/proj_e2e_parents"
-#define APK_E2E_P PROJ_E2E_P "/build/outputs/debug/app.apk"
+#define REPO_E2E B("repo_e2e")
+#define CACHE_E2E B("cache_e2e")
+#define PROJ_E2E B("proj_e2e")
+#define APK_E2E B("proj_e2e/build/outputs/debug/app.apk")
+#define CACHE_E2E_P B("cache_e2e_parents")
+#define PROJ_E2E_P B("proj_e2e_parents")
+#define APK_E2E_P B("proj_e2e_parents/build/outputs/debug/app.apk")
 
 static char *find_binary(int argc, char **argv) {
   if (argc > 1 && argv[1] != NULL && access(argv[1], X_OK) == 0) {
@@ -1534,10 +1536,10 @@ static void build_e2e_repo(void) {
 }
 
 static void write_e2e_project(void) {
-  mkdir_or_fail(PROJ_E2E "/src/main/kotlin/com/example/hello");
-  mkdir_or_fail(PROJ_E2E "/src/main/res/values");
-  mkdir_or_fail(PROJ_E2E "/src/main/res/layout");
-  write_text(PROJ_E2E "/ccb.toml",
+  mkdir_or_fail(B("proj_e2e/src/main/kotlin/com/example/hello"));
+  mkdir_or_fail(B("proj_e2e/src/main/res/values"));
+  mkdir_or_fail(B("proj_e2e/src/main/res/layout"));
+  write_text(B("proj_e2e/ccb.toml"),
     "ccb_version = 1\n"
     "\n"
     "[project]\n"
@@ -1556,7 +1558,7 @@ static void write_e2e_project(void) {
     "\n"
     "[deps]\n"
     "maven = [\"com.example:lib:1.0\"]\n");
-  write_text(PROJ_E2E "/src/main/AndroidManifest.xml",
+  write_text(B("proj_e2e/src/main/AndroidManifest.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  package=\"com.example.hello\">\n"
@@ -1569,7 +1571,7 @@ static void write_e2e_project(void) {
     "    </activity>\n"
     "  </application>\n"
     "</manifest>\n");
-  write_text(PROJ_E2E "/src/main/kotlin/com/example/hello/MainActivity.kt",
+  write_text(B("proj_e2e/src/main/kotlin/com/example/hello/MainActivity.kt"),
     "package com.example.hello\n"
     "\n"
     "import android.app.Activity\n"
@@ -1581,17 +1583,17 @@ static void write_e2e_project(void) {
     "    setContentView(R.layout.activity_main)\n"
     "  }\n"
     "}\n");
-  write_text(PROJ_E2E "/src/main/res/values/strings.xml",
+  write_text(B("proj_e2e/src/main/res/values/strings.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <string name=\"app_name\">hello</string>\n"
     "</resources>\n");
-  write_text(PROJ_E2E "/src/main/res/values/themes.xml",
+  write_text(B("proj_e2e/src/main/res/values/themes.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <style name=\"AppTheme\" parent=\"android:Theme.Material\" />\n"
     "</resources>\n");
-  write_text(PROJ_E2E "/src/main/res/layout/activity_main.xml",
+  write_text(B("proj_e2e/src/main/res/layout/activity_main.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  android:layout_width=\"match_parent\"\n"
@@ -1671,10 +1673,10 @@ static void build_e2e_repo_parents(void) {
 }
 
 static void write_e2e_project_parents(void) {
-  mkdir_or_fail(PROJ_E2E_P "/src/main/kotlin/com/example/hello");
-  mkdir_or_fail(PROJ_E2E_P "/src/main/res/values");
-  mkdir_or_fail(PROJ_E2E_P "/src/main/res/layout");
-  write_text(PROJ_E2E_P "/ccb.toml",
+  mkdir_or_fail(B("proj_e2e_parents/src/main/kotlin/com/example/hello"));
+  mkdir_or_fail(B("proj_e2e_parents/src/main/res/values"));
+  mkdir_or_fail(B("proj_e2e_parents/src/main/res/layout"));
+  write_text(B("proj_e2e_parents/ccb.toml"),
     "ccb_version = 1\n"
     "\n"
     "[project]\n"
@@ -1693,7 +1695,7 @@ static void write_e2e_project_parents(void) {
     "\n"
     "[deps]\n"
     "maven = [\"com.example:plib:1.0\"]\n");
-  write_text(PROJ_E2E_P "/src/main/AndroidManifest.xml",
+  write_text(B("proj_e2e_parents/src/main/AndroidManifest.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  package=\"com.example.hello\">\n"
@@ -1706,7 +1708,7 @@ static void write_e2e_project_parents(void) {
     "    </activity>\n"
     "  </application>\n"
     "</manifest>\n");
-  write_text(PROJ_E2E_P "/src/main/kotlin/com/example/hello/MainActivity.kt",
+  write_text(B("proj_e2e_parents/src/main/kotlin/com/example/hello/MainActivity.kt"),
     "package com.example.hello\n"
     "\n"
     "import android.app.Activity\n"
@@ -1718,17 +1720,17 @@ static void write_e2e_project_parents(void) {
     "    setContentView(R.layout.activity_main)\n"
     "  }\n"
     "}\n");
-  write_text(PROJ_E2E_P "/src/main/res/values/strings.xml",
+  write_text(B("proj_e2e_parents/src/main/res/values/strings.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <string name=\"app_name\">hello</string>\n"
     "</resources>\n");
-  write_text(PROJ_E2E_P "/src/main/res/values/themes.xml",
+  write_text(B("proj_e2e_parents/src/main/res/values/themes.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <style name=\"AppTheme\" parent=\"android:Theme.Material\" />\n"
     "</resources>\n");
-  write_text(PROJ_E2E_P "/src/main/res/layout/activity_main.xml",
+  write_text(B("proj_e2e_parents/src/main/res/layout/activity_main.xml"),
     "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  android:layout_width=\"match_parent\"\n"
     "  android:layout_height=\"match_parent\">\n"
@@ -1804,7 +1806,7 @@ static void test_e2e_parents(int argc, char **argv) {
   char *cache_env = ccb_str_steal(&s);
   ccb_str_init(&s);
   ccb_str_append(&s, "HOME=");
-  ccb_str_append(&s, BASE "/home");
+  ccb_str_append(&s, B("home"));
   char *home_env = ccb_str_steal(&s);
   char *const env_extra[] = { sdk_env, java_env, kotlin_env, cache_env,
     home_env, NULL };
@@ -1916,7 +1918,7 @@ static void test_e2e(int argc, char **argv) {
   char *cache_env = ccb_str_steal(&s);
   ccb_str_init(&s);
   ccb_str_append(&s, "HOME=");
-  ccb_str_append(&s, BASE "/home");
+  ccb_str_append(&s, B("home"));
   char *home_env = ccb_str_steal(&s);
   char *const env_extra[] = { sdk_env, java_env, kotlin_env, cache_env,
     home_env, NULL };
@@ -1983,6 +1985,7 @@ static void test_e2e(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+  ccb_test_tmpdir(BASE, sizeof BASE, "maven");
   const char *old_repos = getenv("CCB_MAVEN_REPOS");
   const char *old_cache = getenv("CCB_MAVEN_CACHE");
   char *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
@@ -2026,5 +2029,6 @@ int main(int argc, char **argv) {
   } else {
     unsetenv("CCB_MAVEN_CACHE");
   }
+  ccb_remove_recursive(BASE);
   TEST_MAIN_END();
 }

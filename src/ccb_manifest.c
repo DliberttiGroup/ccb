@@ -327,6 +327,7 @@ typedef struct {
   char *kind; // "activity", "uses-permission", ...
   char *raw; // raw android:name, or NULL for a nameless uses-feature
   char *resolved; // package-resolved name, or NULL like raw
+  char *target; // resolved android:targetActivity (activity-alias only)
   char *text; // full element text from the source manifest
   char *norm; // normalized comparison key
   size_t vstart; // android:name value offset within text, SIZE_MAX if none
@@ -335,6 +336,7 @@ typedef struct {
 
 typedef struct {
   char *package; // owned or NULL
+  char *app_class; // resolved <application android:name>, or NULL
   entry *entries;
   size_t nentries;
   size_t capentries;
@@ -346,6 +348,7 @@ static void entry_free_contents(entry *e) {
   free(e->kind);
   free(e->raw);
   free(e->resolved);
+  free(e->target);
   free(e->text);
   free(e->norm);
 }
@@ -355,6 +358,7 @@ static void manifest_free(manifest *m) {
     return;
   }
   free(m->package);
+  free(m->app_class);
   for (size_t i = 0; i < m->nentries; i++) {
     entry_free_contents(&m->entries[i]);
   }
@@ -459,7 +463,7 @@ static char *norm_key(const char *kind, const char *resolved, const elem *e,
 }
 
 static int manifest_push_entry(manifest *m, const elem *e, const char *src,
-    const char *pkg, const char *kind, const char *raw, cur *c) {
+    const char *pkg, const char *kind, const char *raw, const char *target, cur *c) {
   if (m->nentries == m->capentries) {
     size_t ncap = m->capentries == 0 ? 8 : m->capentries * 2;
     m->entries = ccb_xrealloc(m->entries, ncap * sizeof(*m->entries));
@@ -470,6 +474,7 @@ static int manifest_push_entry(manifest *m, const elem *e, const char *src,
   en->kind = ccb_xstrdup(kind);
   en->raw = raw != NULL ? ccb_xstrdup(raw) : NULL;
   en->resolved = raw != NULL ? resolve_name(raw, pkg) : NULL;
+  en->target = target != NULL ? resolve_name(target, pkg) : NULL;
   en->text = ccb_xstrndup(src + e->start, e->end - e->start);
   en->norm = norm_key(kind, en->resolved, e, src);
   const attr *name_attr = elem_attr(e, "android:name");
@@ -542,6 +547,10 @@ static manifest *parse_manifest(const char *text, const char *fallback_pkg,
     if (app->close_start != SIZE_MAX) {
       m->comp_insert = app->close_start;
     }
+    const attr *app_name = elem_attr(app, "android:name");
+    if (app_name != NULL) {
+      m->app_class = resolve_name(app_name->value, resolve_pkg);
+    }
     for (size_t i = 0; i < app->nkids; i++) {
       elem *kid = app->kids[i];
       if (!is_component_kind(kid->name)) {
@@ -553,7 +562,11 @@ static manifest *parse_manifest(const char *text, const char *fallback_pkg,
         elem_free(root);
         goto fail;
       }
-      if (manifest_push_entry(m, kid, text, resolve_pkg, kid->name, name_attr->value, &c) != 0) {
+      // An activity-alias names its target activity, which nothing
+      // else may reference: it is an entry point of its own.
+      const attr *target_attr = elem_attr(kid, "android:targetActivity");
+      const char *target = target_attr != NULL ? target_attr->value : NULL;
+      if (manifest_push_entry(m, kid, text, resolve_pkg, kid->name, name_attr->value, target, &c) != 0) {
         elem_free(root);
         goto fail;
       }
@@ -570,14 +583,14 @@ static manifest *parse_manifest(const char *text, const char *fallback_pkg,
         elem_free(root);
         goto fail;
       }
-      if (manifest_push_entry(m, kid, text, resolve_pkg, kid->name, name_attr->value, &c) != 0) {
+      if (manifest_push_entry(m, kid, text, resolve_pkg, kid->name, name_attr->value, NULL, &c) != 0) {
         elem_free(root);
         goto fail;
       }
     } else if (strcmp(kid->name, "uses-feature") == 0) {
       const attr *name_attr = elem_attr(kid, "android:name");
       const char *raw = name_attr != NULL ? name_attr->value : NULL;
-      if (manifest_push_entry(m, kid, text, resolve_pkg, kid->name, raw, &c) != 0) {
+      if (manifest_push_entry(m, kid, text, resolve_pkg, kid->name, raw, NULL, &c) != 0) {
         elem_free(root);
         goto fail;
       }
@@ -869,4 +882,68 @@ done:
   free(seen);
   manifest_free(app);
   return result;
+}
+
+char *ccb_manifest_package(const char *manifest_text) {
+  const char *m = strstr(manifest_text, "package=\"");
+  if (m == NULL) {
+    return NULL;
+  }
+  m += 9;
+  const char *end = strchr(m, '"');
+  if (end == NULL) {
+    return NULL;
+  }
+  return ccb_xstrndup(m, (size_t)(end - m));
+}
+
+static void entry_names_push(char ***arr, size_t *count, size_t *cap,
+    const char *s) {
+  if (*count == *cap) {
+    size_t ncap = *cap == 0 ? 8 : *cap * 2;
+    *arr = ccb_xrealloc(*arr, ncap * sizeof(**arr));
+    *cap = ncap;
+  }
+  (*arr)[(*count)++] = ccb_xstrdup(s);
+}
+
+int ccb_manifest_entry_points(const char *text, const char *fallback_pkg,
+    char ***out, size_t *n, char **err_out) {
+  *out = NULL;
+  *n = 0;
+  if (err_out != NULL) {
+    *err_out = NULL;
+  }
+  char *err = NULL;
+  manifest *m = parse_manifest(text, fallback_pkg, &err);
+  if (m == NULL) {
+    if (err_out != NULL) {
+      *err_out = err;
+    } else {
+      free(err);
+    }
+    return -1;
+  }
+  char **names = NULL;
+  size_t count = 0;
+  size_t cap = 0;
+  if (m->app_class != NULL) {
+    entry_names_push(&names, &count, &cap, m->app_class);
+  }
+  for (size_t i = 0; i < m->nentries; i++) {
+    entry *e = &m->entries[i];
+    if (!is_component_kind(e->kind)) {
+      continue;
+    }
+    if (e->resolved != NULL) {
+      entry_names_push(&names, &count, &cap, e->resolved);
+    }
+    if (e->target != NULL) {
+      entry_names_push(&names, &count, &cap, e->target);
+    }
+  }
+  manifest_free(m);
+  *out = names;
+  *n = count;
+  return 0;
 }

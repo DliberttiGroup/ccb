@@ -5,16 +5,19 @@
 #include "ccb_hash.h"
 #include "ccb_cache.h"
 
+#define B(rel) ccb_test_path(dir, rel)
+
 int main(void) {
-  const char *dir = "/tmp/ccb_test_cache";
+  char dir[256];
+  ccb_test_tmpdir(dir, sizeof dir, "cache");
   ccb_remove_recursive(dir);
   CHECK(ccb_mkdir_p(dir) == CCB_OK);
-  CHECK(ccb_write_file("/tmp/ccb_test_cache/f.txt", "data", 4) == CCB_OK);
+  CHECK(ccb_write_file(B("f.txt"), "data", 4) == CCB_OK);
 
   // Missing cache loads as empty.
   {
     ccb_cache *c = NULL;
-    CHECK(ccb_cache_load("/tmp/ccb_test_cache/nope.json", &c) == CCB_OK);
+    CHECK(ccb_cache_load(B("nope.json"), &c) == CCB_OK);
     CHECK(c != NULL);
     CHECK(c->tool_fingerprint == NULL);
     CHECK(ccb_cache_step_fp(c, "kotlinc") == NULL);
@@ -23,14 +26,14 @@ int main(void) {
   // Round-trip.
   {
     ccb_cache *c = NULL;
-    CHECK(ccb_cache_load("/tmp/ccb_test_cache/nope.json", &c) == CCB_OK);
+    CHECK(ccb_cache_load(B("nope.json"), &c) == CCB_OK);
     c->tool_fingerprint = ccb_xstrdup("bt=35.0.0|kt=2.4.21");
     ccb_cache_set_step(c, "kotlinc", "aaa");
     ccb_cache_set_step(c, "d8", "bbb");
     ccb_cache_set_file(c, "src/Main.kt", "deadbeef");
-    CHECK(ccb_cache_save(c, "/tmp/ccb_test_cache/cache.json") == CCB_OK);
+    CHECK(ccb_cache_save(c, B("cache.json")) == CCB_OK);
     ccb_cache_free(c);
-    CHECK(ccb_cache_load("/tmp/ccb_test_cache/cache.json", &c) == CCB_OK);
+    CHECK(ccb_cache_load(B("cache.json"), &c) == CCB_OK);
     CHECK_STR_EQ(c->tool_fingerprint, "bt=35.0.0|kt=2.4.21");
     CHECK_STR_EQ(ccb_cache_step_fp(c, "kotlinc"), "aaa");
     CHECK_STR_EQ(ccb_cache_step_fp(c, "d8"), "bbb");
@@ -43,21 +46,21 @@ int main(void) {
   }
   // Corrupt cache loads as empty, not an error.
   {
-    CHECK(ccb_write_file("/tmp/ccb_test_cache/bad.json", "{not json", 9) == CCB_OK);
+    CHECK(ccb_write_file(B("bad.json"), "{not json", 9) == CCB_OK);
     ccb_cache *c = NULL;
-    CHECK(ccb_cache_load("/tmp/ccb_test_cache/bad.json", &c) == CCB_OK);
+    CHECK(ccb_cache_load(B("bad.json"), &c) == CCB_OK);
     CHECK(c->tool_fingerprint == NULL);
     ccb_cache_free(c);
   }
   // File hashing + fingerprint determinism.
   {
-    char *h = ccb_cache_hash_file("/tmp/ccb_test_cache/f.txt");
+    char *h = ccb_cache_hash_file(B("f.txt"));
     CHECK(h != NULL);
     char expect[65];
     ccb_sha256_hex("data", 4, expect);
     CHECK_STR_EQ(h, expect);
     free(h);
-    CHECK(ccb_cache_hash_file("/tmp/ccb_test_cache/missing.txt") == NULL);
+    CHECK(ccb_cache_hash_file(B("missing.txt")) == NULL);
     const char *keys[] = { "a", "b" };
     const char *vals[] = { "1", "2" };
     char *f1 = ccb_cache_fingerprint(keys, vals, 2);

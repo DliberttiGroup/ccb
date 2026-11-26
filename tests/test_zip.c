@@ -4,7 +4,11 @@
 #include "ccb_fs.h"
 #include "ccb_zip.h"
 
+#define B(rel) ccb_test_path(dir, rel)
+
 int main(void) {
+  char dir[256];
+  ccb_test_tmpdir(dir, sizeof dir, "zip");
   // CRC32 vectors.
   CHECK(ccb_zip_crc32("", 0) == 0);
   CHECK(ccb_zip_crc32("123456789", 9) == 0xCBF43926u);
@@ -56,13 +60,12 @@ int main(void) {
 
   // Writer/reader round-trip.
   {
-    const char *dir = "/tmp/ccb_test_zip";
     ccb_remove_recursive(dir);
     CHECK(ccb_mkdir_p(dir) == CCB_OK);
-    CHECK(ccb_write_file("/tmp/ccb_test_zip/a.txt", "alpha", 5) == CCB_OK);
+    CHECK(ccb_write_file(B("a.txt"), "alpha", 5) == CCB_OK);
     ccb_zip_writer w;
-    CHECK(ccb_zip_writer_init(&w, "/tmp/ccb_test_zip/out.zip") == CCB_OK);
-    CHECK(ccb_zip_writer_add_file(&w, "res/a.txt", "/tmp/ccb_test_zip/a.txt") == CCB_OK);
+    CHECK(ccb_zip_writer_init(&w, B("out.zip")) == CCB_OK);
+    CHECK(ccb_zip_writer_add_file(&w, "res/a.txt", B("a.txt")) == CCB_OK);
     CHECK(ccb_zip_writer_add_data(&w, "empty.bin", "", 0) == CCB_OK);
     static const char bin[4] = { 0x00, 0x01, 0x02, (char)0xFF };
     CHECK(ccb_zip_writer_add_data(&w, "bin.dat", bin, 4) == CCB_OK);
@@ -73,7 +76,7 @@ int main(void) {
     CHECK(ccb_zip_writer_finish(&w) == CCB_OK);
 
     ccb_zip_archive *a = NULL;
-    CHECK(ccb_zip_open("/tmp/ccb_test_zip/out.zip", &a) == CCB_OK);
+    CHECK(ccb_zip_open(B("out.zip"), &a) == CCB_OK);
     CHECK(a->count == 3);
     const ccb_zip_entry *e = ccb_zip_find(a, "res/a.txt");
     CHECK(e != NULL && e->method == 0 && e->size == 5);
@@ -91,5 +94,6 @@ int main(void) {
     ccb_zip_close(a);
     ccb_remove_recursive(dir);
   }
+  ccb_remove_recursive(dir);
   TEST_MAIN_END();
 }

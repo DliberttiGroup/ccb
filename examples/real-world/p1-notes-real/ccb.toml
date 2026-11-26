@@ -1,0 +1,25 @@
+ccb_version = 1
+
+[project]
+name = "notes-real"
+package = "com.example.notes"
+version = "1.0"
+version_code = 1
+min_sdk = 26
+target_sdk = 35
+compile_sdk = 35
+
+[paths]
+manifest = "src/main/AndroidManifest.xml"
+res = "src/main/res"
+kotlin = "src/main/kotlin"
+
+# Phase 2: no flow sketch, no styles — screens and edges come from
+# the real code alone; the layout XML supplies the wireframe (Chunk
+# 2) and the button labels.
+[preview]
+resources = "src/main/res/values"
+layout = "src/main/res/layout"
+nav_graph = "src/main/res/navigation"
+phone_width = 390
+phone_height = 844

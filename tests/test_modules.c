@@ -16,14 +16,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define BASE "/tmp/ccb_test_mods"
-#define PROJ BASE "/proj"
-#define APK_OUT PROJ "/build/outputs/debug/app.apk"
-#define DEX_DIR PROJ "/build/intermediates/dex"
-#define CYCLE_PROJ BASE "/cycle"
-#define UNKNOWN_PROJ BASE "/unknown"
-#define SINGLE_PROJ BASE "/single"
-#define SINGLE_APK SINGLE_PROJ "/build/outputs/debug/app.apk"
+static char BASE[256];
+#define B(rel) ccb_test_path(BASE, rel)
+#define PROJ B("proj")
+#define APK_OUT B("proj/build/outputs/debug/app.apk")
+#define DEX_DIR B("proj/build/intermediates/dex")
+#define CYCLE_PROJ B("cycle")
+#define UNKNOWN_PROJ B("unknown")
+#define SINGLE_PROJ B("single")
+#define SINGLE_APK B("single/build/outputs/debug/app.apk")
 
 static void write_text(const char *path, const char *text) {
   CHECK(ccb_write_file(path, text, strlen(text)) == CCB_OK);
@@ -306,9 +307,11 @@ static void write_graph_project(const char *proj, const char *toml_modules,
 }
 
 int main(int argc, char **argv) {
+  ccb_test_tmpdir(BASE, sizeof BASE, "mods");
   char *bin = find_binary(argc, argv);
   if (bin == NULL) {
     fprintf(stderr, "note: no ccb binary, skipping module checks\n");
+    ccb_remove_recursive(BASE);
     TEST_MAIN_END();
   }
 
@@ -363,6 +366,7 @@ int main(int argc, char **argv) {
     free(kotlin_home);
     free(aapt2);
     free(jarsigner);
+    ccb_remove_recursive(BASE);
     TEST_MAIN_END();
   }
   char *sdk_env = NULL;
@@ -385,7 +389,7 @@ int main(int argc, char **argv) {
     kotlin_env = ccb_str_steal(&s);
     ccb_str_init(&s);
     ccb_str_append(&s, "HOME=");
-    ccb_str_append(&s, BASE "/home");
+    ccb_str_append(&s, B("home"));
     home_env = ccb_str_steal(&s);
   }
   char *const env_extra[] = { sdk_env, java_env, kotlin_env, home_env, NULL };
@@ -393,14 +397,14 @@ int main(int argc, char **argv) {
   // Multi-module fixture: app + base + core, core depends on base.
   // The app module reuses the single-module scaffold under app/.
   ccb_remove_recursive(PROJ);
-  mkdir_or_fail(PROJ "/app/src/main/kotlin/com/example/hello");
-  mkdir_or_fail(PROJ "/app/src/main/res/values");
-  mkdir_or_fail(PROJ "/app/src/main/res/layout");
-  mkdir_or_fail(PROJ "/libbase/src/main/kotlin/com/example/base");
-  mkdir_or_fail(PROJ "/libbase/src/main/res/values");
-  mkdir_or_fail(PROJ "/libcore/src/main/kotlin/com/example/core");
-  mkdir_or_fail(PROJ "/libcore/src/main/res/values");
-  write_text(PROJ "/ccb.toml",
+  mkdir_or_fail(B("proj/app/src/main/kotlin/com/example/hello"));
+  mkdir_or_fail(B("proj/app/src/main/res/values"));
+  mkdir_or_fail(B("proj/app/src/main/res/layout"));
+  mkdir_or_fail(B("proj/libbase/src/main/kotlin/com/example/base"));
+  mkdir_or_fail(B("proj/libbase/src/main/res/values"));
+  mkdir_or_fail(B("proj/libcore/src/main/kotlin/com/example/core"));
+  mkdir_or_fail(B("proj/libcore/src/main/res/values"));
+  write_text(B("proj/ccb.toml"),
     "ccb_version = 1\n"
     "\n"
     "[project]\n"
@@ -423,7 +427,7 @@ int main(int argc, char **argv) {
     "[modules.core]\n"
     "dir = \"libcore\"\n"
     "depends = [\"base\"]\n");
-  write_text(PROJ "/app/src/main/AndroidManifest.xml",
+  write_text(B("proj/app/src/main/AndroidManifest.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  package=\"com.example.hello\">\n"
@@ -436,7 +440,7 @@ int main(int argc, char **argv) {
     "    </activity>\n"
     "  </application>\n"
     "</manifest>\n");
-  write_text(PROJ "/app/src/main/kotlin/com/example/hello/MainActivity.kt",
+  write_text(B("proj/app/src/main/kotlin/com/example/hello/MainActivity.kt"),
     "package com.example.hello\n"
     "\n"
     "import android.app.Activity\n"
@@ -450,13 +454,13 @@ int main(int argc, char **argv) {
     "    val unused = CoreHelper.greeting()\n"
     "  }\n"
     "}\n");
-  write_text(PROJ "/app/src/main/res/values/strings.xml",
+  write_text(B("proj/app/src/main/res/values/strings.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <string name=\"app_name\">hello</string>\n"
     "  <string name=\"hello\">Hello from CCB!</string>\n"
     "</resources>\n");
-  write_text(PROJ "/app/src/main/res/layout/activity_main.xml",
+  write_text(B("proj/app/src/main/res/layout/activity_main.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  android:layout_width=\"match_parent\"\n"
@@ -467,12 +471,12 @@ int main(int argc, char **argv) {
     "    android:layout_height=\"wrap_content\"\n"
     "    android:text=\"@string/hello\" />\n"
     "</LinearLayout>\n");
-  write_text(PROJ "/app/src/main/res/values/themes.xml",
+  write_text(B("proj/app/src/main/res/values/themes.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <style name=\"AppTheme\" parent=\"@android:style/Theme.Material.Light.NoActionBar\" />\n"
     "</resources>\n");
-  write_text(PROJ "/libbase/src/main/AndroidManifest.xml",
+  write_text(B("proj/libbase/src/main/AndroidManifest.xml"),
     "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  package=\"com.example.base\">\n"
     "  <uses-permission android:name=\"android.permission.VIBRATE\" />\n"
@@ -480,7 +484,7 @@ int main(int argc, char **argv) {
     "    <activity android:name=\".LibActivity\" android:exported=\"false\" />\n"
     "  </application>\n"
     "</manifest>\n");
-  write_text(PROJ "/libbase/src/main/kotlin/com/example/base/BaseHelper.kt",
+  write_text(B("proj/libbase/src/main/kotlin/com/example/base/BaseHelper.kt"),
     "package com.example.base\n"
     "\n"
     "import android.app.Activity\n"
@@ -499,16 +503,16 @@ int main(int argc, char **argv) {
     "    val unused = text\n"
     "  }\n"
     "}\n");
-  write_text(PROJ "/libbase/src/main/res/values/strings.xml",
+  write_text(B("proj/libbase/src/main/res/values/strings.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <string name=\"base_text\">from base</string>\n"
     "</resources>\n");
-  write_text(PROJ "/libcore/src/main/AndroidManifest.xml",
+  write_text(B("proj/libcore/src/main/AndroidManifest.xml"),
     "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  package=\"com.example.core\">\n"
     "</manifest>\n");
-  write_text(PROJ "/libcore/src/main/kotlin/com/example/core/CoreHelper.kt",
+  write_text(B("proj/libcore/src/main/kotlin/com/example/core/CoreHelper.kt"),
     "package com.example.core\n"
     "\n"
     "import com.example.base.BaseHelper\n"
@@ -522,7 +526,7 @@ int main(int argc, char **argv) {
     "    return BaseR.string.base_text\n"
     "  }\n"
     "}\n");
-  write_text(PROJ "/libcore/src/main/res/values/strings.xml",
+  write_text(B("proj/libcore/src/main/res/values/strings.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <string name=\"core_text\">from core</string>\n"
@@ -553,15 +557,15 @@ int main(int argc, char **argv) {
   // module jars (the app link generates the real ones).
   CHECK(dex_contains(DEX_DIR, "Lcom/example/base/LibActivity;"));
   CHECK(dex_contains(DEX_DIR, "Lcom/example/core/CoreHelper;"));
-  CHECK(zip_has(PROJ "/build/intermediates/modules/base/base.aar", "classes.jar"));
-  CHECK(zip_has(PROJ "/build/intermediates/modules/base/base.aar", "AndroidManifest.xml"));
-  CHECK(zip_has(PROJ "/build/intermediates/modules/base/base.aar", "res/values/strings.xml"));
-  CHECK(zip_has(PROJ "/build/intermediates/modules/base/classes.jar",
+  CHECK(zip_has(B("proj/build/intermediates/modules/base/base.aar"), "classes.jar"));
+  CHECK(zip_has(B("proj/build/intermediates/modules/base/base.aar"), "AndroidManifest.xml"));
+  CHECK(zip_has(B("proj/build/intermediates/modules/base/base.aar"), "res/values/strings.xml"));
+  CHECK(zip_has(B("proj/build/intermediates/modules/base/classes.jar"),
     "com/example/base/BaseHelper.class"));
-  CHECK(!zip_has_r_class(PROJ "/build/intermediates/modules/base/classes.jar"));
-  CHECK(!zip_has_r_class(PROJ "/build/intermediates/modules/core/classes.jar"));
+  CHECK(!zip_has_r_class(B("proj/build/intermediates/modules/base/classes.jar")));
+  CHECK(!zip_has_r_class(B("proj/build/intermediates/modules/core/classes.jar")));
   // Explain + dry-run plan on a fresh tree (no intermediates yet).
-  CHECK(ccb_remove_recursive(PROJ "/build") == CCB_OK);
+  CHECK(ccb_remove_recursive(B("proj/build")) == CCB_OK);
   {
     char *explain_args[] = { bin, "build", "--explain", NULL };
     CHECK(ccb_proc_run(explain_args, PROJ, env_extra, &r) == CCB_OK);
@@ -588,7 +592,7 @@ int main(int argc, char **argv) {
     CHECK(str_contains(r.out, "up to date"));
     ccb_proc_result_free(&r);
   }
-  write_text(PROJ "/libbase/src/main/kotlin/com/example/base/BaseHelper.kt",
+  write_text(B("proj/libbase/src/main/kotlin/com/example/base/BaseHelper.kt"),
     "package com.example.base\n"
     "\n"
     "import android.app.Activity\n"
@@ -622,7 +626,7 @@ int main(int argc, char **argv) {
   char h1[65];
   char h2[65];
   CHECK(ccb_sha256_file(SINGLE_APK, h1) == CCB_OK);
-  CHECK(ccb_remove_recursive(SINGLE_PROJ "/build") == CCB_OK);
+  CHECK(ccb_remove_recursive(B("single/build")) == CCB_OK);
   CHECK(ccb_proc_run(build_args, SINGLE_PROJ, env_extra, &r) == CCB_OK);
   CHECK(r.exit_code == 0);
   ccb_proc_result_free(&r);
@@ -639,5 +643,6 @@ int main(int argc, char **argv) {
   free(java_env);
   free(kotlin_env);
   free(home_env);
+  ccb_remove_recursive(BASE);
   TEST_MAIN_END();
 }

@@ -18,10 +18,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define BASE "/tmp/ccb_test_aab"
-#define PROJ BASE "/proj"
-#define APK_OUT PROJ "/build/outputs/debug/app.apk"
-#define AAB_OUT PROJ "/build/outputs/debug/app.aab"
+static char BASE[256];
+#define B(rel) ccb_test_path(BASE, rel)
+#define PROJ B("proj")
+#define APK_OUT B("proj/build/outputs/debug/app.apk")
+#define AAB_OUT B("proj/build/outputs/debug/app.aab")
 
 static void write_text(const char *path, const char *text) {
   CHECK(ccb_write_file(path, text, strlen(text)) == CCB_OK);
@@ -98,6 +99,7 @@ static int zip_has_prefix(const char *zip_path, const char *prefix) {
 }
 
 int main(int argc, char **argv) {
+  ccb_test_tmpdir(BASE, sizeof BASE, "aab");
   char *bin = find_binary(argc, argv);
   char *sdk_home = tool_home("ANDROID_HOME", "android-sdk");
   char *java_home = tool_home("JAVA_HOME", "jdk17");
@@ -114,6 +116,7 @@ int main(int argc, char **argv) {
     free(kotlin_home);
     free(aapt2);
     free(jarsigner);
+    ccb_remove_recursive(BASE);
     TEST_MAIN_END();
   }
   char *sdk_env = NULL;
@@ -136,17 +139,17 @@ int main(int argc, char **argv) {
     kotlin_env = ccb_str_steal(&s);
     ccb_str_init(&s);
     ccb_str_append(&s, "HOME=");
-    ccb_str_append(&s, BASE "/home");
+    ccb_str_append(&s, B("home"));
     home_env = ccb_str_steal(&s);
   }
   char *const env_extra[] = { sdk_env, java_env, kotlin_env, home_env, NULL };
 
   // Scaffold the hello fixture (same shape as `ccb init` output).
   ccb_remove_recursive(BASE);
-  mkdir_or_fail(PROJ "/src/main/kotlin/com/example/hello");
-  mkdir_or_fail(PROJ "/src/main/res/values");
-  mkdir_or_fail(PROJ "/src/main/res/layout");
-  write_text(PROJ "/ccb.toml",
+  mkdir_or_fail(B("proj/src/main/kotlin/com/example/hello"));
+  mkdir_or_fail(B("proj/src/main/res/values"));
+  mkdir_or_fail(B("proj/src/main/res/layout"));
+  write_text(B("proj/ccb.toml"),
     "ccb_version = 1\n"
     "\n"
     "[project]\n"
@@ -162,7 +165,7 @@ int main(int argc, char **argv) {
     "manifest = \"src/main/AndroidManifest.xml\"\n"
     "res = \"src/main/res\"\n"
     "kotlin = \"src/main/kotlin\"\n");
-  write_text(PROJ "/src/main/AndroidManifest.xml",
+  write_text(B("proj/src/main/AndroidManifest.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  package=\"com.example.hello\">\n"
@@ -175,7 +178,7 @@ int main(int argc, char **argv) {
     "    </activity>\n"
     "  </application>\n"
     "</manifest>\n");
-  write_text(PROJ "/src/main/kotlin/com/example/hello/MainActivity.kt",
+  write_text(B("proj/src/main/kotlin/com/example/hello/MainActivity.kt"),
     "package com.example.hello\n"
     "\n"
     "import android.app.Activity\n"
@@ -187,13 +190,13 @@ int main(int argc, char **argv) {
     "    setContentView(R.layout.activity_main)\n"
     "  }\n"
     "}\n");
-  write_text(PROJ "/src/main/res/values/strings.xml",
+  write_text(B("proj/src/main/res/values/strings.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <string name=\"app_name\">hello</string>\n"
     "  <string name=\"hello\">Hello from CCB!</string>\n"
     "</resources>\n");
-  write_text(PROJ "/src/main/res/layout/activity_main.xml",
+  write_text(B("proj/src/main/res/layout/activity_main.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\"\n"
     "  android:layout_width=\"match_parent\"\n"
@@ -205,7 +208,7 @@ int main(int argc, char **argv) {
     "    android:text=\"@string/hello\" />\n"
     "</LinearLayout>\n");
   // The scaffold needs a theme: init writes values/themes.xml too.
-  write_text(PROJ "/src/main/res/values/themes.xml",
+  write_text(B("proj/src/main/res/values/themes.xml"),
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
     "<resources>\n"
     "  <style name=\"AppTheme\" parent=\"@android:style/Theme.Material.Light.NoActionBar\" />\n"
@@ -311,5 +314,6 @@ int main(int argc, char **argv) {
   free(java_env);
   free(kotlin_env);
   free(home_env);
+  ccb_remove_recursive(BASE);
   TEST_MAIN_END();
 }

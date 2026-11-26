@@ -1,0 +1,43 @@
+# Build the optimized Linux release binary and attach it to a GitHub release.
+# Trigger: push a tag like v0.1.0, or run it by hand (Actions -> Run workflow).
+# The binary is the release preset: static, stripped, -O3. LTO was tried and
+# made the binary bigger (1,301,168 vs 1,268,272 bytes), so it is NOT used.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: linux-x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build static release binary
+        run: |
+          cmake --preset release
+          cmake --build build-release -j4
+
+      - name: Verify the binary
+        run: |
+          file build-release/ccb
+          ldd build-release/ccb 2>&1 | grep -q "not a dynamic executable"
+          ./build-release/ccb version
+          ls -la build-release/ccb
+          cp build-release/ccb ccb-linux-x86_64
+          sha256sum ccb-linux-x86_64 > ccb-linux-x86_64.sha256
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ccb-linux-x86_64
+            ccb-linux-x86_64.sha256
+          fail_on_unmatched_files: true

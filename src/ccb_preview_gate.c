@@ -28,10 +28,10 @@ int pv_gate_run(const ccb_config *cfg, long frame_width, int ascii,
     return 2;
   }
   // Preview not applicable: no [preview] section, or a [preview]
-  // section with neither styles nor flow. Passes silently; the gate
-  // never forces preview onto a project that does not use it.
-  if (!cfg->has_preview || (cfg->preview_styles == NULL &&
-      cfg->preview_flow == NULL)) {
+  // section with neither styles, flow, nor real Kotlin sources
+  // (Phase 2). Passes silently; the gate never forces preview onto
+  // a project that does not use it.
+  if (!pv_preview_applicable(cfg)) {
     return 0;
   }
   // pv_project_load ORs strict with cfg->preview_strict into

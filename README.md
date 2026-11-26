@@ -1,9 +1,28 @@
-# CCB — Custom C Builder
+# CCB
 
-Build headless Android APKs without Gradle. C17, no build-system
-dependencies beyond a C compiler and CMake.
+[Documentation](docs/build.md) | [Specification](requirement.md) | [LLM docs](llms.txt)
 
-## Build CCB
+Build headless Android APKs without Gradle. One C binary, no daemon, no
+runtime dependencies. Every build reproducible and explainable
+(`--explain`, `--json`). Built to be driven by an AI agent from a terminal.
+
+## Features
+
+- Kotlin + Java apps, AAR libraries, native (NDK) libs, multi-module projects
+- Incremental builds: per-step cache, tool-upgrade invalidation
+- Release: R8 minification, zipalign, signing, verification
+- Dex gate: missing classes fail the build before packaging
+- Preview: CSS + Kotlin structure renders to a box/logic tree
+- JSON event stream (`--json`), stable exit codes, dry-run mode
+- Opt-in kotlinc daemon (auto-shutdown) for faster rebuilds
+
+## Install from package
+
+No packages yet. Install from source. See [LAUNCH.md](LAUNCH.md).
+
+## Install from source
+
+Toolchain: see [docs/setup.md](docs/setup.md).
 
 ```sh
 cmake -S . -B build        # Release is the default build type
@@ -11,60 +30,45 @@ cmake --build build
 ./build/ccb version        # ccb 0.1.0
 ```
 
-Run the unit tests (sanitizer build):
+Presets (`release`, `dev`, `sanitizer`) live in `CMakePresets.json`.
+Stripped, statically linked release binary:
 
 ```sh
-cmake -S . -B build-san -DCCB_SANITIZE=ON
-cmake --build build-san
-ctest --test-dir build-san
+cmake --preset release
+cmake --build build-release
 ```
 
-## Use it
+Tests: [docs/build.md](docs/build.md#running-the-tests). Run suites
+sequentially, never concurrently.
+
+## Transitioning from Gradle
+
+CCB replaces the Gradle build, not the Android SDK. Same tools
+(kotlinc, d8, aapt2, apksigner), driven directly. One `ccb.toml`
+instead of `build.gradle` + `settings.gradle`.
 
 ```sh
 ccb init myapp
 cd myapp
 ccb build                  # → build/outputs/debug/app.apk
 ccb run                    # build → install → launch (needs a device)
-ccb install --dry-run      # show the adb command without running it
 ccb check                  # validate config + toolchain
 ccb doctor                 # toolchain report
-ccb clean
 ```
 
-Toolchain: JDK 17+, Android SDK (platform android-34/35,
-build-tools 35.x, platform-tools), kotlinc 2.x, NDK r27 for native
-projects, r8 for minified release builds (see `docs/setup.md`).
+## Project layout
 
-`ccb build` requires `ANDROID_HOME` (or `[sdk] home` in `ccb.toml`),
-`JAVA_HOME`, and `KOTLIN_HOME` unless the tools are on PATH.
+```
+├─ src/           C17 implementation, one module per subsystem
+├─ tests/         test suite (see tests/test.h)
+├─ docs/          human docs, English
+├─ docs/llm/      agent docs, Chinese (see llms.txt)
+├─ examples/      hello, preview-sample, real-world
+├─ requirement.md the specification
+├─ LAUNCH.md      prototype launch checklist
+└─ LICENSE        Apache 2.0
+```
 
-## Status
+## License
 
-- M0 skeleton, config, toolchain resolution: done.
-- M1 first real APK (Kotlin hello-world, debug-signed, zipaligned,
-  verified): done.
-- M2 incremental builds (step cache, `--explain`, tool-upgrade
-  invalidation): done.
-- M3 native libs + AARs: done.
-- M4 release readiness (fail-fast signing, r8 minification,
-  byte-identical rebuilds, JSON protocol): done.
-- M5 preview (CSS + Kotlin structure → box/logic tree): stretch,
-  not started.
-- Not done: fuzz harnesses for the TOML/ZIP/CSS/Kotlin-structure
-  parsers (§9.3); `ccb setup`'s sdkmanager step cannot run behind
-  authenticated egress proxies (see `docs/setup.md`); install/launch
-  against a real device (see `docs/device-setup.md`).
-
-## Docs
-
-- `docs/build.md` — pipeline, caching, reproducibility, known costs.
-- `docs/setup.md` — toolchain provisioning, r8, proxy limitation.
-- `docs/device-setup.md` — connecting a device (Tailscale wireless
-  debugging).
-- `docs/diagnostics.md` — diagnostic code catalog.
-- `docs/json-protocol.md` — `--json` event stream.
-- `requirement.md` — the full specification.
-
-No license has been chosen for CCB itself (open question 9); nothing
-is published anywhere.
+[Apache License 2.0](LICENSE).

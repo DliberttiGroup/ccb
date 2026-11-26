@@ -977,9 +977,15 @@ static int box_is_container(const pv_box *box) {
     return 0;
   }
   if (box_type_eq(box, "screen") || box_type_eq(box, "column") ||
-      box_type_eq(box, "row") || box_type_eq(box, "box") ||
-      box_is_branch(box)) {
+      box_type_eq(box, "row") || box_is_branch(box)) {
     return 1;
+  }
+  if (box_type_eq(box, "box")) {
+    // Phase 2: a generic box with children contains them, but a
+    // childless one is a leaf-like control (a Switch, a bare view)
+    // and takes the 1-row leaf height — otherwise it sums to zero
+    // rows and vanishes from the wireframe entirely.
+    return box->nchildren > 0;
   }
   return box->nchildren > 0;
 }

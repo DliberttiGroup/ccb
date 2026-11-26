@@ -247,14 +247,146 @@ index of every top-level fun across all flow files, then:
   goldens. Chunk A's follow-ups still untouched, per the
   task; Phase 2 not started.
 
-## Phase 2 (NOT this round)
+## Phase 2 (built 2026-11-25)
 
 A real-code front end: parse the app's own Kotlin + XML
 (Activities: `onCreate` -> `setContentView` -> layout; layouts:
 buttons, onClick; manifest; nav graphs) and derive screens/edges
 from those, with the flow sketch + CSS supplying only the
-wireframe. This makes the sketch optional instead of required.
-Do not start it in this round.
+wireframe. The sketch is optional instead of required.
+
+### Phase 2 as built (2026-11-25)
+
+Chunk 1 — real-code screens + edges + merge with sketch.
+
+- One new module, `src/ccb_preview_real.c` (declared in
+  `src/ccb_preview.h`): for each Activity class it synthesizes a
+  small flow text (screen fun + `Button` components from the
+  layout + listener attachments + referenced member funs) and
+  feeds it to the existing flow parser
+  (`pv_flow_parse_indexed`), so handler shapes, one-level
+  helpers, branch annotations, args, `android:onClick`,
+  `navigate()`, and the CCB-P1025 sweep are all reused, not
+  reimplemented. The synthesis normalizes only what the flow
+  parser cannot see: `findViewById` chains become bare view ids,
+  `startActivity(intentVar)` becomes the direct `Intent` form,
+  and `XActivity::class.java` becomes `X::class.java`, so real
+  edges dedup against sketch edges to the same screen.
+- Recognized shapes only: Activity classes with `onCreate` ->
+  `setContentView`; `findViewById<Button>(R.id.x)
+  .setOnClickListener` (lambda, parenthesized lambda,
+  `.onClick =`) inside `onCreate`; member funs referenced from a
+  listener or a layout `android:onClick`, plus their one-level
+  helper closure; `startActivity(Intent(...))`,
+  `nav("Y")`/`navigateTo("Y")`, `navigate(R.id.y)` /
+  `navigate("Y")` via the nav-graph table. A listener method
+  reference with no definition in any scanned Activity warns
+  CCB-P1025 once per method; an unresolvable listener (variable
+  receiver, val-held view, the p2-style product loop) warns
+  CCB-P1025 with the true source file:line when its body holds a
+  nav; a dropped member fun holding a nav warns CCB-P1025 once
+  (file:line of the fun). Top-level funs in real Kotlin files are
+  not extracted; only Activity member funs are.
+- Merge in `pv_project_load_scenario`, after the sketch parse and
+  before assemble: real screens merge into sketch screens by
+  `pv_names_match`, or a launcher real screen merges into a sketch
+  screen named `Home`; same button + destination (spelled with or
+  without the `Activity` suffix) dedups silently keeping the
+  sketch edge; a conflicting destination warns CCB-P1020 and the
+  real-code edge stands. Real-only screens append as-is; the
+  manifest launcher moves to index 0 when no screen is named
+  `Home`, and a nav-graph destination named `Home` means the
+  launcher screen in that case (otherwise assemble would create
+  an empty graph-only `Home` node and the entry rule would pick
+  it). `pv_preview_applicable` (styles OR flow OR real Kotlin
+  sources) is the single definition shared by the loader, the
+  preview command, and the build gate.
+- One flow-parser change: a helper call's literal arguments now
+  propagate onto the edges its body produces when those edges
+  carry no arguments of their own (`openDetail("note-1")` ->
+  edge args `["note-1"]`; a variable argument becomes an unknown
+  arg entry). An edge whose nav already has arguments keeps its
+  own.
+- One scan change: `pv_preview_scan_xml` falls back to the
+  layout's own `android:text` for an `android:onClick` label when
+  no `[preview.bindings]` entry names the button (kept raw — an
+  `@string/...` reference resolves with the other component
+  labels); CCB-P1019 only fires when there is neither.
+- Two bugs found by the new tests and fixed at root cause, not
+  worked around: the screens/pending arrays are arena-grown by
+  the flow parser (`pv_screen_add`/`pv_pending_add`), so merging
+  with `ccb_xrealloc` (and freeing the real parse's arrays in the
+  loader) was an invalid free — the merge now grows them the
+  arena way; and the `Intent`-val rewrite in the synthesis
+  forgot to strip the `Activity`/`Fragment` suffix, so
+  `DetailActivity` did not dedup against sketch `Detail` and a
+  false CCB-P1020 fired (the merge now also compares targets
+  with `pv_names_match`, not `strcmp`).
+- Goldens: p1 gains the three real `Note 1/2/3 -> Detail`
+  edges (args `note-1/2/3`); p2 gains two CCB-P1025s (the
+  product loop, real line 24, and the never-referenced
+  `openDetail` nav, line 31); p3 gains the real `Open detail ->
+  Detail` edge. p0 unchanged. New no-sketch golden
+  `examples/real-world/p1-notes-real/` (a copy of p1-notes
+  `src/` + a `[preview]`-only ccb.toml) with its pinned
+  `preview.json`/`logic-tree.txt`: entry `Main`, all real edges,
+  no diagnostics.
+- Tests: `tests/test_preview_phase2.c` (104 checks in Chunk 1,
+  139 after Chunk 2), covering the no-sketch P1-style project
+  (screens, entry = launcher, helper args literal/variable,
+  onClick via layout text, Intent-val shape), merge with a
+  sketch (silent dedup, CCB-P1020 conflict with real standing,
+  sketch Home stays entry), nested-lambda nav -> no edge +
+  CCB-P1025 naming the real file, variable-receiver loop -> no
+  edge + two CCB-P1025s with the real line, Activity without
+  `setContentView` -> no screen, `navigate(R.id.x)` via the
+  graph, and the p1-notes-real golden.
+
+Chunk 2 — layout-derived wireframe when no sketch.
+
+- `rv_layout_wireframe` in the new module builds the box tree
+  from the layout XML with a small recursive-descent parser
+  (the tag scanners only report open tags, so no nesting info):
+  `LinearLayout` vertical -> Column, horizontal -> Row
+  (horizontal is Android's default when no `android:orientation`
+  is given), `TextView` -> Text, `Button` -> Button, `EditText`
+  -> TextField, `ImageView` -> Image, anything else -> a generic
+  box (including `ConstraintLayout`: no constraint solving,
+  children still mapped). `android:text` is the label (kept raw,
+  `@string` resolved by the existing pass); `<include>` is a
+  generic box with no children; `<merge>` as a root stacks its
+  children vertically. Depth cap 32; malformed XML stops the
+  subtree, never crashes. The wireframe replaces the synthetic
+  Button root of each freshly parsed real screen (merged screens
+  keep the sketch root), and carries the same button labels, so
+  onClick distribution by label is unaffected. No layout-engine
+  change: the existing pass sizes the tree.
+- Two fixes the wireframe surfaced, both at root cause:
+  onClick distribution (`pv_tree_has_label`) matched ANY box
+  with the label, so a title `TextView` (e.g. `"Settings"` on
+  the Settings screen) attracted the button's edge and created a
+  spurious self-edge — it now matches BUTTON boxes only, which
+  also removed the same spurious edge from the p1-notes sketch
+  golden; and a childless generic box summed to zero rows and
+  vanished (the Settings `Switch`), so `box_is_container` now
+  treats a childless `box` as a leaf (1 row). No existing golden
+  changed for the latter.
+- Docs: `docs/preview.md` (new "Real code (Phase 2)" section,
+  applicability + unknown-cases + scope-limits updates),
+  `requirement.md` §10 (XML layouts now understood; Compose
+  still not) and open question 8 (XML layouts done, Compose
+  still open). No new diagnostic codes, so
+  `docs/diagnostics.md` needed no change.
+- Deliberate deviations / follow-ups left: diagnostics on the
+  synthesized flow text name the real `.kt` file but carry
+  synthesized line numbers (only the real module's own
+  CCB-P1025s carry true file:line); top-level funs in real
+  Kotlin files are not extracted; `<include>` layouts are not
+  resolved; the LSP server still uses styles/flow only (real
+  code in the LSP is a follow-up, not this chunk). Chunk 1's
+  tests + goldens updated only where intended (p1-notes lost
+  the spurious Settings self-edge; p1-notes-real boxes are now
+  the layout wireframe).
 
 ## Standing rules for every chunk
 

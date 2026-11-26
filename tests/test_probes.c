@@ -12,13 +12,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define BASE "/tmp/ccb_test_probes"
-#define SDK BASE "/sdk"
-#define PROJ BASE "/proj"
-#define KHOME BASE "/khome"
-#define JAVADIR BASE "/java"
-#define CACHE PROJ "/build/intermediates/tool-probes.json"
-#define LOG BASE "/kotlinc.log"
+static char BASE[256];
+#define B(rel) ccb_test_path(BASE, rel)
+#define SDK B("sdk")
+#define PROJ B("proj")
+#define KHOME B("khome")
+#define JAVADIR B("java")
+#define CACHE B("proj/build/intermediates/tool-probes.json")
+#define LOG B("kotlinc.log")
 
 static void write_text(const char *path, const char *text) {
   CHECK(ccb_write_file(path, text, strlen(text)) == CCB_OK);
@@ -110,47 +111,50 @@ static void cache_replace(const char *needle, const char *replacement) {
 static void write_kotlinc_wrapper(const char *version) {
   ccb_str s;
   ccb_str_init(&s);
-  ccb_str_append(&s, "#!/bin/sh\necho \"$@\" >> " LOG "\n");
+  ccb_str_append(&s, "#!/bin/sh\necho \"$@\" >> ");
+  ccb_str_append(&s, B("kotlinc.log"));
+  ccb_str_append(&s, "\n");
   ccb_str_append(&s, "if [ \"$1\" = \"-version\" ]; then echo 'info: kotlinc-jvm ");
   ccb_str_append(&s, version);
   ccb_str_append(&s, " (JRE 17.0.1)' >&2; fi\nexit 0\n");
-  write_script(KHOME "/bin/kotlinc", s.buf);
+  write_script(B("khome/bin/kotlinc"), s.buf);
   ccb_str_free(&s);
 }
 
 int main(int argc, char **argv) {
+  ccb_test_tmpdir(BASE, sizeof BASE, "probes");
   ccb_remove_recursive(BASE);
 
   // Unit: round-trip, coexistence, upsert.
-  CHECK(ccb_mkdir_p(BASE "/proj/build/intermediates") == CCB_OK);
-  write_text(BASE "/tool", "tool-bytes-v1");
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool") == NULL);
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "17");
-  char *v = ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool");
+  CHECK(ccb_mkdir_p(B("proj/build/intermediates")) == CCB_OK);
+  write_text(B("tool"), "tool-bytes-v1");
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool")) == NULL);
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "17");
+  char *v = ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool"));
   CHECK(v != NULL);
   CHECK_STR_EQ(v, "17");
   free(v);
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "kotlinc", BASE "/tool", "2.4.21");
-  v = ccb_sdk_probe_cache_lookup(BASE "/proj/build", "kotlinc", BASE "/tool");
+  ccb_sdk_probe_cache_store(B("proj/build"), "kotlinc", B("tool"), "2.4.21");
+  v = ccb_sdk_probe_cache_lookup(B("proj/build"), "kotlinc", B("tool"));
   CHECK(v != NULL);
   CHECK_STR_EQ(v, "2.4.21");
   free(v);
-  v = ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool");
+  v = ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool"));
   CHECK(v != NULL);
   CHECK_STR_EQ(v, "17");
   free(v);
   // Upsert replaces: a later lookup sees the new value, not the old.
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "18");
-  v = ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool");
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "18");
+  v = ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool"));
   CHECK(v != NULL);
   CHECK_STR_EQ(v, "18");
   free(v);
   // Miss when the tool grows (size key).
-  write_text(BASE "/tool", "tool-bytes-v1-longer");
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool") == NULL);
+  write_text(B("tool"), "tool-bytes-v1-longer");
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool")) == NULL);
   // Re-store, then miss on an mtime-only change (size key unchanged).
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "17");
-  v = ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool");
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "17");
+  v = ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool"));
   CHECK(v != NULL);
   free(v);
   struct timespec ts[2];
@@ -158,61 +162,62 @@ int main(int argc, char **argv) {
   ts[0].tv_nsec = 0;
   ts[1].tv_sec = 1000000000;
   ts[1].tv_nsec = 0;
-  CHECK(utimensat(AT_FDCWD, BASE "/tool", ts, 0) == 0);
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool") == NULL);
+  CHECK(utimensat(AT_FDCWD, B("tool"), ts, 0) == 0);
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool")) == NULL);
   // Corrupt file is a miss, and a later store replaces it wholesale.
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "17");
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "17");
   write_text(CACHE, "this is not json{");
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool") == NULL);
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "17");
-  v = ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool");
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool")) == NULL);
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "17");
+  v = ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool"));
   CHECK(v != NULL);
   CHECK_STR_EQ(v, "17");
   free(v);
   // Wrong document version is a miss.
   cache_replace("\"version\":1", "\"version\":2");
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool") == NULL);
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "17");
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool")) == NULL);
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "17");
   // A non-digits java version is a corrupt entry, not a version.
   cache_replace("\"version\":\"17\"", "\"version\":\"abc\"");
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "java", BASE "/tool") == NULL);
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "java", BASE "/tool", "17");
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "java", B("tool")) == NULL);
+  ccb_sdk_probe_cache_store(B("proj/build"), "java", B("tool"), "17");
   // An empty kotlinc version is a corrupt entry.
-  ccb_sdk_probe_cache_store(BASE "/proj/build", "kotlinc", BASE "/tool", "2.4.21");
+  ccb_sdk_probe_cache_store(B("proj/build"), "kotlinc", B("tool"), "2.4.21");
   cache_replace("\"version\":\"2.4.21\"", "\"version\":\"\"");
-  CHECK(ccb_sdk_probe_cache_lookup(BASE "/proj/build", "kotlinc", BASE "/tool") == NULL);
+  CHECK(ccb_sdk_probe_cache_lookup(B("proj/build"), "kotlinc", B("tool")) == NULL);
   // Store with no intermediates directory is a silent no-op.
-  write_text(BASE "/tool2", "x");
-  ccb_sdk_probe_cache_store(BASE "/nodoc", "java", BASE "/tool2", "17");
-  CHECK(!ccb_path_exists(BASE "/nodoc/intermediates/tool-probes.json"));
+  write_text(B("tool2"), "x");
+  ccb_sdk_probe_cache_store(B("nodoc"), "java", B("tool2"), "17");
+  CHECK(!ccb_path_exists(B("nodoc/intermediates/tool-probes.json")));
   // NULL build dir means no cache, never a crash.
-  CHECK(ccb_sdk_probe_cache_lookup(NULL, "java", BASE "/tool") == NULL);
-  ccb_sdk_probe_cache_store(NULL, "java", BASE "/tool", "17");
+  CHECK(ccb_sdk_probe_cache_lookup(NULL, "java", B("tool")) == NULL);
+  ccb_sdk_probe_cache_store(NULL, "java", B("tool"), "17");
 
   // Black-box: a real build probes once, then hits the cache.
   char *bin = find_binary(argc, argv);
   if (bin == NULL) {
     fprintf(stderr, "note: no ccb binary found, skipping black-box probe tests\n");
+    ccb_remove_recursive(BASE);
     TEST_MAIN_END();
   }
-  CHECK(ccb_mkdir_p(SDK "/build-tools/35.0.0") == CCB_OK);
-  CHECK(ccb_mkdir_p(SDK "/platforms/android-35") == CCB_OK);
-  CHECK(ccb_mkdir_p(PROJ "/src/main/res/values") == CCB_OK);
-  CHECK(ccb_mkdir_p(PROJ "/src/main/kotlin/com/example/hello") == CCB_OK);
-  CHECK(ccb_mkdir_p(KHOME "/bin") == CCB_OK);
-  CHECK(ccb_mkdir_p(JAVADIR "/bin") == CCB_OK);
+  CHECK(ccb_mkdir_p(B("sdk/build-tools/35.0.0")) == CCB_OK);
+  CHECK(ccb_mkdir_p(B("sdk/platforms/android-35")) == CCB_OK);
+  CHECK(ccb_mkdir_p(B("proj/src/main/res/values")) == CCB_OK);
+  CHECK(ccb_mkdir_p(B("proj/src/main/kotlin/com/example/hello")) == CCB_OK);
+  CHECK(ccb_mkdir_p(B("khome/bin")) == CCB_OK);
+  CHECK(ccb_mkdir_p(B("java/bin")) == CCB_OK);
   const char *tools[] = { "aapt2", "d8", "apksigner", "zipalign" };
   for (size_t i = 0; i < 4; i++) {
-    char *p = ccb_path_join(SDK "/build-tools/35.0.0", tools[i]);
+    char *p = ccb_path_join(B("sdk/build-tools/35.0.0"), tools[i]);
     write_script(p, "#!/bin/sh\nexit 0\n");
     free(p);
   }
-  write_text(SDK "/platforms/android-35/android.jar", "");
-  write_script(JAVADIR "/bin/java", "#!/bin/sh\necho 'openjdk version \"17.0.1\"' >&2\n");
-  write_script(JAVADIR "/bin/javac", "#!/bin/sh\nexit 0\n");
+  write_text(B("sdk/platforms/android-35/android.jar"), "");
+  write_script(B("java/bin/java"), "#!/bin/sh\necho 'openjdk version \"17.0.1\"' >&2\n");
+  write_script(B("java/bin/javac"), "#!/bin/sh\nexit 0\n");
   write_kotlinc_wrapper("2.4.21");
-  write_text(PROJ "/src/main/AndroidManifest.xml", "<manifest package=\"com.example.hello\" />\n");
-  write_text(PROJ "/src/main/kotlin/com/example/hello/MainActivity.kt",
+  write_text(B("proj/src/main/AndroidManifest.xml"), "<manifest package=\"com.example.hello\" />\n");
+  write_text(B("proj/src/main/kotlin/com/example/hello/MainActivity.kt"),
     "package com.example.hello\nclass MainActivity\n");
   ccb_str cfg;
   ccb_str_init(&cfg);
@@ -221,18 +226,18 @@ int main(int argc, char **argv) {
     "target_sdk = 35\ncompile_sdk = 35\n[paths]\n"
     "manifest = \"src/main/AndroidManifest.xml\"\nres = \"src/main/res\"\n"
     "kotlin = \"src/main/kotlin\"\n[sdk]\nhome = \"");
-  ccb_str_append(&cfg, SDK);
+  ccb_str_append(&cfg, B("sdk"));
   ccb_str_append(&cfg, "\"\nbuild_tools = \"35.0.0\"\n");
-  write_text(PROJ "/ccb.toml", cfg.buf);
+  write_text(B("proj/ccb.toml"), cfg.buf);
   ccb_str_free(&cfg);
   ccb_str jh;
   ccb_str_init(&jh);
   ccb_str_append(&jh, "JAVA_HOME=");
-  ccb_str_append(&jh, JAVADIR);
+  ccb_str_append(&jh, B("java"));
   ccb_str kh;
   ccb_str_init(&kh);
   ccb_str_append(&kh, "KOTLIN_HOME=");
-  ccb_str_append(&kh, KHOME);
+  ccb_str_append(&kh, B("khome"));
   char *env[] = { jh.buf, kh.buf, "ANDROID_HOME", "CCB_AAPT2", "CCB_ZIPALIGN",
     "CCB_KOTLIN_URL", "CCB_KOTLIN_SHA256", NULL };
   // Build 1 probes once (the build itself may fail at a stub step;
@@ -306,5 +311,6 @@ int main(int argc, char **argv) {
   ccb_str_free(&jh);
   ccb_str_free(&kh);
   free(bin);
+  ccb_remove_recursive(BASE);
   TEST_MAIN_END();
 }

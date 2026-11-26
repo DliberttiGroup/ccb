@@ -29,7 +29,11 @@ Gradle is the wrong tool for small, agent-driven Android work:
 ### 1.2 What "headless" means (and does not mean)
 
 - Headless means: no Android Studio, no Gradle daemon, no GUI, no background
-  processes. One binary, one command, one result.
+  processes by default. One binary, one command, one result — unless the
+  user opts into the kotlinc daemon (see §2 goal 4 and docs/build.md):
+  an opt-in, per-project daemon with auto-shutdown after an idle
+  timeout. The daemon is never started unless opted in, and it never
+  outlives its project.
 - It does **not** mean "no JVM". The Kotlin compiler (`kotlinc`) and the dexer
   (`d8`) are JVM tools and CCB orchestrates them. CCB itself is native C and
   starts instantly; the JVM only runs for the two steps that genuinely need it.
@@ -45,7 +49,14 @@ Gradle is the wrong tool for small, agent-driven Android work:
 3. **Be agent-readable.** Structured machine output, stable exit codes,
    actionable errors, dry-run planning, and cache explanations (see §6).
 4. **Be hermetic by default.** No network access during a build. No implicit
-   downloads. No daemon. A build either works offline or fails loudly saying
+   downloads. No daemon by default; an opt-in kotlinc daemon is allowed
+   when the user enables it (`[build] kotlinc_daemon = true` or
+   `ccb build --kotlinc-daemon`): it is per-project (run files under the
+   project's own `build/kotlin-daemon`), shuts itself down after an idle
+   timeout (default 300 s, configurable 60–3600 s), is stopped by
+   `ccb daemon stop` and best-effort by `ccb clean`, and a stale or
+   crashed daemon falls back to a plain kotlinc invocation instead of
+   failing the build. A build either works offline or fails loudly saying
    exactly which tool is missing.
 5. **Be small and dependency-free.** One static binary, under 5 MB, linking
    only libc. No runtime dependencies beyond the Android SDK toolchain it
@@ -246,7 +257,7 @@ never masks a broken override, and a broken override never falls back
 to the default tool.
 
 Supported v1 ranges (pinned here; `ccb doctor` judges against them):
-compileSdk 34–35, build-tools 35.x, kotlinc 2.x, JDK 17+. A tool
+compileSdk 34–36, build-tools 35.x/36.x, kotlinc 2.x, JDK 17+. A tool
 outside its range is a Stage 0 error naming the range and the found
 version.
 
@@ -280,7 +291,11 @@ version.
 
 - `kotlinc` over Kotlin sources with classpath = `android.jar` +
   `R.java` output + declared jars + extracted AAR `classes.jar`s.
-- `javac` over Java sources with the same classpath (if any Java exists).
+- `javac` over Java sources with the same classpath (if any Java exists),
+  plus the generated `R.java` (kotlinc resolves R symbols but emits no
+  R.class files, so javac must compile them).
+- `d8`/`r8` gets the kotlinc stdlib jar as a program input for Kotlin
+  projects, unless the project already supplies it via `[deps]` or Maven.
 - Kotlin compiler location: `$KOTLIN_HOME`, then `PATH`, then TOML
   `[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error, not a Stage 2
   surprise.
@@ -317,9 +332,35 @@ version.
 ### 5.5 Stage 4 — Dex (`d8`, or `r8` for release)
 
 - `d8` converts compiled classes to `.dex` files.
-- Release + `minify = true` runs `r8` with the project's ProGuard/R8 rules
-  file (declared in TOML as `proguard_rules`, optional). R8 failures must
+- On a Kotlin `d8` build the stdlib jar is dexed once into the global
+  cache (`$XDG_CACHE_HOME/ccb/dex-stdlib`, else `~/.cache/ccb/dex-stdlib`),
+  keyed by the stdlib jar hash + min-api + build-tools version; later
+  builds pass the cached `.dex` to `d8` instead of the jar. A missing
+  or corrupt entry falls back to the jar and never fails the build.
+  Release + minify is excluded: R8 takes the stdlib as a JAR.
+- Release + `minify = true` runs `r8` with CCB-generated keep rules
+  (`build/intermediates/r8-keep.pro`): the app's whole package plus
+  every manifest component and layout view class R8 cannot see from
+  code, ahead of the project's ProGuard/R8 rules file (declared in
+  TOML as `proguard_rules`; required when `minify = true`, but it may
+  hold only a comment when the app needs no extra keeps). R8 failures must
   surface the rule file and line, not just the tool's stderr.
+  Reflection-only references (`Class.forName` strings) cannot be
+  kept automatically: those keeps belong in the project's rules
+  file. The stdlib dex cache is bypassed on this path by design:
+  R8 takes the stdlib as a program-input JAR, not dex, so it can
+  strip the stdlib classes the kept code never reaches.
+- Immediately after dex, a dexcheck step parses the produced dex
+  files and verifies every referenced class is defined in the dex.
+  A missing program class fails the build with `CCB-E3025`, naming
+  the missing classes (first 10, then "+ N more"), before packaging
+  — so a missing stdlib or library R class is a build failure, not
+  a launch crash. Platform classes (`java.*`, `android.*`, …) are
+  `--lib` inputs and are allowlisted; annotation- and
+  signature-only references still count. Reflection-only
+  references (`Class.forName` strings) cannot be caught: only
+  types the dex references are checked. The step runs even when
+  dex was cache-skipped, and for AAB builds too.
 
 ### 5.6 Stage 5 — Native libs (NDK, optional)
 
@@ -519,7 +560,9 @@ not agent-oriented. CCB must satisfy all of the following:
 - Builds never touch the network. If a tool tries (e.g. a Gradle-style
   dependency fetch), that is a configuration smell CCB must not have.
 - Builds are safe to run concurrently for different projects (no global
-  daemon, no shared mutable state outside the project's own build dir).
+  daemon — an opt-in kotlinc daemon is per-project, its run files under
+  that project's own build dir — no shared mutable state outside the
+  project's own build dir).
 - `ccb clean` is the only destructive command, and it only removes the
   project's own build directory.
 
@@ -703,12 +746,18 @@ file-per-screen rule plus `common.css`, the selector set, the layout
 model in terminal columns, and the exit codes — is frozen in
 `docs/preview.md`. The terminal frame is `--width` columns (default
 40, minimum 24; smaller values clamp with a warning). `strict = true`
-(or `--strict`) turns subset warnings into errors.
+(or `--strict`) turns subset warnings into errors. Phase 2 needs no
+new `[preview]` keys: when `flow` is absent, preview derives
+screens, edges, and the wireframe from the app's own Kotlin
+Activities and layout XML instead (see `docs/preview.md`, "Real code
+(Phase 2)").
 
 Projects that do not follow the convention get a clear
 "preview not applicable to this project" message, not a crash and not
-a hallucinated render. Android XML layouts and Compose code are NOT
-understood by v1 preview (see open question 8).
+a hallucinated render. Android XML layouts are understood by preview
+(Phase 2: layout buttons and `android:onClick`, and the
+layout-derived wireframe when there is no flow sketch); Compose
+code is NOT understood (see open question 8).
 
 ### 10.3 CSS: a subset, parsed properly
 
@@ -960,9 +1009,11 @@ crashes on input it does not understand, and never silently guesses.
    `docs/modules.md`. Dynamic feature modules stay out of scope.
 7. **Name expansion.** "Custom C Builder" is a placeholder. Keep CCB as
    a bare name, or pick a real expansion?
-8. **Preview scope.** Extend preview to Android XML layouts and/or
-   Compose code in v2, or keep it CSS-convention-only? Interactive walk
-   mode through the logic tree in v2?
+8. **Preview scope.** Implemented (Phase 2): preview derives
+   screens, edges, and the wireframe from Android XML layouts and
+   the app's own Kotlin Activities, so a project needs no flow
+   sketch. Compose code in v2, or keep it CSS-convention-only?
+   Interactive walk mode through the logic tree in v2?
 9. **CCB's own license.** Pick before publishing: permissive, copyleft,
    or source-available (as with melod)?
 

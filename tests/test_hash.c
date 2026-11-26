@@ -1,8 +1,13 @@
 // Tests for ccb_hash (SHA-256 known vectors).
 #include "test.h"
+#include "ccb_fs.h"
 #include "ccb_hash.h"
 
+#define B(rel) ccb_test_path(dir, rel)
+
 int main(void) {
+  char dir[256];
+  ccb_test_tmpdir(dir, sizeof dir, "hash");
   char hex[65];
   ccb_sha256_hex("", 0, hex);
   CHECK_STR_EQ(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
@@ -20,13 +25,14 @@ int main(void) {
   }
   // File hashing.
   {
-    FILE *f = fopen("/tmp/ccb_test_hash.txt", "wb");
+    FILE *f = fopen(B("hash.txt"), "wb");
     fputs("hello", f);
     fclose(f);
-    CHECK(ccb_sha256_file("/tmp/ccb_test_hash.txt", hex) == CCB_OK);
+    CHECK(ccb_sha256_file(B("hash.txt"), hex) == CCB_OK);
     CHECK_STR_EQ(hex, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
-    remove("/tmp/ccb_test_hash.txt");
-    CHECK(ccb_sha256_file("/tmp/ccb_test_hash_missing.txt", hex) == CCB_ERR_IO);
+    remove(B("hash.txt"));
+    CHECK(ccb_sha256_file(B("missing.txt"), hex) == CCB_ERR_IO);
   }
+  ccb_remove_recursive(dir);
   TEST_MAIN_END();
 }

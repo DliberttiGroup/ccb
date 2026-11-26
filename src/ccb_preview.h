@@ -310,6 +310,12 @@ long pv_rows_to_dp(long rows);
 
 // ---------- Kotlin structure parser (ccb_preview_flow.c) ----------
 
+// One component box (arena-owned) and one child append. Shared by
+// the flow parser and the Phase 2 layout wireframe builder, so both
+// build the same box shape the layout pass sizes.
+pv_box *pv_box_new(ccb_arena *arena, char *type, char *label);
+void pv_box_add_child(ccb_arena *arena, pv_box *parent, pv_box *child);
+
 // Parse flow text into screens appended to *screens_io (arena).
 // Top-level `fun Name(` bodies are screens; component calls nest by
 // braces; nav("X") / navigateTo("X") calls become edges; when/if
@@ -523,6 +529,33 @@ void pv_preview_scan_xml(const ccb_config *cfg, ccb_arena *arena,
 // watches the same inputs.
 char *pv_preview_layout_path(const ccb_config *cfg);
 char *pv_preview_nav_path(const ccb_config *cfg);
+// Phase 2: real-code front end (ccb_preview_real.c). The Kotlin
+// source dir for a config: [paths] kotlin, else [paths] java, else
+// the kotlin/java dir next to the manifest. Malloc'd, or NULL when
+// no candidate exists on disk.
+char *pv_real_kotlin_dir(const ccb_config *cfg);
+// True when preview applies to a config: a [preview] section with
+// styles, flow, or real Kotlin sources to read. A [preview] section
+// with none of the three is "preview not applicable", exactly as
+// before Phase 2. The single definition shared by the loader, the
+// preview command, and the build gate.
+int pv_preview_applicable(const ccb_config *cfg);
+// Phase 2 load: parse the app's own Activities into screens,
+// appended to *screens_io (pending android:onClick edges appended
+// to *pending_io), reusing the flow parser over synthesized flow
+// text (see ccb_preview_real.c). graph_keys/vals and
+// onclick_methods/labels are the scan_xml outputs, borrowed.
+// The launcher screen name (stripped, e.g. "Main") is returned in
+// *launcher_io (malloc'd, or NULL when the manifest names no
+// launcher; the caller frees it). Always returns CCB_OK: an absent
+// Kotlin dir or unreadable sources simply yield no screens, never
+// an error.
+ccb_status pv_real_load(const ccb_config *cfg, ccb_arena *arena,
+  ccb_diag_list *diags, char **graph_keys, char **graph_vals,
+  size_t ngraph, char **onclick_methods, char **onclick_labels,
+  size_t nonclick, pv_screen ***screens_io, size_t *nscreens_io,
+  pv_pending_edge ***pending_io, size_t *npending_io,
+  char **launcher_io);
 // Normalize an Android class name for comparison: strip a leading
 // '.', strip the project package prefix + '.', then take the
 // simple name (after the last '.'). So ".DetailActivity",

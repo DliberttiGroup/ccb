@@ -1,0 +1,10 @@
+Main (entry)
+  -> Detail("note-1") via "Note 1: Buy milk"
+  -> Detail("note-2") via "Note 2: Call Ana"
+  -> Detail("note-3") via "Note 3: Ideas"
+  -> Form via "New note"
+  -> Settings via "Settings"
+Detail
+  -> Form via "Edit"
+Form
+Settings

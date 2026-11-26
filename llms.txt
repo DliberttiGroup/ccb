@@ -1,0 +1,15 @@
+# CCB — docs for LLMs / AI agents
+# Human docs (English) live in docs/. These files are the Chinese
+# versions of the same docs, for LLM/agent consumption.
+# The single English spec is requirement.md at the repo root;
+# it is intentionally not translated.
+
+- [README](docs/llm/README.md): Layout of the LLM docs and how they map to the English human docs.
+- [Build pipeline](docs/llm/build.md): Build stages, caching, reproducible builds, kotlinc daemon, static release binary, running the tests.
+- [Toolchain setup](docs/llm/setup.md): Toolchain provisioning via ccb setup, JDK/kotlinc/NDK/r8 installs, host tools, proxy limitation, custom tool paths.
+- [Remote Maven dependencies](docs/llm/maven.md): Declaring Maven coordinates, transitive resolution, cache and checksums, lockfile, limitations, troubleshooting.
+- [Library modules](docs/llm/modules.md): Declaring library modules, graph rules, build flow, R semantics, incremental builds, limitations.
+- [Preview](docs/llm/preview.md): The ccb preview UI convention — flow files, click handlers, real code, scenarios, traces, styles, layout model, lint diagnostics, output modes, build gate, diff, walk, watch, LSP server.
+- [Diagnostic codes](docs/llm/diagnostics.md): Full catalog of CCB-E, CCB-P diagnostic codes and exit codes.
+- [JSON protocol](docs/llm/json-protocol.md): The --json event stream, --explain and --dry-run.
+- [Connecting a device](docs/llm/device-setup.md): Wireless debugging over Tailscale, adb safety, behavior with no device attached.

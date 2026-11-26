@@ -1,0 +1,94 @@
+# CI: build CCB and run the test suite on GitHub runners, not the dev VM.
+# Runs on every push and pull request. Two jobs (plain + sanitizer), each
+# with the full toolchain: JDK 17, Android SDK, kotlinc 2.4.21.
+# The full suite takes 15-30 minutes (each test does real Android builds).
+# For a quick check use the labels (see docs/build.md): -L fast, -L <area>.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  plain:
+    name: plain (50 tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+      KOTLIN_HOME: /opt/kotlin-2.4.21/kotlinc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Install kotlinc 2.4.21
+        run: |
+          curl -sSL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip
+          sudo mkdir -p /opt/kotlin-2.4.21
+          sudo unzip -q /tmp/kotlin.zip -d /opt/kotlin-2.4.21
+          /opt/kotlin-2.4.21/kotlinc/bin/kotlinc -version
+
+      - name: Build
+        run: |
+          cmake --preset dev
+          cmake --build build -j4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizer:
+    name: sanitizer (50 tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+      KOTLIN_HOME: /opt/kotlin-2.4.21/kotlinc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Install kotlinc 2.4.21
+        run: |
+          curl -sSL -o /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip
+          sudo mkdir -p /opt/kotlin-2.4.21
+          sudo unzip -q /tmp/kotlin.zip -d /opt/kotlin-2.4.21
+          /opt/kotlin-2.4.21/kotlinc/bin/kotlinc -version
+
+      - name: Build
+        run: |
+          cmake --preset sanitizer
+          cmake --build build-san -j4
+
+      - name: Test
+        run: ctest --test-dir build-san --output-on-failure

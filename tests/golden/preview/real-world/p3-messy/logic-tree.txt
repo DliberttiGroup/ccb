@@ -10,6 +10,7 @@ Home (entry)
   -> Detail via "Helper nav"
   -> Form via "Cross file"
   -> Form via "Var ref"
+  -> Detail via "Open detail"
   -> Settings via "Share"
 Settings
   -> Home via "Back"
