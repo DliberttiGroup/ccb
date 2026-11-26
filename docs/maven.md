@@ -1,5 +1,7 @@
 # Remote Maven dependencies
 
+[Docs index](index.md)
+
 CCB resolves remote Maven artifacts declared in `ccb.toml` and feeds them
 into the deps step as if they were local AARs/JARs. No Gradle: no daemon,
 no build scripts, no plugin resolution — just POM parsing, downloads, and
@@ -46,13 +48,12 @@ fixture repo; not a supported way to add private repositories in v1.
 
 Artifact type comes from the artifact's POM `<packaging>`:
 
-- `aar` → downloaded as an AAR, treated exactly like a local AAR
-  (extracted, `classes.jar` to classpath, `res/` merged, manifest merged).
-- `jar` (or missing `<packaging>`, which Maven defaults to jar) →
-  downloaded as a JAR onto the compile classpath and dex input.
-- `pom` → no artifact downloaded; the POM's own dependencies still
-  resolve (how BOM-style POMs behave).
-- Anything else → `CCB-E3019` naming the coordinate.
+| Packaging | Result |
+| --------- | ------ |
+| `aar` | Downloaded as an AAR, treated exactly like a local AAR (extracted, `classes.jar` to classpath, `res/` merged, manifest merged). |
+| `jar` (or missing `<packaging>`, which Maven defaults to jar) | Downloaded as a JAR onto the compile classpath and dex input. |
+| `pom` | No artifact downloaded; the POM's own dependencies still resolve (how BOM-style POMs behave). |
+| Anything else | `CCB-E3019` naming the coordinate. |
 
 ## Transitive dependencies
 
@@ -185,24 +186,14 @@ whenever present:
 
 ## Troubleshooting
 
-Code meanings: [docs/diagnostics.md](diagnostics.md). Fixes:
+Code meanings: [diagnostics.md](diagnostics.md).
 
-- `CCB-E3021`: artifact not in the local cache yet. Run `ccb setup`, then
-  build again. Same for a parent POM evicted from the cache: setup
-  re-prefetches the whole chain.
-- `CCB-E3024`: parent chain loops, or is deeper than 10 ancestors. Fix
-  the chain in the POMs.
-- `CCB-E3020`: downloaded file doesn't match the repo's published
-  checksum. Delete the cache entry (or the whole
-  `<cache>/<group-path>/<artifact>/<version>/` dir) and re-run `ccb
-  setup`; if it persists, the repo or mirror is serving bad bytes.
-- `CCB-E3019`: coordinate doesn't exist in Google Maven (or Central, if
-  enabled). Check spelling and version, and whether the artifact actually
-  lives on Central (then set `maven_central`).
-- `CCB-E1005` (coordinate): declared coordinate malformed or unpinned.
-  Fix the string in `ccb.toml`.
-- `CCB-E1005` (exclusion): exclusion removes something the project
-  declares directly. Remove the exclusion or the direct coordinate.
-- `CCB-E3023`: resolved tree deviates from `ccb.lock` (version, packaging,
-  hash, missing, or stale entry), or the lockfile is malformed. Run `ccb
-  setup` to regenerate it from the current declarations.
+| Code | Fix |
+| ---- | --- |
+| `CCB-E3021` | Artifact not in the local cache yet. Run `ccb setup`, then build again. Same for a parent POM evicted from the cache: setup re-prefetches the whole chain. |
+| `CCB-E3024` | Parent chain loops, or is deeper than 10 ancestors. Fix the chain in the POMs. |
+| `CCB-E3020` | Downloaded file doesn't match the repo's published checksum. Delete the cache entry (or the whole `<cache>/<group-path>/<artifact>/<version>/` dir) and re-run `ccb setup`; if it persists, the repo or mirror is serving bad bytes. |
+| `CCB-E3019` | Coordinate doesn't exist in Google Maven (or Central, if enabled). Check spelling and version, and whether the artifact actually lives on Central (then set `maven_central`). |
+| `CCB-E1005` (coordinate) | Declared coordinate malformed or unpinned. Fix the string in `ccb.toml`. |
+| `CCB-E1005` (exclusion) | Exclusion removes something the project declares directly. Remove the exclusion or the direct coordinate. |
+| `CCB-E3023` | Resolved tree deviates from `ccb.lock` (version, packaging, hash, missing, or stale entry), or the lockfile is malformed. Run `ccb setup` to regenerate it from the current declarations. |

@@ -1,5 +1,7 @@
 # Library modules
 
+[Docs index](index.md)
+
 A project can declare library modules in its root `ccb.toml`. Each module
 builds into an intermediate AAR and is consumed through the existing AAR
 machinery: manifest merges, res merges at link, classes dex, assets
@@ -46,7 +48,7 @@ depends = ["base"]
 Pipeline order: deps (declared AARs) → modules → merge-manifest →
 compile-res → link → code → dex → … The manifest merge sees declared AARs
 first, then module AARs in topological order. Merge rules: see
-[docs/build.md](build.md) (stage 3).
+[build.md](build.md) (stage 2).
 
 Per module, in topological order:
 

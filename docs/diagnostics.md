@@ -1,10 +1,18 @@
 # Diagnostic codes
 
-Every failure carries a stable code. Codes grouped by phase. Exit codes
-(spec §6.4): 0 success, 1 build failure, 2 config error, 3 toolchain
-missing/wrong version, 4 signing error, 5 device error.
+[Docs index](index.md)
+
+Every failure carries a stable code. Exit codes: 0 success, 1 build
+failure, 2 config error, 3 toolchain missing/wrong version, 4 signing
+error, 5 device error.
+
+Tool failures include the exact command that failed and the tail of its
+stderr. Keystore passwords never appear: release signing passes them to
+apksigner as `env:VAR` references only.
 
 ## Config (exit 2)
+
+`ccb check` reports every config problem at once, not just the first.
 
 | Code | Meaning |
 | ---- | ------- |
@@ -20,8 +28,6 @@ missing/wrong version, 4 signing error, 5 device error.
 | CCB-E1010 | Module dependency cycle (names the cycle path, e.g. `a -> b -> a`) |
 | CCB-E1011 | Module depends on an unknown module (names the module and the dependency) |
 
-`ccb check` reports every config problem at once, not just the first.
-
 ## Toolchain (exit 3)
 
 | Code | Meaning |
@@ -34,7 +40,7 @@ missing/wrong version, 4 signing error, 5 device error.
 | CCB-E2006 | kotlinc is not 2.x |
 | CCB-E2007 | NDK not installed for the requested version |
 | CCB-E2008 | NDK revision mismatch |
-| CCB-E2009 | Required tool binary missing or not executable. Also covers a broken explicit tool override: `[sdk] aapt2` / `[sdk] zipalign` key or `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, message names the override source and the path. No silent fallback to the default tool. |
+| CCB-E2009 | Required tool binary missing or not executable. Also a broken explicit tool override: `[sdk] aapt2` / `[sdk] zipalign` key or `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, message names the override source and the path. No silent fallback to the default tool. |
 
 ## Build (exit 1 unless noted)
 
@@ -68,6 +74,12 @@ missing/wrong version, 4 signing error, 5 device error.
 
 ## Preview (exit 1 unless noted)
 
+Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under `--strict`)
+CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
+`--strict`, so they never fail the build gate. A project with no usable
+`[preview]` section is not a diagnostic at all: `ccb preview` prints
+"preview not applicable to this project" and exits 0.
+
 | Code | Meaning |
 | ---- | ------- |
 | CCB-P1001 | Unknown CSS property (warning; error under `--strict` / `[preview] strict`) |
@@ -86,8 +98,8 @@ missing/wrong version, 4 signing error, 5 device error.
 | CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
 | CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
 | CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
-| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows (warning, always). Full rule: [docs/preview.md](preview.md#lint-diagnostics-after-layout) |
-| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always). Full rule: [docs/preview.md](preview.md#lint-diagnostics-after-layout) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows (warning, always). Full rule: [preview.md](preview.md#lint-diagnostics-after-layout) |
+| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always). Full rule: [preview.md](preview.md#lint-diagnostics-after-layout) |
 | CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
 | CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
 | CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
@@ -96,19 +108,9 @@ missing/wrong version, 4 signing error, 5 device error.
 | CCB-P1024 | Ambiguous function reference: a click-handler method reference or a helper call names a top-level fun defined in more than one flow file, so no edge is recorded for it — the reference is never guessed. Warns once per (file, name) (warning, always; never fails the build gate) |
 | CCB-P1025 | Unattributed navigation: a nav call in a flow file that no parse recorded as an edge — inside a nested block, a skipped statement, or a helper never scanned from a button. Reported with file:line so it is never silently dropped; never invents an edge. Navs already reported by CCB-P1019 (unbound handler) or CCB-P1024 (ambiguous reference) are not repeated here (warning, always; never fails the build gate) |
 
-Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under `--strict`)
-CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
-`--strict`, so they never fail the build gate. A project with no usable
-`[preview]` section is not a diagnostic at all: `ccb preview` prints
-"preview not applicable to this project" and exits 0.
-
 ## Device (exit 5)
 
 | Code | Meaning |
 | ---- | ------- |
-| CCB-E5001 | adb command failed or no device connected (see docs/device-setup.md) |
+| CCB-E5001 | adb command failed or no device connected (see [device-setup.md](device-setup.md)) |
 | CCB-E5002 | No APK to install (run `ccb build` first) |
-
-Tool failures include the exact command that failed and the tail of its
-stderr. Keystore passwords are never included: release signing passes them
-to apksigner as `env:VAR` references only.

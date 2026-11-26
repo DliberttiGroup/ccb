@@ -1,13 +1,16 @@
 # Toolchain setup
 
+[Docs index](index.md)
+
 ## What CCB needs
 
-- JDK 17+ (`java`, `javac`, `keytool`)
-- Android SDK: `platforms;android-34`, `android-35` or `android-36`,
-  `build-tools;35.x` or `36.x`, `platform-tools` (for `adb`)
-- kotlinc 2.x
-- NDK r27 (only for `[ndk]` projects)
-- r8 (only for release + minify — see "r8" below)
+| Tool | Version |
+| ---- | ------- |
+| JDK (`java`, `javac`, `keytool`) | 17+ |
+| Android SDK | `platforms;android-34`, `-35`, or `-36`; `build-tools;35.x` or `36.x`; `platform-tools` (for `adb`) |
+| kotlinc | 2.x |
+| NDK | r27, only for `[ndk]` projects |
+| r8 | only for release + minify (see below) |
 
 ## Resolution order
 
@@ -29,45 +32,37 @@ platform android-35, build-tools 35.0.0) via `sdkmanager`. When platform,
 build-tools, and platform-tools are already present, setup skips licenses
 and sdkmanager entirely and proceeds to the remaining steps — so it works
 behind a proxy that blocks sdkmanager, as long as the SDK is already
-provisioned. Order:
+provisioned. A config that was found but fails to load is an error, not a
+silent fallback to the default SDK home; defaults apply only when no
+`ccb.toml` exists at all.
 
-1. Missing JDK 17+: offer to install one (see below) instead of failing
-   at the sdkmanager step with a generic error.
-2. Bootstrap `cmdline-tools` from Google's official archive
-   (`commandlinetools-linux-11076708_latest.zip`), verified against a
-   pinned SHA-256 before unzipping, when none are present.
-3. Accept the SDK licenses.
-4. Install the components.
-5. Verify the components actually landed before continuing — an install
-   that silently installed nothing (e.g. licenses not yet accepted on a
-   fresh SDK) is reported as missing components, never as success.
-6. Install kotlinc when no usable 2.x resolves.
-7. Install the NDK revision when the project declares `[ndk]`.
-8. Install r8 when the project is minify-enabled without an explicit jar.
-9. Install missing host tools from the platform package manager.
-10. Prefetch `[deps] maven` artifacts into the local Maven cache (see
-    [docs/maven.md](maven.md)).
-11. Final verification pass (below).
-12. Print "SDK ready".
-
-A config that was found but fails to load is an error, not a silent
-fallback to the default SDK home; defaults apply only when no `ccb.toml`
-exists at all.
+| # | Step |
+| - | ---- |
+| 1 | Missing JDK 17+: offer to install one (below) instead of failing at the sdkmanager step with a generic error. |
+| 2 | Bootstrap `cmdline-tools` from Google's official archive (`commandlinetools-linux-11076708_latest.zip`), verified against a pinned SHA-256 before unzipping, when none are present. |
+| 3 | Accept the SDK licenses. |
+| 4 | Install the components. |
+| 5 | Verify the components actually landed before continuing — an install that silently installed nothing (e.g. licenses not yet accepted on a fresh SDK) is reported as missing components, never as success. |
+| 6 | Install kotlinc when no usable 2.x resolves. |
+| 7 | Install the NDK revision when the project declares `[ndk]`. |
+| 8 | Install r8 when the project is minify-enabled without an explicit jar. |
+| 9 | Install missing host tools from the platform package manager. |
+| 10 | Prefetch `[deps] maven` artifacts into the local Maven cache (see [maven.md](maven.md)). |
+| 11 | Final verification pass (below). |
+| 12 | Print "SDK ready". |
 
 ## Installing a missing JDK
 
 No JDK 17+ → install OpenJDK 17 with the platform's package manager:
 
-- Termux: `pkg install -y openjdk-17` (detected via `$PREFIX/bin/pkg`).
-- Regular Linux: `apt-get` (Debian/Ubuntu, `openjdk-17-jdk`),
-  `dnf`/`yum` (`java-17-openjdk-devel`), `pacman` (`jdk17-openjdk`),
-  `zypper` (`java-17-openjdk-devel`), or `apk` (`openjdk17`) — whichever
-  is on PATH. Not running as root: runs under `sudo` if available;
-  without root or sudo there is no usable installer and setup reports
-  that.
-- Any other platform, or no installer found: setup prints a plain
-  manual-install message (install a JDK 17+, set `JAVA_HOME` or put `java`
-  on PATH) and exits 3.
+| Platform | Installer |
+| -------- | --------- |
+| Termux (detected via `$PREFIX/bin/pkg`) | `pkg install -y openjdk-17` |
+| Regular Linux | `apt-get` (Debian/Ubuntu, `openjdk-17-jdk`), `dnf`/`yum` (`java-17-openjdk-devel`), `pacman` (`jdk17-openjdk`), `zypper` (`java-17-openjdk-devel`), or `apk` (`openjdk17`) — whichever is on PATH |
+| Anything else, or no installer found | Plain manual-install message (install a JDK 17+, set `JAVA_HOME` or put `java` on PATH), exit 3 |
+
+Not running as root: runs under `sudo` if available; without root or sudo
+there is no usable installer and setup reports that.
 
 Interactive by default: on a TTY, setup asks "Install OpenJDK 17 via
 \<installer\>? [y/N]" and installs only on "y"/"yes"; any other answer
@@ -91,7 +86,7 @@ directory, not a system package, so no prompt and no `--yes` needed.
 Archive from JetBrains' official GitHub release
 (`kotlin-compiler-2.4.21.zip`), verified against a pinned SHA-256 before
 unzipping; after installing, setup runs the new `kotlinc -version` and
-fails if it doesn't report 2.x.
+fails if it doesn't report 2.x. Needs `unzip` on PATH.
 
 Non-2.x kotlinc found (e.g. old one on PATH): setup still installs 2.4.21
 but warns builds will keep picking the old one until it's removed or
@@ -102,7 +97,7 @@ config, env, or PATH kotlinc.
 Overrides (mirrors, offline testing): `CCB_KOTLIN_URL` replaces the
 download source, `CCB_KOTLIN_SHA256` replaces the expected hash. Custom
 URL without custom hash skips checksum verification, with a notice — the
-pinned hash only applies to the official release. Needs `unzip` on PATH.
+pinned hash only applies to the official release.
 
 `ccb setup --upgrade` reinstalls the setup-managed (SDK-home) kotlinc when
 it's not the pinned version. A user-managed kotlinc (config, `KOTLIN_HOME`,
@@ -136,8 +131,8 @@ custom URLs/hashes are not upgrade-managed.
 `[build] minify = true` with `[build] proguard_rules` pointing at your
 rules file. Release builds with `minify = true` and no `r8_jar`
 (explicit or setup-managed) fail with `CCB-E3014`. Keep rules CCB
-generates for entry points r8 can't see: see [docs/build.md](build.md)
-(dex step). Your rules file is passed to r8 as well, for keeps CCB can't
+generates for entry points r8 can't see: see [build.md](build.md) (dex
+step). Your rules file is passed to r8 as well, for keeps CCB can't
 infer — reflection-only references (`Class.forName` strings) — so it's
 still required when `minify = true`, but may hold only a comment when the
 app needs no extra keeps.

@@ -1,106 +1,88 @@
 # Build pipeline and caching
 
+[Docs index](index.md)
+
 ## Stages (in order)
 
-1. **Stage 0** — Load + validate `ccb.toml`, report every problem at once.
-   Resolve the toolchain. Release builds verify signing config before
-   compiling anything.
-2. **deps** — Extract AARs (classes, resources, assets, JNI).
-3. **merge-manifest** — Merge AAR `AndroidManifest.xml` files into the app
-   manifest, in config order. Output:
-   `build/intermediates/merged-manifest/`. Skipped with no AARs.
-   App entries win on name conflict (warning names the AAR and entry);
-   identical entries from two AARs dedup silently; same name with
-   different attributes keeps the first AAR's version (warning names both
-   AARs). Merged: application components (`activity`, `service`,
-   `receiver`, `provider`, `activity-alias`), `uses-permission`,
-   `uses-feature`. Everything else in a library manifest is ignored.
-   Relative component names resolve against the owning manifest's package
-   and are rewritten fully-qualified. Malformed AAR manifest fails the
-   build with `CCB-E3018` before packaging; an AAR with no manifest merges
-   as nothing. Fingerprinted from inputs, so `link` re-runs when any
-   manifest changes.
-4. **compile-res** — `aapt2 compile` each resource directory into a `.flat`
-   zip.
-5. **link** — `aapt2 link` into `linked.ap_`, generating `R.java`. Uses the
-   merged manifest when AARs are present, else the app manifest. The
-   manifest's `package` must match `[project] package`.
-6. **compile-code** — `kotlinc` (Kotlin + `R.java` + Java sources), then
-   `javac` for Java sources and generated `R.java`. kotlinc resolves R
-   symbols but emits no R.class files, so javac must compile them —
-   otherwise library R classes are missing from the dex at runtime.
-   Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files.
-7. **dex** — `d8` (or `r8` for release + minify). `.class` files pass
-   individually, not as a directory: kotlinc also writes
-   `META-INF/*.kotlin_module` files, and d8 rejects non-class files in
-   directory inputs. For Kotlin projects the kotlinc stdlib jar is a
-   program input automatically (skipped when the project already supplies
-   it via `[deps]` or Maven); for release + minify it is a program input
-   to R8, not a `--lib`.
-   - **Stdlib dex cache.** The stdlib jar is dexed once into the global
-     cache `$XDG_CACHE_HOME/ccb/dex-stdlib` (else `~/.cache/ccb/dex-stdlib`,
-     same root as the Maven cache, survives `ccb clean`), keyed by stdlib
-     jar hash + min-api + build-tools version. Later builds pass the
-     cached `.dex` to d8 instead of the jar. Single `<key>.dex` file,
-     atomic rename on publish, validated on read (dex magic + header file
-     size). Missing or corrupt entry falls back to the jar, never fails
-     the build. Release + minify excluded: R8 takes the stdlib as a
-     program-input JAR, not dex.
-   - **R8 keep rules (release + minify).** CCB generates keep rules
-     (`build/intermediates/r8-keep.pro`, passed to R8 ahead of the
-     project's own `proguard_rules` file): the app's whole package
-     (`-keep class <package>.** { *; }`), the `<application android:name>`
-     and every manifest component (activities, services, receivers,
-     providers, activity-aliases and their `targetActivity`), and view
-     classes from layout XML (dotted element names, `class`,
-     `android:name`, `layout_behavior`). Manifest entries come from the app,
-     AAR, and library-module manifests; layouts from app and module res
-     dirs and AAR zips. Generated text is part of the dex fingerprint, so
-     a manifest or layout change re-runs dex. R8 tolerates a keep for a
-     nonexistent class (warning only), so a stale layout reference can't
-     break a build. Reflection-only references (`Class.forName` strings)
-     can't be kept automatically: put those keeps in the project's own
-     `proguard_rules` file, still required when `minify = true` (may hold
-     only a comment otherwise).
-   - **Dexcheck still runs** after dex and passes — cached stdlib classes
-     are in the merged dex.
-   - **Measured, Showcase:** clean build 57s before, 63s cold cache
-     (one-time populate), 33–34s warm cache. Release + minify: APK
-     2,651,777 bytes off, 75,393 on; dex 2,615,024 -> 37,160.
-   - **d8 heap.** The build-tools `d8` wrapper defaults to `-Xmx2G`,
-     which beats CCB's `JAVA_TOOL_OPTIONS=-Xmx1g` (command-line `-Xmx`
-     wins over the env var). CCB passes `-JXmx<N>m` instead, N = 256 +
-     16 per MiB of dex program inputs (app `.class` files + `[deps]`
-     jars + AAR `classes.jar` files + stdlib input, cached `.dex` or
-     jar), capped at 1024MB. Same flag populates the stdlib dex cache
-     (input: stdlib jar alone). Floor evidence (2026-11-25, build-tools
-     36.0.0): d8 succeeds at 128m on Showcase warm inputs and on the
-     stdlib jar alone, and at 256m on 10,000 synthetic classes + stdlib
-     dex (8.2MB in) with no time penalty vs 1024m; Showcase dex is
-     byte-identical at 256m and at the 2G default. Heap never changes dex
-     output, so it's not in the dex fingerprint. R8 untouched: whole-program
-     shrinking doesn't follow this rule, and its 1G cap already equals
-     the cap here.
-8. **dexcheck** — Parse the dex files and verify every referenced class is
-   defined in the dex. Referenced-but-undefined program class fails the
-   build with `CCB-E3025` naming the missing classes, before packaging.
-   Platform classes (`java.*`, `android.*`, …) come from `--lib` inputs,
-   never in the dex: allowlisted, never reported. Annotation- and
-   signature-only references still count. Runs even when dex was
-   cache-skipped, and for AAB builds. Milliseconds, no cache of its own,
-   doesn't count toward `steps_run`, so a no-op rebuild still reports
-   "up to date". `--explain` prints its plan line; `--dry-run` doesn't
-   run it.
-9. **native** — NDK clang per ABI (only with an `[ndk]` section).
-10. **package** — CCB's own ZIP writer: `linked.ap_` entries, dex files,
-    assets (app assets win over AAR assets with the same name),
-    `lib/<abi>/*.so` (duplicate `.so` names are an error).
-11. **align** — `zipalign -f 4`.
-12. **sign** — `apksigner`. Debug uses `~/.android/debug.keystore`
-    (created with keytool when missing). Release uses `env:VAR` password
-    references; passwords never appear in commands or logs.
-13. **verify** — `apksigner verify` and `aapt2 dump badging`. An APK counts
-    as built only when both pass.
+| # | Stage | What it does |
+| - | ----- | ------------ |
+| 0 | Load | Load + validate `ccb.toml`, report every problem at once. Resolve the toolchain. Release builds verify signing config before compiling anything. |
+| 1 | deps | Extract AARs (classes, resources, assets, JNI). |
+| 2 | merge-manifest | Merge AAR manifests into the app manifest, in config order. Output: `build/intermediates/merged-manifest/`. Skipped with no AARs. |
+| 3 | compile-res | `aapt2 compile` each resource directory into a `.flat` zip. |
+| 4 | link | `aapt2 link` into `linked.ap_`, generating `R.java`. Uses the merged manifest when AARs are present, else the app manifest. The manifest's `package` must match `[project] package`. |
+| 5 | compile-code | `kotlinc` (Kotlin + `R.java` + Java sources), then `javac` for Java sources and generated `R.java`. kotlinc resolves R symbols but emits no R.class files, so javac must compile them — otherwise library R classes are missing from the dex at runtime. Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files. |
+| 6 | dex | `d8` (or `r8` for release + minify). See below. |
+| 7 | dexcheck | Parse the dex files, verify every referenced class is defined in the dex. Referenced-but-undefined program class fails the build with `CCB-E3025` naming the missing classes, before packaging. Platform classes (`java.*`, `android.*`, …) come from `--lib` inputs, never in the dex: allowlisted, never reported. Annotation- and signature-only references still count. Runs even when dex was cache-skipped, and for AAB builds. Milliseconds, no cache of its own, doesn't count toward `steps_run`, so a no-op rebuild still reports "up to date". `--explain` prints its plan line; `--dry-run` doesn't run it. |
+| 8 | native | NDK clang per ABI (only with an `[ndk]` section). |
+| 9 | package | CCB's own ZIP writer: `linked.ap_` entries, dex files, assets (app assets win over AAR assets with the same name), `lib/<abi>/*.so` (duplicate `.so` names are an error). |
+| 10 | align | `zipalign -f 4`. |
+| 11 | sign | `apksigner`. Debug uses `~/.android/debug.keystore` (created with keytool when missing). Release uses `env:VAR` password references; passwords never appear in commands or logs. |
+| 12 | verify | `apksigner verify` and `aapt2 dump badging`. An APK counts as built only when both pass. |
+
+Merge rules (stage 2): app entries win on name conflict (warning names
+the AAR and entry); identical entries from two AARs dedup silently; same
+name with different attributes keeps the first AAR's version (warning
+names both AARs). Merged: application components (`activity`, `service`,
+`receiver`, `provider`, `activity-alias`), `uses-permission`,
+`uses-feature`. Everything else in a library manifest is ignored.
+Relative component names resolve against the owning manifest's package
+and are rewritten fully-qualified. Malformed AAR manifest fails the build
+with `CCB-E3018` before packaging; an AAR with no manifest merges as
+nothing. Fingerprinted from inputs, so `link` re-runs when any manifest
+changes.
+
+### Dex (stage 6)
+
+`.class` files pass individually, not as a directory: kotlinc also writes
+`META-INF/*.kotlin_module` files, and d8 rejects non-class files in
+directory inputs. For Kotlin projects the kotlinc stdlib jar is a program
+input automatically (skipped when the project already supplies it via
+`[deps]` or Maven); for release + minify it is a program input to R8,
+not a `--lib`.
+
+**Stdlib dex cache.** The stdlib jar is dexed once into the global cache
+`$XDG_CACHE_HOME/ccb/dex-stdlib` (else `~/.cache/ccb/dex-stdlib`, same
+root as the Maven cache, survives `ccb clean`), keyed by stdlib jar hash +
+min-api + build-tools version. Later builds pass the cached `.dex` to d8
+instead of the jar. Single `<key>.dex` file, atomic rename on publish,
+validated on read (dex magic + header file size). Missing or corrupt entry
+falls back to the jar, never fails the build. Release + minify excluded:
+R8 takes the stdlib as a program-input JAR, not dex.
+
+**R8 keep rules (release + minify).** CCB generates keep rules
+(`build/intermediates/r8-keep.pro`, passed to R8 ahead of the project's
+own `proguard_rules` file): the app's whole package (`-keep class
+<package>.** { *; }`), the `<application android:name>` and every manifest
+component (activities, services, receivers, providers, activity-aliases
+and their `targetActivity`), and view classes from layout XML (dotted
+element names, `class`, `android:name`, `layout_behavior`). Manifest
+entries come from the app, AAR, and library-module manifests; layouts from
+app and module res dirs and AAR zips. Generated text is part of the dex
+fingerprint, so a manifest or layout change re-runs dex. R8 tolerates a
+keep for a nonexistent class (warning only), so a stale layout reference
+can't break a build. Reflection-only references (`Class.forName` strings)
+can't be kept automatically: put those keeps in the project's own
+`proguard_rules` file, still required when `minify = true` (may hold only
+a comment otherwise).
+
+**d8 heap.** The build-tools `d8` wrapper defaults to `-Xmx2G`, which
+beats CCB's `JAVA_TOOL_OPTIONS=-Xmx1g` (command-line `-Xmx` wins over the
+env var). CCB passes `-JXmx<N>m` instead, N = 256 + 16 per MiB of dex
+program inputs (app `.class` files + `[deps]` jars + AAR `classes.jar`
+files + stdlib input, cached `.dex` or jar), capped at 1024MB. Same flag
+populates the stdlib dex cache (input: stdlib jar alone). Floor evidence
+(2026-11-25, build-tools 36.0.0): d8 succeeds at 128m on Showcase warm
+inputs and on the stdlib jar alone, and at 256m on 10,000 synthetic
+classes + stdlib dex (8.2MB in) with no time penalty vs 1024m; Showcase
+dex is byte-identical at 256m and at the 2G default. Heap never changes dex
+output, so it's not in the dex fingerprint. R8 untouched: whole-program
+shrinking doesn't follow this rule, and its 1G cap already equals the cap
+here.
+
+**Measured, Showcase:** clean build 57s before, 63s cold cache (one-time
+populate), 33–34s warm cache. Release + minify: APK 2,651,777 bytes off,
+75,393 on; dex 2,615,024 -> 37,160.
 
 ## AAB output (`--aab`)
 
@@ -126,7 +108,7 @@ values + tool versions). Unchanged step is skipped, previous outputs reused.
   verify, but skips kotlinc and dex (`R.java` unchanged).
 - Tool upgrade changes the tool fingerprint, invalidates all steps.
 - `--explain` prints the run/skip plan without executing. Conservative
-  downstream of `link` — see [docs/json-protocol.md](json-protocol.md).
+  downstream of `link` — see [json-protocol.md](json-protocol.md).
 - `--dry-run` prints the exact commands, executes nothing.
 
 Cache lives at `build/ccb-cache.json`. Missing or corrupt cache means
@@ -156,8 +138,8 @@ bytes are what's compared.
   one-file Kotlin rebuild ~14 s. The opt-in kotlinc daemon (below) removes
   kotlinc JVM startup from warm rebuilds, not from cold builds — starting
   the daemon costs about what starting kotlinc costs.
-- **Tool probe cache.** `kotlinc -version` / `java -version` probes used to
-  dominate no-op rebuilds (~3 s of a ~3.4 s no-op). Now cached in
+- **Tool probe cache.** `kotlinc -version` / `java -version` probes used
+  to dominate no-op rebuilds (~3 s of a ~3.4 s no-op). Now cached in
   `build/intermediates/tool-probes.json`, keyed by tool path + mtime +
   size. Repeat build with unchanged tools skips both probes (warm no-op
   ~0.2 s). Mismatch, missing entry, or corrupt file re-probes; `ccb
@@ -171,7 +153,7 @@ bytes are what's compared.
   from PATH and ignore `JAVA_HOME`, so CCB prefixes the resolved JDK
   `bin` directory onto PATH for JVM tool runs.
 - **No device or emulator** here, so install/launch are verified only up
-  to the device boundary (see [docs/device-setup.md](device-setup.md)).
+  to the device boundary (see [device-setup.md](device-setup.md)).
 
 ## Kotlinc daemon (opt-in)
 

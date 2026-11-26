@@ -11,7 +11,7 @@ build it, and contribute". Check items off as they land.
   header removal, R8 minify, static release binary, d8 heap sizing,
   kotlinc daemon (opt-in), audit refactors.
 - [ ] Confirm GitHub HEAD builds clean from a fresh clone (see
-  [README](../README.md#install-from-source)).
+  [README](README.md#install-from-source)).
 - [ ] Tag the first prototype release (e.g. `v0.1.0-prototype`).
 
 ## 2. Repo hygiene
@@ -37,7 +37,7 @@ build it, and contribute". Check items off as they land.
 - [ ] AAR dex cache (extend the stdlib dex-cache pattern to AAR classes).
 - [ ] Cold build <10s / incremental <2s goal in `requirement.md` vs
   measured ~19s / ~17s (daemon helps warm rebuilds; cold is still over
-  target). Numbers: [docs/build.md](build.md#known-limits-and-costs).
+  target). Numbers: [docs/build.md](docs/build.md#known-limits-and-costs).
 - [ ] Preview follow-ups: synthesized-text diagnostics carry fake line
   numbers, top-level functions in real Kotlin files not extracted,
   `<include>` layouts not resolved, LSP server still styles/flow only.
@@ -49,7 +49,7 @@ build it, and contribute". Check items off as they land.
 
 ### Setup (5 minutes)
 
-Toolchain: [docs/setup.md](setup.md). Then:
+Toolchain: [docs/setup.md](docs/setup.md). Then:
 
 ```sh
 cmake -S . -B build && cmake --build build
@@ -72,7 +72,7 @@ cmake -S . -B build && cmake --build build
   `-Wall -Wextra -Werror -Wpedantic`. CMake only, libc only, arena
   allocation. No `system()`, no threads, no nested ifs, max 3 indentation
   levels. Root-cause fixes only — no workarounds.
-- Tests: [docs/build.md](build.md#running-the-tests). Run sequentially,
+- Tests: [docs/build.md](docs/build.md#running-the-tests). Run sequentially,
   never concurrently.
 - New behavior needs a test. A refactor needs the suite green before and
   after, with no test weakened.

@@ -1,6 +1,10 @@
 # CCB
 
-[Documentation](docs/build.md) | [Specification](requirement.md) | [LLM docs](llms.txt)
+[Documentation](docs/index.md) | [Specification](requirement.md) | [LLM docs](llms.txt)
+
+[![CI](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml/badge.svg)](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/DliberttiGroup/ccb)](LICENSE)
+[![Tag](https://img.shields.io/github/v/tag/DliberttiGroup/ccb)](https://github.com/DliberttiGroup/ccb/tags)
 
 Build headless Android APKs without Gradle. One C binary, no daemon, no
 runtime dependencies. Every build reproducible and explainable
@@ -15,10 +19,6 @@ runtime dependencies. Every build reproducible and explainable
 - Preview: CSS + Kotlin structure renders to a box/logic tree
 - JSON event stream (`--json`), stable exit codes, dry-run mode
 - Opt-in kotlinc daemon (auto-shutdown) for faster rebuilds
-
-## Install from package
-
-No packages yet. Install from source. See [LAUNCH.md](LAUNCH.md).
 
 ## Install from source
 
@@ -39,7 +39,7 @@ cmake --build build-release
 ```
 
 Tests: [docs/build.md](docs/build.md#running-the-tests). Run suites
-sequentially, never concurrently.
+sequentially, never concurrently. No packages yet — see [LAUNCH.md](LAUNCH.md).
 
 ## Transitioning from Gradle
 
@@ -61,7 +61,7 @@ ccb doctor                 # toolchain report
 ```
 ├─ src/           C17 implementation, one module per subsystem
 ├─ tests/         test suite (see tests/test.h)
-├─ docs/          human docs, English
+├─ docs/          human docs, English (see docs/index.md)
 ├─ docs/llm/      agent docs, Chinese (see llms.txt)
 ├─ examples/      hello, preview-sample, real-world
 ├─ requirement.md the specification

@@ -1,5 +1,7 @@
 # JSON protocol (`--json`)
 
+[Docs index](index.md)
+
 With `--json`, human prose never appears on stdout. Progress goes to
 stdout as JSONL events; diagnostics go to stdout as `diagnostic` events;
 the final result is one JSON object.
@@ -28,12 +30,14 @@ Verbose mode streams tool output as events:
 
 ## Other commands
 
-- `ccb --json version` → `{"event":"version","version":"0.1.0"}`
-- `ccb --json check` → `{"event":"check","ok":true,"project":"hello","package":"com.example.hello","variant":"debug","sdk":"…","build_tools":"35.0.0","kotlin":"2.4.21","java":17}`
-- `ccb --json init` → `{"event":"init","dir":"myapp","created":8,"skipped":0}`
-- `ccb --json clean` → `{"event":"clean","removed":true}`
-- `ccb --json doctor` (in a project) → `{"event":"doctor","project":"hello","package":"com.example.hello","sdk":"…","build_tools":"35.0.0","kotlin":"2.4.21","java":17,"ndk":null}`
-- `ccb --json doctor` (no valid project) → `{"event":"doctor","config":null,"java":"…","kotlinc":"…","sdk":"…"}` (`"config":"invalid"` when a `ccb.toml` exists but fails validation)
+| Command | Event |
+| ------- | ----- |
+| `ccb --json version` | `{"event":"version","version":"0.1.0"}` |
+| `ccb --json check` | `{"event":"check","ok":true,"project":"hello","package":"com.example.hello","variant":"debug","sdk":"…","build_tools":"35.0.0","kotlin":"2.4.21","java":17}` |
+| `ccb --json init` | `{"event":"init","dir":"myapp","created":8,"skipped":0}` |
+| `ccb --json clean` | `{"event":"clean","removed":true}` |
+| `ccb --json doctor` (in a project) | `{"event":"doctor","project":"hello","package":"com.example.hello","sdk":"…","build_tools":"35.0.0","kotlin":"2.4.21","java":17,"ndk":null}` |
+| `ccb --json doctor` (no valid project) | `{"event":"doctor","config":null,"java":"…","kotlinc":"…","sdk":"…"}` (`"config":"invalid"` when a `ccb.toml` exists but fails validation) |
 
 ## `--explain` and `--dry-run`
 

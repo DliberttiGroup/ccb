@@ -1,5 +1,7 @@
 # Connecting a device to CCB
 
+[Docs index](index.md)
+
 `ccb install`, `ccb run`, and `ccb logcat` talk to a device through `adb`.
 CCB never exposes adb to the public internet. The supported route from this
 VM to the user's phone is **wireless debugging over the private Tailscale
@@ -38,12 +40,11 @@ changes, repeat steps 3–5.
 
 ## What CCB does when no device is attached
 
-- `ccb install` and `ccb run` fail with `CCB-E5001` and a concrete next
-  step; they never report success without a device.
-- `ccb logcat` checks `adb devices` first and fails fast with `CCB-E5001`
-  instead of blocking on adb's "- waiting for device -".
-- `ccb install --dry-run` and `ccb run --dry-run` print the exact adb
-  commands that would run, without touching a device.
+| Command | Behavior |
+| ------- | -------- |
+| `ccb install`, `ccb run` | Fail with `CCB-E5001` and a concrete next step; never report success without a device. |
+| `ccb logcat` | Checks `adb devices` first and fails fast with `CCB-E5001` instead of blocking on adb's "- waiting for device -". |
+| `ccb install --dry-run`, `ccb run --dry-run` | Print the exact adb commands that would run, without touching a device. |
 
 ## Notes
 
