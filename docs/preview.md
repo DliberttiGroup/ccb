@@ -21,7 +21,7 @@ Sub-pages: [handlers](preview-handlers.md) · [real code](preview-real-code.md) 
 [preview]
 styles = "styles"   # directory of CSS files
 flow = "flow"       # directory of Kotlin flow files
-resources = "res"   # optional: directory of strings.xml / colors.xml
+resources = "src/main/res/values"   # optional: values directory holding strings.xml / colors.xml
 layout = "res/layout"     # optional: layout XML dir or file
 nav_graph = "res/navigation"  # optional: nav-graph XML file or dir
 phone_width = 390   # dp, informational: scales px values to columns
@@ -32,11 +32,17 @@ gate = false        # true: preview errors fail ccb check / ccb build
 
 - `layout` / `nav_graph` are overrides. Without the key, preview tries
   in order: `<paths res>/layout` and `<paths res>/navigation`, then
-  `<resources>/layout` and `<resources>/navigation`. A missing candidate
-  falls through; no candidate at all means an empty input set, not an
-  error. A configured path that doesn't exist is a config error
-  (CCB-E1006). A value may be one file or a directory (every `*.xml`
-  under it, sorted).
+  `<resources>/layout` and `<resources>/navigation`. Each candidate is
+  checked for existence; a missing candidate falls through. No candidate
+  at all means an empty input set, not an error. A configured path that
+  doesn't exist is a config error (CCB-E1006). A value may be one file
+  or a directory (every `*.xml` under it, sorted). Note the trap:
+  `<resources>/layout` only exists when `resources` is the res root —
+  with the standard values-dir value it never matches, so discovery
+  relies on `[paths] res` (which has no default; set it, e.g.
+  `src/main/res`) or on the explicit keys. With neither, preview
+  silently finds no layouts or graphs and still exits 0, with graph
+  navigation unknown and layout-bound screens unreachable.
 - `resources`, when set, must be an existing directory. It holds
   `strings.xml` / `colors.xml`, parsed by a subset parser:
   `<string name="n">v</string>`, `<color name="n">#rrggbb</color>`.

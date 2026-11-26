@@ -12,6 +12,11 @@ Tool failures include the exact command that failed and the tail of its
 stderr. Keystore passwords never appear: release signing passes them to
 apksigner as `env:VAR` references only.
 
+Human-mode diagnostics all print with an `error[...]` prefix,
+regardless of severity: a warning such as CCB-P1017 prints as
+`error[CCB-P1017] ...` on stderr. Judge pass/fail by the diagnostic's
+severity in the tables below and by the exit code, not by the prefix.
+
 ## Config (exit 2)
 
 *ccb-diagnostics-config*

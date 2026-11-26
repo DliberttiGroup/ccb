@@ -34,12 +34,6 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [preview-lsp.md](preview-lsp.md) | LSP server, tree-live mode |
 | [device-setup.md](device-setup.md) | Connecting a device over wireless debugging |
 
-## History
-
-| Doc | What it is |
-| --- | --- |
-| [real-world-testing.md](real-world-testing.md) | 2026-10-24 testing round: 4 apps, findings, verdicts |
-
 ## Where facts live
 
 One home per fact. Toolchain → [setup.md](setup.md). Installing tools →
@@ -147,7 +141,3 @@ Every section carries a `*ccb-<slug>*` tag. Find a section by tag here.
 | `*ccb-json-diagnostics*` | json-protocol.md | Diagnostics |
 | `*ccb-json-commands*` | json-protocol.md | Other commands |
 | `*ccb-json-explain*` | json-protocol.md | --explain and --dry-run |
-| `*ccb-real-world*` | real-world-testing.md | Real-world testing round |
-| `*ccb-real-world-results*` | real-world-testing.md | Results |
-| `*ccb-real-world-gaps*` | real-world-testing.md | Ranked gaps |
-| `*ccb-real-world-verdict*` | real-world-testing.md | Overall judgment |

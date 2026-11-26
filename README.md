@@ -56,6 +56,9 @@ ccb check                  # validate config + toolchain
 ccb doctor                 # toolchain report
 ```
 
+Without `--package` / `--name`, `init` scaffolds name `hello` and
+package `com.example.hello` regardless of the directory name.
+
 ## Project layout
 
 ```

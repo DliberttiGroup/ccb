@@ -47,6 +47,10 @@ usage error (exit 2) listing the available scenarios.
 - Lists: rows replace the 4 placeholder rows of a childless list only. A
   list that already has static children keeps them. Rows render as ordinary
   rows in the wireframe and carry `"provenance": "scenario"` in JSON.
+  Because rows are ordinary rows, a row wider than its box clips and
+  warns CCB-P1009, one per row — on a full scenario the clip warnings
+  can bury real diagnostics, so keep row strings short or widen the
+  list.
 - Fields: content is additional, never a replacement — the static label
   stays and the wireframe shows `[Title: Milk]`. JSON carries `"value"`
   plus `"value_provenance": "scenario"`.
