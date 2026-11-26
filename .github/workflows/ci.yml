@@ -1,13 +1,28 @@
 # CI: build CCB and run the test suite on GitHub runners, not the dev VM.
-# Runs on every push and pull request. Two jobs (plain + sanitizer), each
-# with the full toolchain: JDK 17, Android SDK, kotlinc 2.4.21.
+# Runs on every push and pull request that touches code. Docs-only pushes
+# skip CI entirely: no tests run when no code changed (paths-ignore below
+# matches when every changed file is docs, Markdown, or repo metadata).
+# Two jobs (plain + sanitizer), each with the full toolchain: JDK 17,
+# Android SDK, kotlinc 2.4.21.
 # The full suite takes 15-30 minutes (each test does real Android builds).
 # For a quick check use the labels (see docs/build.md): -L fast, -L <area>.
 name: CI
 
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'llms.txt'
+      - 'LICENSE'
+      - '.github/workflows/release.yml'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'llms.txt'
+      - 'LICENSE'
+      - '.github/workflows/release.yml'
 
 permissions:
   contents: read
