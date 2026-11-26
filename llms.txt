@@ -5,11 +5,23 @@
 # it is intentionally not translated.
 
 - [README](docs/llm/README.md): Layout of the LLM docs and how they map to the English human docs.
-- [Build pipeline](docs/llm/build.md): Build stages, caching, reproducible builds, kotlinc daemon, static release binary, running the tests.
-- [Toolchain setup](docs/llm/setup.md): Toolchain provisioning via ccb setup, JDK/kotlinc/NDK/r8 installs, host tools, proxy limitation, custom tool paths.
+- [Docs index](docs/llm/index.md): Index of all human docs, start-here and reference tables, section tags.
+- [Build pipeline](docs/llm/build.md): Build stages, dex, AAB, caching, reproducible builds, known limits.
+- [Kotlinc daemon](docs/llm/build-daemon.md): Opt-in kotlinc daemon, idle shutdown, fallback, measured times.
+- [Release binary](docs/llm/build-release.md): Static + stripped release binary, measured sizes.
+- [Running the tests](docs/llm/build-tests.md): Running the test suite, fast/slow labels, CI.
+- [Toolchain setup](docs/llm/setup.md): Toolchain provisioning via ccb setup, resolution order, setup steps, final verification, --upgrade/--print-env, proxy limitation.
+- [Installing tools](docs/llm/setup-tools.md): Installing a missing JDK, kotlinc, NDK, r8, host tools, third-party Termux repos, custom tool paths, download cache.
 - [Remote Maven dependencies](docs/llm/maven.md): Declaring Maven coordinates, transitive resolution, cache and checksums, lockfile, limitations, troubleshooting.
 - [Library modules](docs/llm/modules.md): Declaring library modules, graph rules, build flow, R semantics, incremental builds, limitations.
-- [Preview](docs/llm/preview.md): The ccb preview UI convention — flow files, click handlers, real code, scenarios, traces, styles, layout model, lint diagnostics, output modes, build gate, diff, walk, watch, LSP server.
+- [Preview](docs/llm/preview.md): The ccb preview UI convention — config, flow files, build gate, output and exit codes, JSON shape, worked example.
+- [Preview: click handlers](docs/llm/preview-handlers.md): Derived edges, conditional nav, XML android:onClick, NavController + nav graph, bindings, precedence, unknown cases, scope limits.
+- [Preview: real code](docs/llm/preview-real-code.md): Screens and edges from real Kotlin Activities, merge with a sketch, layout-derived wireframe, limits.
+- [Preview: scenarios](docs/llm/preview-scenarios.md): Scenarios — declared runtime facts and merge rules.
+- [Preview: traces](docs/llm/preview-traces.md): Traces — recorded runtime paths, format, render rules.
+- [Preview: styles](docs/llm/preview-styles.md): CSS styles, layout model, lint diagnostics.
+- [Preview: modes](docs/llm/preview-modes.md): Diff, walk, watch modes.
+- [Preview: LSP](docs/llm/preview-lsp.md): LSP server, tree-live mode.
 - [Diagnostic codes](docs/llm/diagnostics.md): Full catalog of CCB-E, CCB-P diagnostic codes and exit codes.
 - [JSON protocol](docs/llm/json-protocol.md): The --json event stream, --explain and --dry-run.
 - [Connecting a device](docs/llm/device-setup.md): Wireless debugging over Tailscale, adb safety, behavior with no device attached.

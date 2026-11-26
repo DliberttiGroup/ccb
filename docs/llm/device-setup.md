@@ -2,11 +2,9 @@
 
 # 通过 CCB 连接设备
 
-`ccb install`、`ccb run` 和 `ccb logcat` 通过 `adb` 与设备通信。CCB 从不把 adb 暴露到公共互联网。从这台虚拟机到用户手机的支持路线是**通过私有 Tailscale 网络进行无线调试**。
+[文档索引](index.md)
 
-## 为什么不用普通的互联网 adb
-
-adb 没有身份验证：任何能到达 adb 端口的人都可以在设备上运行命令。绝不要通过 ngrok、Cloudflare 隧道或任何其他公共隧道转发 adb 端口，也绝不要在公共网络上运行 `adb tcpip`。
+`ccb install`、`ccb run` 和 `ccb logcat` 通过 `adb` 与设备通信。CCB 从不把 adb 暴露到公共互联网——adb 没有身份验证：任何能到达 adb 端口的人都可以在设备上运行命令。绝不要通过 ngrok、Cloudflare 隧道或任何其他公共隧道转发 adb 端口，也绝不要在公共网络上运行 `adb tcpip`。
 
 ## 支持的路线：通过 Tailscale 无线调试
 
@@ -25,9 +23,11 @@ adb 没有身份验证：任何能到达 adb 端口的人都可以在设备上�
 
 ## 没有连接设备时 CCB 的行为
 
-- `ccb install` 和 `ccb run` 会以 `CCB-E5001` 失败，并给出具体的下一步；它们绝不会在没有设备的情况下报告成功。
-- `ccb logcat` 先检查 `adb devices`，失败时直接以 `CCB-E5001` 快速失败，而不是卡在 adb 的 "- waiting for device -" 上。
-- `ccb install --dry-run` 和 `ccb run --dry-run` 会打印将要运行的确切 adb 命令，而不触碰设备。
+| 命令 | 行为 |
+| ------- | -------- |
+| `ccb install`、`ccb run` | 以 `CCB-E5001` 失败，并给出具体的下一步；绝不会在没有设备的情况下报告成功。 |
+| `ccb logcat` | 先检查 `adb devices`，失败时直接以 `CCB-E5001` 快速失败，而不是卡在 adb 的 "- waiting for device -" 上。 |
+| `ccb install --dry-run`、`ccb run --dry-run` | 打印将要运行的确切 adb 命令，而不触碰设备。 |
 
 ## 说明
 

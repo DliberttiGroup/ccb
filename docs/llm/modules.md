@@ -39,11 +39,9 @@ depends = ["base"]
 4. `classes.jar`：除生成的 R 类（`R.class`、`R$*.class`）之外的每个已编译文件。app 链接会为该模块 package 生成真正的 R 类，同时交付两者会使 d8 因重复而拒绝。纯资源模块不贡献任何类。
 5. 中间 AAR（`build/intermediates/modules/<name>/<name>.aar`）：`classes.jar`（如果存在）、`AndroidManifest.xml`（模块 manifest 的副本）、原始 `res/` 和 `assets/` 树。aapt2 在 app 链接时编译 res，与已声明的 AAR 完全相同。
 
-## R 语义（写库代码前请先读）
+## R 语义
 
-库 R 字段是**非 final**的。模块链接生成 R.java，CCB 将其字段从 `public static final int` 改写为 `public static int`，app 链接再赋予最终的资源 ID。库代码以符号方式引用 R 字段，因此在运行时对照 app 的 R 类解析。内联库链接时的常量会交付错误的 ID。
-
-推论：
+库 R 字段是**非 final**的。模块链接生成 R.java，CCB 将其字段从 `public static final int` 改写为 `public static int`，app 链接再赋予最终的资源 ID。库代码以符号方式引用 R 字段，因此在运行时对照 app 的 R 类解析。
 
 - 库代码可以引用自身的 R 类及其依赖的 R 类。
 - 不要在有资源的模块中把自己的类命名为 `R`：它会与生成的 R 类冲突。
@@ -61,7 +59,7 @@ depends = ["base"]
 ## 限制（v1）
 
 - 没有按模块的 `[deps]`、`[ndk]` 或签名小节：模块在 classpath 上使用项目的 jar/AAR，没有原生库。
-- 没有动态功能模块（从 Q1 起已不在范围内）。
+- 没有动态功能模块。
 - 不支持将库模块发布到 Maven 仓库。
 - 除了 aapt2 已有的功能（`--extra-packages` + `--auto-add-overlay`）之外，没有跨模块资源命名空间。
 - app 模块不能按模块配置：所有声明的模块都会在每次构建中被构建和消费。

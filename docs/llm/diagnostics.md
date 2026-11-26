@@ -4,6 +4,8 @@
 
 每次失败都带有一个稳定的代码。代码按阶段分组。退出码（spec §6.4）：0 成功，1 构建失败，2 配置错误，3 工具链缺失/版本错误，4 签名错误，5 设备错误。
 
+人类可读模式的诊断无论严重程度如何，打印时都带有 `error[...]` 前缀：例如 CCB-P1017 这样的告警会在 stderr 上打印为 `error[CCB-P1017] ...`。请按下面表格中的诊断严重程度和退出码判断通过/失败，而不是按此前缀。
+
 ## 配置（退出码 2）
 
 | 代码 | 含义 |
@@ -86,8 +88,8 @@
 | CCB-P1014 | CSS 值超出子集，例如不支持的单位或 display 值（警告；在 `--strict` / `[preview] strict` 下为错误） |
 | CCB-P1015 | CSS 文件被忽略：既不是 `common.css`，也不是项目中某个屏幕的 `<Screen>.css` 文件（警告） |
 | CCB-P1016 | 未解析的 `@string/` 或 `@color/` 引用，或格式错误的 values 条目 / 被跳过的非十六进制颜色值（警告；保留字面量） |
-| CCB-P1017 | 点按目标过小：`button` / `textfield` 小于 8 列或 2 行（警告，始终）。完整规则：[docs/preview.md](preview.md#lint-diagnostics-after-layout) |
-| CCB-P1018 | 文本对比度低于阈值：WCAG 比率低于 4.5:1，或 `font-size` ≥ 24px 时低于 3.0:1（警告，始终）。完整规则：[docs/preview.md](preview.md#lint-diagnostics-after-layout) |
+| CCB-P1017 | 点按目标过小：`button` / `textfield` 小于 8 列或 2 行（警告，始终）。完整规则：[docs/preview-styles.md](preview-styles.md) |
+| CCB-P1018 | 文本对比度低于阈值：WCAG 比率低于 4.5:1，或 `font-size` ≥ 24px 时低于 3.0:1（警告，始终）。完整规则：[docs/preview-styles.md](preview-styles.md) |
 | CCB-P1019 | 找到处理函数，但按钮未绑定：点击处理函数的接收者没有 `[preview.bindings]` 条目（警告，始终；不记录边） |
 | CCB-P1020 | 声明的导航与同一按钮的派生边不一致；声明的边保留，派生的边被丢弃（警告，始终） |
 | CCB-P1021 | XML `android:onClick` 按钮在任何屏幕中都找不到：绑定的组件标签没有出现在任何屏幕的组件树中，因此其派生边无处可附着（警告，始终；不记录边） |
