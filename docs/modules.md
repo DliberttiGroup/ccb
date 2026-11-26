@@ -2,6 +2,8 @@
 
 [Docs index](index.md)
 
+*ccb-modules*
+
 A project can declare library modules in its root `ccb.toml`. Each module
 builds into an intermediate AAR and is consumed through the existing AAR
 machinery: manifest merges, res merges at link, classes dex, assets
@@ -9,6 +11,8 @@ package. The app module is the only APK/AAB output; library modules
 produce no APK/AAB.
 
 ## Config
+
+*ccb-modules-config*
 
 ```toml
 [modules.base]
@@ -31,6 +35,8 @@ depends = ["base"]
 
 ## Graph rules (validated at load, `ccb check` reports them)
 
+*ccb-modules-graph*
+
 - Modules build in topological order, dependencies first.
 - Dependency cycle is a hard error naming the cycle path (`CCB-E1010`,
   e.g. `module dependency cycle: a -> b -> a`).
@@ -44,6 +50,8 @@ depends = ["base"]
   extraction directories would overwrite each other).
 
 ## Build flow
+
+*ccb-modules-flow*
 
 Pipeline order: deps (declared AARs) → modules → merge-manifest →
 compile-res → link → code → dex → … The manifest merge sees declared AARs
@@ -75,15 +83,15 @@ Per module, in topological order:
    `res/` and `assets/` trees. aapt2 compiles the res at app link time,
    exactly as for declared AARs.
 
-## R semantics (read this before writing library code)
+## R semantics
+
+*ccb-modules-r*
 
 Library R fields are **non-final**. The module link generates R.java, CCB
 rewrites its fields from `public static final int` to `public static
 int`, and the app link assigns the final resource IDs. Library code
 references R fields symbolically, so it resolves against the app's R class
-at runtime. Inlining the library-link-time constants would ship wrong IDs.
-
-Consequences:
+at runtime.
 
 - Library code may reference its own R class and its dependencies' R
   classes.
@@ -91,6 +99,8 @@ Consequences:
   collide with the generated R class.
 
 ## Incremental builds
+
+*ccb-modules-incremental*
 
 A library module's outputs participate in the app module's fingerprints,
 so changing a library rebuilds the app:
@@ -108,9 +118,11 @@ modules, app code, and dex correctly skip.
 
 ## Limitations (v1)
 
+*ccb-modules-limits*
+
 - No per-module `[deps]`, `[ndk]`, or signing sections: modules use the
   project's jars/AARs on the classpath and have no native libs.
-- No dynamic feature modules (already out of scope from Q1).
+- No dynamic feature modules.
 - No publishing library modules to a Maven repo.
 - No cross-module resource namespacing beyond what aapt2 already does
   (`--extra-packages` + `--auto-add-overlay`).

@@ -75,7 +75,7 @@ cmake -S . -B build && cmake --build build
   `-Wall -Wextra -Werror -Wpedantic`. CMake only, libc only, arena
   allocation. No `system()`, no threads, no nested ifs, max 3 indentation
   levels. Root-cause fixes only — no workarounds.
-- Tests: [docs/build.md](docs/build.md#running-the-tests). Run sequentially,
+- Tests: [docs/build-tests.md](docs/build-tests.md#running-the-tests). Run sequentially,
   never concurrently.
 - New behavior needs a test. A refactor needs the suite green before and
   after, with no test weakened.

@@ -38,7 +38,7 @@ cmake --preset release
 cmake --build build-release
 ```
 
-Tests: [docs/build.md](docs/build.md#running-the-tests). Run suites
+Tests: [docs/build-tests.md](docs/build-tests.md#running-the-tests). Run suites
 sequentially, never concurrently. No packages yet — see [LAUNCH.md](LAUNCH.md).
 
 ## Transitioning from Gradle

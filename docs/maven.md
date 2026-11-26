@@ -2,12 +2,16 @@
 
 [Docs index](index.md)
 
+*ccb-maven*
+
 CCB resolves remote Maven artifacts declared in `ccb.toml` and feeds them
 into the deps step as if they were local AARs/JARs. No Gradle: no daemon,
 no build scripts, no plugin resolution — just POM parsing, downloads, and
 the local cache.
 
 ## Declaring dependencies
+
+*ccb-maven-declare*
 
 ```toml
 [deps]
@@ -33,6 +37,8 @@ maven_central = true
 
 ## Repositories
 
+*ccb-maven-repos*
+
 - Google Maven (`https://dl.google.com/dl/android/maven2/`) always first.
 - Maven Central (`https://repo.maven.apache.org/maven2/`) second, only
   when `maven_central = true`.
@@ -46,6 +52,8 @@ fixture repo; not a supported way to add private repositories in v1.
 
 ## Packaging: AAR or JAR
 
+*ccb-maven-packaging*
+
 Artifact type comes from the artifact's POM `<packaging>`:
 
 | Packaging | Result |
@@ -56,6 +64,8 @@ Artifact type comes from the artifact's POM `<packaging>`:
 | Anything else | `CCB-E3019` naming the coordinate. |
 
 ## Transitive dependencies
+
+*ccb-maven-transitive*
 
 Direct and transitive dependencies resolve from POM `<dependencies>`:
 
@@ -97,6 +107,8 @@ Direct and transitive dependencies resolve from POM `<dependencies>`:
 
 ## Cache and checksums
 
+*ccb-maven-cache*
+
 Resolved artifacts live in a dedicated Maven cache, not the flat download
 cache:
 
@@ -105,34 +117,27 @@ cache:
   `<cache>/<group-path>/<artifact>/<version>/<artifact>-<version>.<ext>`,
   with the `.pom` alongside.
 - Checksums: on download, a published `.sha256` is verified first, else a
-  published `.sha1`. Mismatch fails with `CCB-E3020` naming the artifact —
-  a bad mirror or tampered file never lands in the cache.
+  published `.sha1`. Mismatch fails with `CCB-E3020` naming the artifact.
 - No published checksum: download verified structurally (curl `--fail`,
   complete transfer) and its SHA-256 recorded in a `<file>.ccb-sha256`
   sidecar. Later cache hits verify against the sidecar, so a corrupted
   cache file fails with `CCB-E3020` instead of silently poisoning a build.
-  First-download trust for checksum-less artifacts is inherent: a repo
-  that publishes no checksum gives CCB nothing to check the first fetch
-  against. Prefer repositories that publish checksums when integrity
-  matters.
 - Sidecar-less cache file (placed there by hand, or by an older CCB) is
   trusted on first use and adopted: its SHA-256 is recorded for later
   hits. Explain and dry-run modes never write sidecars.
 
 ## Hermeticity: setup prefetches, builds never download
 
-`ccb setup` is the only command allowed network access (spec §6.1), and
-Maven keeps it that way:
+*ccb-maven-hermetic*
+
+`ccb setup` is the only command allowed network access (spec §6.1):
 
 - `ccb setup` in a project with `[deps] maven` prefetches every direct +
   transitive artifact into the cache (after the SDK steps, before the
   final verification pass) and reports `maven: prefetched N artifacts (A
   aar, J jar)`. A prefetch failure stops setup with the diagnostic — a
   half-prefetched project is never reported as ready. Prefetch fetches the
-  full parent-POM chain for every resolved POM, so a parent POM missing
-  from the cache after setup means setup never reached the Maven step
-  (e.g. it failed earlier at the SDK steps), not a resolver gap — re-run
-  `ccb setup` and read its error.
+  full parent-POM chain for every resolved POM.
 - `ccb build` and `ccb check` resolve cache-only. A coordinate never
   prefetched fails with `CCB-E3021` naming the coordinate and telling you
   to run `ccb setup`. Failure happens in stage 0, before any build stage
@@ -147,6 +152,8 @@ aar, J jar)`. When exclusions are configured, check also reports them:
 output).
 
 ## Lockfile (`ccb.lock`)
+
+*ccb-maven-lockfile*
 
 `ccb setup` writes the fully resolved tree to `ccb.lock` in the project
 root after a successful prefetch, and `ccb check` / `ccb build` enforce it
@@ -175,6 +182,8 @@ whenever present:
 
 ## Limitations (v1, deliberate)
 
+*ccb-maven-limits*
+
 - Exact versions only; no ranges, snapshots, or version mediation beyond
   nearest-wins.
 - Google Maven + opt-in Maven Central only; no authenticated or private
@@ -185,6 +194,8 @@ whenever present:
 - No signature (PGP) verification: checksums only.
 
 ## Troubleshooting
+
+*ccb-maven-troubleshooting*
 
 Code meanings: [diagnostics.md](diagnostics.md).
 

@@ -2,11 +2,15 @@
 
 [Docs index](index.md)
 
+*ccb-json*
+
 With `--json`, human prose never appears on stdout. Progress goes to
 stdout as JSONL events; diagnostics go to stdout as `diagnostic` events;
 the final result is one JSON object.
 
 ## Build events
+
+*ccb-json-build-events*
 
 ```json
 {"event":"phase","phase":"kotlinc","status":"started"}
@@ -22,6 +26,8 @@ Verbose mode streams tool output as events:
 
 ## Diagnostics
 
+*ccb-json-diagnostics*
+
 ```json
 {"event":"diagnostic","code":"CCB-E1001","phase":"config","message":"unknown key 'surprise' in table [project]","file":"ccb.toml","line":9,"command":"...","suggestion":"..."}
 ```
@@ -29,6 +35,8 @@ Verbose mode streams tool output as events:
 `file`, `line`, `command`, and `suggestion` appear only when set.
 
 ## Other commands
+
+*ccb-json-commands*
 
 | Command | Event |
 | ------- | ----- |
@@ -40,6 +48,8 @@ Verbose mode streams tool output as events:
 | `ccb --json doctor` (no valid project) | `{"event":"doctor","config":null,"java":"…","kotlinc":"…","sdk":"…"}` (`"config":"invalid"` when a `ccb.toml` exists but fails validation) |
 
 ## `--explain` and `--dry-run`
+
+*ccb-json-explain*
 
 `--explain` prints one `step: run|skip (reason)` line per step on stdout
 (not JSON, even with `--json` — it is a human-readable plan).

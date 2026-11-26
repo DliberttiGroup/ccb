@@ -2,19 +2,17 @@
 
 [Docs index](index.md)
 
+*ccb-device*
+
 `ccb install`, `ccb run`, and `ccb logcat` talk to a device through `adb`.
-CCB never exposes adb to the public internet. The supported route from this
-VM to the user's phone is **wireless debugging over the private Tailscale
-network**.
-
-## Why not plain adb over the internet
-
-adb has no authentication: anyone who can reach an adb port can run
-commands on the device. Never forward an adb port through ngrok, a
-Cloudflare tunnel, or any other public tunnel, and never run `adb tcpip`
-on a public network.
+CCB never exposes adb to the public internet — adb has no authentication:
+anyone who can reach an adb port can run commands on the device. Never
+forward an adb port through ngrok, a Cloudflare tunnel, or any other
+public tunnel, and never run `adb tcpip` on a public network.
 
 ## The supported route: wireless debugging over Tailscale
+
+*ccb-device-wireless*
 
 The phone and this VM are on the same private Tailscale tailnet. Only
 tailnet devices can reach each other, so adb traffic stays inside the
@@ -40,6 +38,8 @@ changes, repeat steps 3–5.
 
 ## What CCB does when no device is attached
 
+*ccb-device-no-device*
+
 | Command | Behavior |
 | ------- | -------- |
 | `ccb install`, `ccb run` | Fail with `CCB-E5001` and a concrete next step; never report success without a device. |
@@ -47,6 +47,8 @@ changes, repeat steps 3–5.
 | `ccb install --dry-run`, `ccb run --dry-run` | Print the exact adb commands that would run, without touching a device. |
 
 ## Notes
+
+*ccb-device-notes*
 
 - The phone's Termux sshd (over the same tailnet) is a separate channel
   for shell access; it is not adb and does not make `ccb install` work.

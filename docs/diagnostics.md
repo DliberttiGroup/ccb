@@ -2,6 +2,8 @@
 
 [Docs index](index.md)
 
+*ccb-diagnostics*
+
 Every failure carries a stable code. Exit codes: 0 success, 1 build
 failure, 2 config error, 3 toolchain missing/wrong version, 4 signing
 error, 5 device error.
@@ -11,6 +13,8 @@ stderr. Keystore passwords never appear: release signing passes them to
 apksigner as `env:VAR` references only.
 
 ## Config (exit 2)
+
+*ccb-diagnostics-config*
 
 `ccb check` reports every config problem at once, not just the first.
 
@@ -30,6 +34,8 @@ apksigner as `env:VAR` references only.
 
 ## Toolchain (exit 3)
 
+*ccb-diagnostics-toolchain*
+
 | Code | Meaning |
 | ---- | ------- |
 | CCB-E2001 | Android SDK not found (set `[sdk] home` or `ANDROID_HOME`) |
@@ -43,6 +49,8 @@ apksigner as `env:VAR` references only.
 | CCB-E2009 | Required tool binary missing or not executable. Also a broken explicit tool override: `[sdk] aapt2` / `[sdk] zipalign` key or `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, message names the override source and the path. No silent fallback to the default tool. |
 
 ## Build (exit 1 unless noted)
+
+*ccb-diagnostics-build*
 
 | Code | Meaning |
 | ---- | ------- |
@@ -74,6 +82,8 @@ apksigner as `env:VAR` references only.
 
 ## Preview (exit 1 unless noted)
 
+*ccb-diagnostics-preview*
+
 Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under `--strict`)
 CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
 `--strict`, so they never fail the build gate. A project with no usable
@@ -98,8 +108,8 @@ CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
 | CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
 | CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
 | CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
-| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows (warning, always). Full rule: [preview.md](preview.md#lint-diagnostics-after-layout) |
-| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always). Full rule: [preview.md](preview.md#lint-diagnostics-after-layout) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows (warning, always). Full rule: [preview-styles.md](preview-styles.md#lint-diagnostics-after-layout) |
+| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always). Full rule: [preview-styles.md](preview-styles.md#lint-diagnostics-after-layout) |
 | CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
 | CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
 | CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
@@ -109,6 +119,8 @@ CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
 | CCB-P1025 | Unattributed navigation: a nav call in a flow file that no parse recorded as an edge — inside a nested block, a skipped statement, or a helper never scanned from a button. Reported with file:line so it is never silently dropped; never invents an edge. Navs already reported by CCB-P1019 (unbound handler) or CCB-P1024 (ambiguous reference) are not repeated here (warning, always; never fails the build gate) |
 
 ## Device (exit 5)
+
+*ccb-diagnostics-device*
 
 | Code | Meaning |
 | ---- | ------- |
