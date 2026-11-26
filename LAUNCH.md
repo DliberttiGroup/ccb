@@ -6,7 +6,9 @@ build it, and contribute". Check items off as they land.
 ## 1. Ship the code that's already done
 
 - [ ] Push everything since `10934ae` (HEAD on `main`, 2026-10-25).
-  Unpushed work, all verified green: preview Phase 2, NOTES.md bug fixes,
+  Pushed to the `test` branch (`DliberttiGroup/ccb`); CI green on run #3.
+  Merge to `main` still pending. Work on the test branch, all verified
+  green: preview Phase 2, NOTES.md bug fixes,
   dexcheck (CCB-E3025), test-speed work, config-loader split, dead tgfx
   header removal, R8 minify, static release binary, d8 heap sizing,
   kotlinc daemon (opt-in), audit refactors.
@@ -25,8 +27,9 @@ build it, and contribute". Check items off as they land.
   in `docs/llm/` (English header comment in each), `llms.txt` index.
 - [ ] `README.md` answers in 30 seconds: what it is, one build command,
   one example app. Link to `docs/` and `llms.txt`.
-- [ ] Set up CI (build + `ctest` on plain and sanitizer configs) so a PR
-  can't land red. No CI exists yet.
+- [x] Set up CI (build + `ctest` on plain and sanitizer configs) so a PR
+  can't land red. Live since 2026-11-26 (`.github/workflows/ci.yml`,
+  plain + sanitizer jobs, green).
 - [ ] Decide public vs private: repo is currently private
   (`destroK503/ccb`). Going public is a separate, explicit step.
 
