@@ -61,7 +61,10 @@ does not exist — shows it as unknown and stays on the current screen; walk
 mode never invents a destination. Back at the root screen is a no-op.
 Ctrl-C quits and restores the terminal, as do SIGINT/SIGTERM. Walk mode
 requires a terminal: with non-TTY stdin or stdout it prints an error and
-exits 2 instead of hanging.
+exits 2 instead of hanging. Each frame is painted with the tui
+terminal's diffed repaint (only changed cells, inside DEC 2026
+synchronised output); the screen is never fully cleared between
+frames.
 
 `ccb preview --walk --record FILE` records the walk as a
 [trace](preview-traces.md) and writes it when the walk exits: one step per

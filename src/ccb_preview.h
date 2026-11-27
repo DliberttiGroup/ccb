@@ -18,6 +18,7 @@
 #include "ccb_str.h"
 #include "ccb_diag.h"
 #include "ccb_config.h"
+#include "ccb_tui_screen.h"
 
 // Diagnostic codes (see docs/diagnostics.md).
 // CCB-P1001 unknown CSS property (warning; error under --strict)
@@ -408,8 +409,21 @@ long pv_scaled_text_width(long display_width, const pv_rule *rule);
 // color is enabled, background/foreground colors approximate the CSS
 // colors with ANSI 256-color codes; color is disabled under NO_COLOR,
 // a dumb terminal, or --ascii. Text is clipped to its box, never wrapped.
+// The frame is built in a ccb_tui_screen (see pv_render_frame_tui)
+// and dumped as plain text, or emitted with per-cell SGR for color.
 void pv_render_screen(ccb_str *out, pv_screen *screen, long frame_width,
   int ascii, int color);
+// Frame geometry for one laid-out screen: clamped frame width and
+// frame height (interior rows + 2 for the outer border). Both the
+// string form and the walk frame builder size from this.
+void pv_render_frame_geom(pv_screen *screen, long frame_width,
+  long *width_out, long *height_out);
+// Build the wireframe for one laid-out screen into a tui screen at
+// (0,0): outer frame + title + interior grid, all clipped to the
+// screen. The screen should be sized from pv_render_frame_geom; the
+// walk terminal loop presents this frame through the tui diff.
+void pv_render_frame_tui(ccb_tui_screen *s, pv_screen *screen,
+  long frame_width, int ascii, int color);
 // Logic tree for the whole project: one block per screen, edges with
 // their source labels, branch annotations, reachability marks.
 // Format (exact, golden-tested). Edges with arguments show them in

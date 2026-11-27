@@ -58,6 +58,15 @@ const ccb_tui_cell *ccb_tui_screen_get(const ccb_tui_screen *s,
 int ccb_tui_screen_put(ccb_tui_screen *s, int x, int y, uint32_t cp,
   ccb_tui_style style);
 
+// Put one raw byte as a width-1 cell, stored verbatim: the byte is
+// NOT decoded as UTF-8, and the dump emits it as-is. For callers
+// that must preserve legacy content byte-for-byte (an invalid UTF-8
+// byte in a label, a control byte) — put_text normalises such bytes
+// to '?', this one does not. Returns 1 when written, 0 when out of
+// bounds (or s is NULL).
+int ccb_tui_screen_put_byte(ccb_tui_screen *s, int x, int y,
+  unsigned char b, ccb_tui_style style);
+
 // Put UTF-8 text starting at (x, y). '\n' moves to the next line
 // at the start column; '\t' advances to the next 8-column tab
 // stop. Invalid bytes become '?'. No wrapping: stops at the right

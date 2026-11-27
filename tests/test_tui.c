@@ -231,6 +231,18 @@ static void test_screen(void) {
   ccb_tui_screen_dump(s, &out);
   CHECK_STR_EQ(out.buf, "a?b\n\n");
   ccb_str_free(&out);
+  // put_byte: one raw byte, stored verbatim (the preview renderer
+  // uses it for invalid UTF-8 bytes in labels, which must survive).
+  ccb_tui_screen_clear(s);
+  CHECK(ccb_tui_screen_put_byte(s, 0, 0, 0xFF, def) == 1);
+  CHECK(ccb_tui_screen_put_byte(s, 1, 0, 0xFE, def) == 1);
+  CHECK(ccb_tui_screen_put_byte(s, 2, 0, 'a', def) == 1);
+  CHECK(ccb_tui_screen_put_byte(s, 5, 0, 'x', def) == 0);
+  CHECK(ccb_tui_screen_put_byte(NULL, 0, 0, 'x', def) == 0);
+  ccb_str_init(&out);
+  ccb_tui_screen_dump(s, &out);
+  CHECK_STR_EQ(out.buf, "\xFF\xFE" "a\n\n");
+  ccb_str_free(&out);
   // Box corners and edges.
   ccb_tui_screen_clear(s);
   ccb_tui_screen_box(s, 0, 0, 5, 3, def);

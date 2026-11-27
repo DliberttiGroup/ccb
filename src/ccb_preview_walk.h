@@ -9,8 +9,10 @@
 //
 // The state machine (pv_walk_*) performs NO terminal I/O, so unit
 // tests drive it with scripted keys and no TTY. The terminal layer
-// (pv_walk_run / pv_walk_render) is separate: pv_walk_render builds
-// text, pv_walk_run owns raw mode and the key loop.
+// (pv_walk_run) is separate: it builds each view into a ccb_tui
+// screen and presents it through the tui terminal (raw mode, alt
+// screen, diffed repaint). pv_walk_render builds the same view as
+// text, so the frame and the string can never drift apart.
 //
 // Ownership: pv_walk borrows the pv_project (and everything in its
 // arena). The caller keeps the project alive for the walk's lifetime.
@@ -41,6 +43,7 @@
 #include "ccb_preview_trace.h"
 #include "ccb_preview.h"
 #include "ccb_str.h"
+#include "ccb_tui_input.h"
 
 // Scripted keys. The terminal layer translates raw bytes to these;
 // tests feed them directly to pv_walk_apply_key.
@@ -139,6 +142,14 @@ void pv_walk_branch_pick(pv_walk *w);
 // Dispatch one scripted key (see pv_walk_key). ENTER in branch mode
 // is a branch pick; BACK in branch mode exits branch mode.
 void pv_walk_apply_key(pv_walk *w, pv_walk_key key);
+// Translate one tui input event to a walk key. Returns 1 and sets
+// *key, or 0 when the event has no walk action (paste, resize,
+// interrupt, EOF, an unmapped key). Ctrl-C quits, as before; a bare
+// Esc exits branch mode; any other escape-derived key (left/right
+// arrows, Home/End, F-keys) also exits branch mode, as the old byte
+// reader did for unknown sequences.
+int pv_walk_key_from_tui_event(const ccb_tui_event *ev,
+  pv_walk_key *key);
 
 // Render the walk view as text (no terminal I/O): the current
 // screen's wireframe via pv_render_screen, then the outgoing edge
@@ -147,16 +158,22 @@ void pv_walk_apply_key(pv_walk *w, pv_walk_key key);
 // frame_width of 0 means the project's frame width.
 void pv_walk_render(ccb_str *out, const pv_walk *w, long frame_width,
   int ascii, int color);
+// Build the whole walk view into a tui screen: the current screen's
+// wireframe at (0,0), then the same text lines pv_walk_render emits
+// below it. The screen is the caller's (terminal-sized in the loop,
+// content-sized in tests); a narrow screen clips, never wraps.
+void pv_walk_build_frame(ccb_tui_screen *s, pv_walk *w,
+  long frame_width, int ascii, int color);
 
-// Terminal loop: check for a TTY, enter raw mode, run the key loop
-// until quit, and restore the terminal on EVERY exit path (normal
-// quit, Ctrl-C byte, SIGINT/SIGTERM, read error, EOF). Returns 0 on
-// a clean quit, 1 when start_name names no screen, 2 when stdin or
-// stdout is not a TTY (a clean diagnostic on stderr, never a hang),
-// or when a requested record file cannot be written. frame_width of
-// 0 means the project's frame width. record_path NULL means no
-// recording; otherwise the walk's recorded steps are written as
-// trace JSON (see ccb_preview_trace.h) after the terminal is
+// Terminal loop: open the tui terminal (raw mode, alt screen, diffed
+// repaint), run the key loop until quit, and restore the terminal on
+// EVERY exit path (normal quit, Ctrl-C, SIGINT/SIGTERM, read error,
+// EOF). Returns 0 on a clean quit, 1 when start_name names no screen,
+// 2 when stdin or stdout is not a TTY (a clean diagnostic on stderr,
+// never a hang), or when a requested record file cannot be written.
+// frame_width of 0 means the project's frame width. record_path NULL
+// means no recording; otherwise the walk's recorded steps are written
+// as trace JSON (see ccb_preview_trace.h) after the terminal is
 // restored, before the walk is freed.
 int pv_walk_run(pv_project *proj, const char *start_name, long frame_width,
   int ascii, int color, const char *record_path);

@@ -189,6 +189,27 @@ int ccb_tui_screen_put(ccb_tui_screen *s, int x, int y, uint32_t cp,
   return width;
 }
 
+int ccb_tui_screen_put_byte(ccb_tui_screen *s, int x, int y,
+    unsigned char b, ccb_tui_style style) {
+  char raw[1];
+  if (s == NULL || x < 0 || x >= s->w || y < 0 || y >= s->h) {
+    return 0;
+  }
+  // Same wide-glyph clearing as put(): a raw byte is width 1.
+  if (tui_cell_at(s, x, y)->width == 0 && x > 0) {
+    *tui_cell_at(s, x - 1, y) = ccb_tui_cell_blank();
+  }
+  if (tui_cell_at(s, x, y)->width == 2) {
+    *tui_cell_at(s, x + 1, y) = ccb_tui_cell_blank();
+  }
+  if (x + 1 < s->w && tui_cell_at(s, x + 1, y)->width == 0) {
+    *tui_cell_at(s, x + 1, y) = ccb_tui_cell_blank();
+  }
+  raw[0] = (char)b;
+  tui_set_cell(s, x, y, raw, 1, 1, style);
+  return 1;
+}
+
 int ccb_tui_screen_put_text(ccb_tui_screen *s, int x, int y,
     const char *text, ccb_tui_style style) {
   int start_x = x;

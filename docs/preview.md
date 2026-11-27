@@ -145,8 +145,10 @@ both flags is a usage error (exit 2).
   diagnostics. `ccb preview <screen>` (or `--screen NAME`) — one screen.
 - `--json` — the same trees and diagnostics as structured data (see
   below). `--ascii` — ASCII frame characters instead of Unicode. Colors
-  come from the CSS colors approximated to ANSI 256-color codes, unless
-  `NO_COLOR` is set, the terminal is dumb, or `--ascii` is given.
+  come from the CSS colors, approximated to ANSI 256-color codes in
+  printed output, unless `NO_COLOR` is set, the terminal is dumb, or
+  `--ascii` is given. In walk mode the terminal path uses the detected
+  color level (truecolor, 256, 16, or none) instead of always 256.
 - `--output FILE` — write the render to FILE instead of stdout: the
   human render, or the JSON object when `--json` is also given. Stdout
   carries nothing; diagnostics still go to stderr; exit codes unchanged

@@ -1,16 +1,15 @@
 // ccb_preview_walk: interactive walk mode for ccb preview (P3).
 // The state machine (pv_walk_*) has no terminal I/O; the terminal
-// layer (pv_walk_run) owns raw mode, signal handling, and key
-// decoding. Static exploration only: nothing here evaluates a
-// condition or executes project code.
+// layer (pv_walk_run) owns the ccb_tui terminal and the key loop.
+// Static exploration only: nothing here evaluates a condition or
+// executes project code.
 #include "ccb_common.h"
 #include "ccb_preview_walk.h"
 #include "ccb_alloc.h"
 #include "ccb_fs.h"
 #include "ccb_str.h"
-#include <signal.h>
-#include <sys/select.h>
-#include <termios.h>
+#include "ccb_tui_screen.h"
+#include "ccb_tui_term.h"
 #include <unistd.h>
 
 // ---------- state machine helpers ----------
@@ -437,19 +436,14 @@ void pv_walk_apply_key(pv_walk *w, pv_walk_key key) {
 
 // ---------- rendering (text only, no terminal I/O) ----------
 
-void pv_walk_render(ccb_str *out, const pv_walk *w, long frame_width,
-    int ascii, int color) {
+// The text after the wireframe: edge/branch list, back stack, notes,
+// footer hints. Shared by the string form (pv_walk_render) and the
+// terminal frame builder (pv_walk_build_frame), so both show the same
+// lines.
+static void walk_render_text(ccb_str *out, const pv_walk *w) {
   size_t i = 0;
   if (out == NULL || w == NULL || w->current == NULL) {
     return;
-  }
-  if (frame_width <= 0) {
-    frame_width = w->proj != NULL ? w->proj->frame_width : 40;
-  }
-  if (w->current->root != NULL) {
-    pv_render_screen(out, w->current, frame_width, ascii, color);
-  } else {
-    ccb_str_append(out, "(no wireframe for this screen)\n");
   }
   if (w->in_branch) {
     ccb_str_append(out, "Branches (conditions are shown, never "
@@ -550,121 +544,161 @@ void pv_walk_render(ccb_str *out, const pv_walk *w, long frame_width,
   }
 }
 
-// ---------- terminal layer ----------
-
-// Saved terminal state, restored on every exit path. The signal
-// handler only records the signal; the loop restores the terminal
-// itself, so restoration never runs inside a handler.
-static struct termios walk_saved_termios;
-static int walk_termios_saved;
-static volatile sig_atomic_t walk_got_signal;
-
-static void walk_on_signal(int sig) {
-  walk_got_signal = sig;
-}
-
-static void walk_restore_termios(void) {
-  if (walk_termios_saved) {
-    tcsetattr(STDIN_FILENO, TCSANOW, &walk_saved_termios);
-    walk_termios_saved = 0;
+void pv_walk_render(ccb_str *out, const pv_walk *w, long frame_width,
+    int ascii, int color) {
+  if (out == NULL || w == NULL || w->current == NULL) {
+    return;
   }
+  if (frame_width <= 0) {
+    frame_width = w->proj != NULL ? w->proj->frame_width : 40;
+  }
+  if (w->current->root != NULL) {
+    pv_render_screen(out, w->current, frame_width, ascii, color);
+  } else {
+    ccb_str_append(out, "(no wireframe for this screen)\n");
+  }
+  walk_render_text(out, w);
 }
 
-// Read one walk key from stdin (raw mode). Returns 1 and sets *key,
-// 0 on EOF (clean end), or -1 on read error / interrupt.
-static int walk_read_key(pv_walk_key *key) {
-  unsigned char c = 0;
-  ssize_t n = 0;
-  // Outer loop: unknown bytes are skipped without recursion, so a
-  // long garbage paste cannot grow the stack.
-  for (;;) {
-    for (;;) {
-      n = read(STDIN_FILENO, &c, 1);
-      if (n == 1) {
-        break;
-      }
-      if (n == 0) {
-        return 0;
-      }
-      if (walk_got_signal) {
-        return -1;
-      }
-      // EINTR without a recorded signal: retry.
-    }
-  switch (c) {
-    case 'q':
-      *key = PV_WALK_KEY_QUIT;
-      return 1;
-    case 'j':
-      *key = PV_WALK_KEY_DOWN;
-      return 1;
-    case 'k':
+// ---------- terminal layer (ccb_tui) ----------
+
+// Translate one tui input event to a walk key. Returns 1 and sets
+// *key, or 0 when the event has no walk action. The mapping preserves
+// the old byte reader's behavior: Ctrl-C quits; a bare Esc exits
+// branch mode; any other escape-derived key (left/right arrows,
+// Home/End, PgUp/PgDn, F-keys) also exits branch mode, as the old
+// reader did for every unknown sequence; a paste is ignored (the old
+// reader would have acted on pasted bytes one by one). LF arrives as
+// a Ctrl-J char key and follows, as the old reader's '\n' case did.
+int pv_walk_key_from_tui_event(const ccb_tui_event *ev,
+    pv_walk_key *key) {
+  if (ev == NULL || key == NULL || ev->kind != CCB_TUI_EV_KEY) {
+    return 0;
+  }
+  if (ev->evtype == 3) {
+    return 0; // key release: no action
+  }
+  switch (ev->key) {
+    case CCB_TUI_KEY_UP:
       *key = PV_WALK_KEY_UP;
       return 1;
-    case 'b':
-      *key = PV_WALK_KEY_BACK;
+    case CCB_TUI_KEY_DOWN:
+      *key = PV_WALK_KEY_DOWN;
       return 1;
-    case 't':
-      *key = PV_WALK_KEY_BRANCH;
-      return 1;
-    case '\r':
-    case '\n':
+    case CCB_TUI_KEY_ENTER:
       *key = PV_WALK_KEY_ENTER;
       return 1;
-    case 0x7f:
-    case 0x08:
+    case CCB_TUI_KEY_BACKSPACE:
       *key = PV_WALK_KEY_BACK;
       return 1;
-    case 0x03: // Ctrl-C with ISIG off arrives as a byte: quit cleanly
-      *key = PV_WALK_KEY_QUIT;
+    case CCB_TUI_KEY_ESC:
+      *key = PV_WALK_KEY_BRANCH_EXIT;
       return 1;
-    case 0x1b: {
-      // Arrow keys arrive as ESC [ A/B (or ESC O A/B). A bare Esc
-      // (nothing follows within 50 ms) exits branch mode.
-      fd_set rfds;
-      struct timeval tv;
-      FD_ZERO(&rfds);
-      FD_SET(STDIN_FILENO, &rfds);
-      tv.tv_sec = 0;
-      tv.tv_usec = 50000;
-      if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) {
-        *key = PV_WALK_KEY_BRANCH_EXIT;
-        return 1;
-      }
-      if (read(STDIN_FILENO, &c, 1) != 1) {
-        *key = PV_WALK_KEY_BRANCH_EXIT;
-        return 1;
-      }
-      if (c != '[' && c != 'O') {
-        *key = PV_WALK_KEY_BRANCH_EXIT;
-        return 1;
-      }
-      if (read(STDIN_FILENO, &c, 1) != 1) {
-        *key = PV_WALK_KEY_BRANCH_EXIT;
-        return 1;
-      }
-      if (c == 'A') {
-        *key = PV_WALK_KEY_UP;
-      } else if (c == 'B') {
-        *key = PV_WALK_KEY_DOWN;
-      } else {
-        *key = PV_WALK_KEY_BRANCH_EXIT;
-      }
-      return 1;
-    }
+    case CCB_TUI_KEY_CHAR:
+      break; // plain character keys: handled below
+    case CCB_TUI_KEY_UNKNOWN:
+    case CCB_TUI_KEY_TAB:
+      return 0;
     default:
-      // Unknown byte: ignore it and read the next one.
-      continue;
+      // Any other escape-derived key: exit branch mode, as before.
+      *key = PV_WALK_KEY_BRANCH_EXIT;
+      return 1;
   }
+  if (ev->ch == 'k' && ev->mods == 0) {
+    *key = PV_WALK_KEY_UP;
+    return 1;
   }
+  if (ev->ch == 'j' && ev->mods == 0) {
+    *key = PV_WALK_KEY_DOWN;
+    return 1;
+  }
+  if (ev->ch == 'b' && ev->mods == 0) {
+    *key = PV_WALK_KEY_BACK;
+    return 1;
+  }
+  if (ev->ch == 't' && ev->mods == 0) {
+    *key = PV_WALK_KEY_BRANCH;
+    return 1;
+  }
+  if (ev->ch == 'q' && ev->mods == 0) {
+    *key = PV_WALK_KEY_QUIT;
+    return 1;
+  }
+  if (ev->ch == 'c' && (ev->mods & CCB_TUI_MOD_CTRL) != 0) {
+    *key = PV_WALK_KEY_QUIT;
+    return 1;
+  }
+  if (ev->ch == 'j' && (ev->mods & CCB_TUI_MOD_CTRL) != 0) {
+    *key = PV_WALK_KEY_ENTER;
+    return 1;
+  }
+  return 0;
+}
+
+// Put one text line into the frame, clipped to the screen width.
+// Lines are put one at a time (not as one multi-line string): a line
+// longer than the screen clips, but the lines after it still render.
+static void walk_put_line(ccb_tui_screen *s, int row, const char *line,
+    size_t len) {
+  ccb_str tmp;
+  ccb_tui_style st = ccb_tui_style_default();
+  if (s == NULL || line == NULL) {
+    return;
+  }
+  ccb_str_init(&tmp);
+  ccb_str_append_n(&tmp, line, len);
+  ccb_tui_screen_put_text(s, 0, row, tmp.buf != NULL ? tmp.buf : "",
+    st);
+  ccb_str_free(&tmp);
+}
+
+// Build the whole walk view into a screen: the current screen's
+// wireframe at (0,0), then the edge/branch list, back stack, notes,
+// and footer hints as text lines below it. The screen is the
+// caller's: terminal-sized in the loop (a narrow terminal clips the
+// frame instead of wrapping it, as the old full print did), or
+// content-sized in tests. Lines are the same bytes pv_walk_render
+// emits, so the frame and the string can never drift apart.
+void pv_walk_build_frame(ccb_tui_screen *s, pv_walk *w,
+    long frame_width, int ascii, int color) {
+  long fw = 0;
+  long fh = 0;
+  long row = 0;
+  ccb_str text;
+  const char *p = NULL;
+  if (s == NULL || w == NULL) {
+    return;
+  }
+  ccb_tui_screen_clear(s);
+  ccb_str_init(&text);
+  if (w->current != NULL && w->current->root != NULL) {
+    pv_render_frame_geom(w->current, frame_width, &fw, &fh);
+    pv_render_frame_tui(s, w->current, frame_width, ascii, color);
+    row = fh;
+  } else {
+    ccb_str_append(&text, "(no wireframe for this screen)\n");
+  }
+  walk_render_text(&text, w);
+  p = text.buf != NULL ? text.buf : "";
+  while (*p != '\0' && row < ccb_tui_screen_rows(s)) {
+    const char *nl = strchr(p, '\n');
+    size_t len = nl != NULL ? (size_t)(nl - p) : strlen(p);
+    walk_put_line(s, (int)row, p, len);
+    row++;
+    if (nl == NULL) {
+      break;
+    }
+    p = nl + 1;
+  }
+  ccb_str_free(&text);
 }
 
 int pv_walk_run(pv_project *proj, const char *start_name, long frame_width,
     int ascii, int color, const char *record_path) {
   pv_walk w;
-  struct termios raw;
-  struct sigaction sa, old_int, old_term;
-  int have_old = 0;
+  ccb_tui_term *term = NULL;
+  ccb_tui_term_opts opts;
+  ccb_tui_screen *scr = NULL;
   int rc = 0;
   if (proj == NULL) {
     return 1;
@@ -688,62 +722,60 @@ int pv_walk_run(pv_project *proj, const char *start_name, long frame_width,
   if (frame_width <= 0) {
     frame_width = proj->frame_width;
   }
-  // Install signal handlers that only record the signal; the loop
-  // below restores the terminal on the next iteration.
-  memset(&sa, 0, sizeof(sa));
-  sa.sa_handler = walk_on_signal;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = 0;
-  if (sigaction(SIGINT, &sa, &old_int) == 0 &&
-      sigaction(SIGTERM, &sa, &old_term) == 0) {
-    have_old = 1;
-  }
-  if (tcgetattr(STDIN_FILENO, &walk_saved_termios) != 0) {
-    fprintf(stderr, "error: cannot read terminal settings\n");
-    if (have_old) {
-      sigaction(SIGINT, &old_int, NULL);
-      sigaction(SIGTERM, &old_term, NULL);
-    }
+  // The tui terminal owns raw mode, the alternate screen, DEC 2026
+  // synchronised output, the resize self-pipe, and the signal
+  // handlers from here on; closing it restores everything, on every
+  // exit path below.
+  ccb_tui_term_opts_default(&opts);
+  if (ccb_tui_term_open(&opts, &term) != CCB_OK) {
+    fprintf(stderr, "error: cannot open terminal\n");
     pv_walk_free(&w);
     return 1;
   }
-  walk_termios_saved = 1;
-  raw = walk_saved_termios;
-  cfmakeraw(&raw);
-  if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
-    fprintf(stderr, "error: cannot set terminal raw mode\n");
-    walk_restore_termios();
-    if (have_old) {
-      sigaction(SIGINT, &old_int, NULL);
-      sigaction(SIGTERM, &old_term, NULL);
-    }
+  scr = ccb_tui_screen_new(ccb_tui_term_cols(term),
+    ccb_tui_term_rows(term));
+  if (scr == NULL) {
+    ccb_tui_term_close(term);
     pv_walk_free(&w);
     return 1;
   }
-  // Key loop: render, read one key, apply it. Every exit below
-  // restores the terminal before returning.
-  while (!w.quit && !walk_got_signal) {
-    ccb_str out;
+  // Key loop: build the frame, present it (the diff emits only what
+  // changed — no full clear per frame, which is what flickered in
+  // Termux), read one event, apply it. Every exit below closes the
+  // terminal before returning.
+  while (!w.quit) {
+    ccb_tui_event ev;
     pv_walk_key key = PV_WALK_KEY_QUIT;
-    int kr = 0;
-    ccb_str_init(&out);
-    pv_walk_render(&out, &w, frame_width, ascii, color);
-    fputs("\x1b[2J\x1b[H", stdout);
-    fputs(out.buf != NULL ? out.buf : "", stdout);
-    fflush(stdout);
-    ccb_str_free(&out);
-    kr = walk_read_key(&key);
-    if (kr <= 0) {
-      break; // EOF, read error, or signal: restore and exit
+    pv_walk_build_frame(scr, &w, frame_width, ascii, color);
+    if (ccb_tui_term_present(term, scr) != CCB_OK) {
+      break;
+    }
+    if (ccb_tui_term_poll_event(term, -1, &ev) != CCB_OK) {
+      break;
+    }
+    if (ev.kind == CCB_TUI_EV_INTERRUPT || ev.kind == CCB_TUI_EV_EOF) {
+      break;
+    }
+    if (ev.kind == CCB_TUI_EV_RESIZE) {
+      // Rebuild at the new size on the next iteration; present()
+      // forces a full repaint for the changed dimensions.
+      if (ccb_tui_screen_resize(scr, ccb_tui_term_cols(term),
+          ccb_tui_term_rows(term)) != CCB_OK) {
+        break;
+      }
+      continue;
+    }
+    if (ev.kind != CCB_TUI_EV_KEY) {
+      continue; // paste and anything else: ignored
+    }
+    if (!pv_walk_key_from_tui_event(&ev, &key)) {
+      continue;
     }
     pv_walk_apply_key(&w, key);
   }
   rc = 0;
-  walk_restore_termios();
-  if (have_old) {
-    sigaction(SIGINT, &old_int, NULL);
-    sigaction(SIGTERM, &old_term, NULL);
-  }
+  ccb_tui_term_close(term);
+  ccb_tui_screen_free(scr);
   // Chunk 2: write the recorded trace after the terminal is
   // restored but before the walk is freed (steps borrow project
   // strings, which are still alive; only the steps array is freed
