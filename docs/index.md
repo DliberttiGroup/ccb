@@ -3,7 +3,7 @@
 *ccb-docs*
 
 Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
-`llms.txt` at the repo root. The specification is `requirement.md`.
+[docs/llm/index.md](llm/index.md). The specification is `requirement.md`.
 
 ## Start here
 

@@ -2,7 +2,7 @@
 
 # CCB 文档
 
-人类文档，英文。代理文档（中文）位于 `docs/llm/`——见仓库根目录的 `llms.txt`。规范是 `requirement.md`。
+人类文档，英文。代理文档（中文）位于 `docs/llm/`，本文件是其索引。规范是 `requirement.md`。
 
 ## 从这里开始
 

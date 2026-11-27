@@ -1,76 +1,61 @@
 # CCB
 
-[Documentation](docs/index.md) | [Specification](requirement.md) | [LLM docs](llms.txt)
-
 [![CI](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml/badge.svg)](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![C17](https://img.shields.io/badge/C-C17-blue.svg)](CONTRIBUTING.md#code-rules)
 
-Build headless Android APKs without Gradle. One C binary, no daemon, no
-runtime dependencies. Every build reproducible and explainable
-(`--explain`, `--json`). Built to be driven by an AI agent from a terminal.
+CCB is a fast, headless build system for Android apps. One static binary,
+no Gradle, no daemon. It turns a project described by a single `ccb.toml`
+file into a signed, installable APK — Kotlin first, Java second, native
+libs via the NDK — with per-stage caching, plain-language errors, and a
+JSON event stream (`--json`) an agent can drive from a terminal.
 
-## Features
+## Install
 
-- Kotlin + Java apps, AAR libraries, native (NDK) libs, multi-module projects
-- Incremental builds: per-step cache, tool-upgrade invalidation
-- Release: R8 minification, zipalign, signing, verification
-- Dex gate: missing classes fail the build before packaging
-- Preview: CSS + Kotlin structure renders to a box/logic tree
-- JSON event stream (`--json`), stable exit codes, dry-run mode
-- Opt-in kotlinc daemon (auto-shutdown) for faster rebuilds
+### Standalone binary
 
-## Install from source
-
-Toolchain: see [docs/setup.md](docs/setup.md).
+Download `ccb-linux-x86_64` and `ccb-linux-x86_64.sha256` from the
+[Releases page](https://github.com/DliberttiGroup/ccb/releases), then:
 
 ```sh
-cmake -S . -B build        # Release is the default build type
+sha256sum -c ccb-linux-x86_64.sha256
+chmod +x ccb-linux-x86_64
+mv ccb-linux-x86_64 ~/.local/bin/ccb   # any directory on your PATH
+ccb version
+```
+
+The first release (`v0.1.0-prototype`) is not published yet — until it
+lands, there is nothing to download. Build from source below in the
+meantime.
+
+### Build from source
+
+```sh
+cmake --preset dev
 cmake --build build
 ./build/ccb version        # ccb 0.1.0
 ```
 
-Presets (`release`, `dev`, `sanitizer`) live in `CMakePresets.json`.
-Stripped, statically linked release binary:
-
-```sh
-cmake --preset release
-cmake --build build-release
-```
-
-Tests: [docs/build-tests.md](docs/build-tests.md#running-the-tests). Run suites
-sequentially, never concurrently. No packages yet.
-
-## Transitioning from Gradle
-
-CCB replaces the Gradle build, not the Android SDK. Same tools
-(kotlinc, d8, aapt2, apksigner), driven directly. One `ccb.toml`
-instead of `build.gradle` + `settings.gradle`.
+## Quickstart
 
 ```sh
 ccb init myapp
 cd myapp
+ccb setup                  # installs the JDK, SDK, and kotlinc if missing
 ccb build                  # → build/outputs/debug/app.apk
-ccb run                    # build → install → launch (needs a device)
-ccb check                  # validate config + toolchain
-ccb doctor                 # toolchain report
+ccb install                # needs a connected device
 ```
 
-Without `--package` / `--name`, `init` scaffolds name `hello` and
-package `com.example.hello` regardless of the directory name.
+Without `--package` / `--name`, `init` scaffolds name `hello` and package
+`com.example.hello` regardless of the directory name. The same hello
+project ships in the repo as [`examples/hello`](examples/hello) —
+`cd examples/hello && ccb build` builds it.
 
-## Project layout
+## Links
 
-```
-├─ src/           C17 implementation, one module per subsystem
-├─ tests/         test suite (see tests/test.h)
-├─ docs/          human docs, English (see docs/index.md)
-├─ docs/llm/      agent docs, Chinese (see llms.txt)
-├─ examples/      hello, preview-sample, real-world
-├─ requirement.md the specification
-├─ CONTRIBUTING.md contributing guide
-└─ LICENSE        Apache 2.0
-```
+- [Documentation](docs/index.md)
+- [LLM docs](docs/llm/index.md)
+- [Specification](requirement.md)
 
 ## License
 

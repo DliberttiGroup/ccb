@@ -13,8 +13,7 @@ cmake -S . -B build && cmake --build build
 
 - Read `requirement.md` first — it is the spec, and the consumer is an AI
   agent driving builds from a terminal.
-- Human docs: `docs/` (compact). Agent docs: `docs/llm/` (Chinese) and
-  `llms.txt` at the root.
+- Human docs: `docs/` (compact). Agent docs: [`docs/llm/`](docs/llm/index.md) (Chinese).
 - Build a real app with it before changing it: `examples/` are the proof.
 - One change, then verify. Never claim a fix without a passing run.
 - Fork, branch, open a PR. CI (plain + sanitizer jobs) must be green
