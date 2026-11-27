@@ -235,6 +235,18 @@ depends = ["base"]
   code may reference its own and its dependencies' R classes.
 - Module outputs participate in app fingerprints: changing a library
   rebuilds the app (see §5.11).
+- A project can itself be a library: an empty `[library]` table makes
+  `ccb build` produce `build/<name>-<version>.aar` (`classes.jar`,
+  `AndroidManifest.xml`, `res/`, `assets/`, `R.txt`) instead of an
+  APK. A library project declares no modules, NDK, deps, or path
+  libraries of its own.
+- An app consumes a standalone library from a local path as
+  `[deps.library.<name>]` with `path = "..."` (a library project
+  dir, built first, or a built `.aar` file), or from Maven
+  coordinates: an AAR dependency resolved via Maven works like a
+  local AAR. Library R symbols are namespaced by package
+  (`--extra-packages`); resource conflicts are won by the app, with
+  a warning naming the winner (see `docs/library.md`).
 
 ## 5. Build pipeline
 
@@ -464,7 +476,10 @@ Between the deps step and the manifest merge, CCB builds each
 declared library module (§4.3) in topological order into an
 intermediate AAR (`build/intermediates/modules/<name>/<name>.aar`):
 `classes.jar` (when the module has Kotlin/Java sources), the module
-manifest, raw `res/` and `assets/` trees. The module AARs join the
+manifest, raw `res/` and `assets/` trees, and `R.txt`. Path libraries
+(`[deps.library.<name>]`, §4.3) build first, into
+`build/intermediates/libraries/<name>/<name>.aar`, through the same
+machinery. The module AARs join the
 declared AARs in the merge list (declared first, then modules in
 topological order), so every later stage treats them as local AARs:
 manifest merge (§5.2), res compile/link (§5.2), compile classpath
@@ -472,10 +487,17 @@ manifest merge (§5.2), res compile/link (§5.2), compile classpath
 
 - Module resources compile (`aapt2 compile`) and link (`aapt2 link`
   against the module manifest) to generate R.java for the module
-  package, but only when the module has code that can reference R;
-  a resources-only module skips the link. Generated R fields are
-  de-finalized before compiling, so they resolve at runtime against
-  the app's R class (see `docs/modules.md`).
+  package and R.txt, whenever the module has resources — even
+  without code, so a resources-only module still ships a real R.txt.
+  A module with no resources ships an empty R.txt. Generated R
+  fields are de-finalized before compiling, so they resolve at
+  runtime against the app's R class (see `docs/modules.md`).
+- Library resources link as aapt2 `-R` overlays with the app zip
+  last, so the app wins same-named resource conflicts (previously a
+  hard link error); a resource defined by more than one source warns
+  at link time, naming the winner and the shadowed sources. R
+  symbols are namespaced by package (`--extra-packages`), so a
+  library R class cannot collide with the app's.
 - Module `classes.jar` excludes generated R classes: the app link
   generates the real R class for the module package, and shipping
   both would make d8 reject the duplicate.
@@ -493,8 +515,8 @@ manifest merge (§5.2), res compile/link (§5.2), compile classpath
   skip intermediates that do not exist yet, so planning works on a
   fresh tree.
 - Out of scope: per-module deps/NDK/signing, dynamic feature
-  modules, Maven publishing, cross-module resource namespacing
-  beyond what aapt2 already does.
+  modules, Maven publishing, transitive path libraries (a library
+  project cannot consume path libraries).
 
 ## 6. Agent-oriented interface (the distinctive part)
 
@@ -507,7 +529,7 @@ not agent-oriented. CCB must satisfy all of the following:
 |---|---|
 | `ccb init [dir]` | Scaffold a minimal project: `ccb.toml`, manifest, one Kotlin Activity, `res/`, `.gitignore`. Must work offline. |
 | `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), the official kotlinc 2.4.21 compiler into the SDK home when missing, the NDK revision for `[ndk]` projects, r8 9.5.28 into the SDK home for minify projects without an explicit jar, and missing host tools from the platform package manager (Termux: aapt2/android-tools from the official repos, zipalign from the rendiix repo only when the official repos have no candidate; Linux: adb from the distro manager). In a project with `[deps] maven`, also prefetches every direct + transitive artifact into the local Maven cache (see §5.4). Ends with a final verification pass (toolchain resolve + adb) reported as warnings. `--upgrade` reinstalls setup-managed kotlinc/r8 to pinned versions and implies `--yes`; `--print-env` prints shell exports instead of the ready line. Pinned downloads are cached under `~/.cache/ccb/downloads` with resume. This is the only command allowed network access; builds stay hermetic. |
-| `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. |
+| `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. Reports consumed libraries (name, version, path/coordinates, AAR contents summary); for a library project, the library itself and its AAR. |
 | `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`, `--aab` (build `app.aab` instead of `app.apk`, see §5.10). |
 | `ccb clean` | Remove the build directory only. Never touches sources. |
 | `ccb doctor` | Check every tool CCB needs (SDK, build-tools, platform, kotlinc, d8, apksigner, zipalign, adb, NDK if configured). For each missing item print what it is, where CCB looked, and the exact install command. |
@@ -1030,7 +1052,13 @@ crashes on input it does not understand, and never silently guesses.
    `[modules.<name>]` tables (standard `src/main` layout,
    topological build into intermediate AARs consumed through the
    existing deps + manifest-merge machinery) — see §4.3, §5.11, and
-   `docs/modules.md`. Dynamic feature modules stay out of scope.
+   `docs/modules.md`; standalone library projects via an empty
+   `[library]` table (build `build/<name>-<version>.aar` with
+   `classes.jar`, manifest, res, assets, `R.txt`), consumed from a
+   local path (`[deps.library.<name>] path = "..."`) or Maven
+   coordinates, with app-wins resource merging and package-namespaced
+   R symbols — see `docs/library.md`. Dynamic feature modules stay
+   out of scope.
 7. **Name expansion.** "Custom C Builder" is a placeholder. Keep CCB as
    a bare name, or pick a real expansion?
 8. **Preview scope.** Implemented (Phase 2): preview derives
@@ -1050,7 +1078,7 @@ crashes on input it does not understand, and never silently guesses.
 - **zipalign** — Aligns APK entries for efficient runtime loading.
 - **apksigner** — Signs and verifies APKs (v1/v2/v3 signature schemes).
 - **AAR** — Android library archive: classes, resources, manifest,
-  assets, and native libs in one file.
+  assets, `R.txt`, and native libs in one file.
 - **ABI** — Application Binary Interface: `arm64-v8a`, `armeabi-v7a`,
   `x86_64`, etc. One `.so` per ABI in the APK.
 - **Arena allocator** — An allocator that hands out memory from a pool

@@ -44,7 +44,11 @@ typedef struct {
 } ccb_scenario;
 
 // A library module: [modules.<name>] in ccb.toml. After load the
-// modules array is in topological order (dependencies first).
+// modules array is in topological order (dependencies first). The
+// same struct also holds one [deps.library.<name>] path library: then
+// dir is the library project root (or the built .aar file when
+// is_file), version is the library project's [project] version, and
+// depends is always empty.
 typedef struct {
   char *name;
   char *dir; // absolute module root
@@ -57,6 +61,8 @@ typedef struct {
   char *kotlin_dir; // <dir>/src/main/kotlin
   char *java_dir; // <dir>/src/main/java
   char *package; // from the module manifest (required)
+  int is_file; // dir is a built .aar file, not a project root
+  char *version; // library project version (path libraries only)
 } ccb_module;
 
 typedef struct {
@@ -198,6 +204,12 @@ typedef struct {
   // (dependencies first). Empty when the project is single-module.
   ccb_module *modules;
   size_t modules_count;
+  // [library]: present when this project IS a library (it builds an
+  // .aar, not an APK). [deps.library.<name>] path libraries this app
+  // consumes, in declaration order (built before modules).
+  int is_library;
+  ccb_module *libraries;
+  size_t libraries_count;
 } ccb_config;
 
 // Search upward from start_dir for ccb.toml. When explicit is non-NULL it

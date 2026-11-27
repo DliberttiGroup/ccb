@@ -56,17 +56,19 @@ depends = ["base"]
 Pipeline order: deps (declared AARs) → modules → merge-manifest →
 compile-res → link → code → dex → … The manifest merge sees declared AARs
 first, then module AARs in topological order. Merge rules: see
-[build.md](build.md) (stage 2).
+[build.md](build.md) (stage 4).
 
 Per module, in topological order:
 
 1. Fingerprint: tool versions, module manifest, res, assets, Kotlin and
    Java sources, declared jars, declared AAR classes, upstream module
    outputs (AAR + generated R.java). Unchanged inputs skip the module.
-2. Resources (only when the module has code *and* resources): `aapt2
-   compile` the module res, then `aapt2 link` against the module manifest
-   to generate R.java for the module package. Link output (throwaway
-   `.ap_`) is discarded; only R.java is kept.
+2. Resources: `aapt2 compile` the module res, then `aapt2 link`
+   against the module manifest to generate R.java for the module
+   package (and R.txt, `--output-text-symbols`). Link output
+   (throwaway `.ap_`) is discarded; only R.java and R.txt are kept.
+   The link runs whenever the module has resources, even without
+   code, so a resources-only module still ships a real R.txt.
 3. Code: `kotlinc` over module Kotlin sources, Java sources, generated
    R.java, and upstream modules' R.java (a module may reference a
    dependency's R class), classpath = `android.jar` + declared jars +
@@ -80,10 +82,11 @@ Per module, in topological order:
 5. Intermediate AAR
    (`build/intermediates/modules/<name>/<name>.aar`): `classes.jar` (when
    present), `AndroidManifest.xml` (copy of the module manifest), raw
-   `res/` and `assets/` trees. aapt2 compiles the res at app link time,
+   `res/` and `assets/` trees, `R.txt` (empty when the module has no
+   resources). aapt2 compiles the res at app link time,
    exactly as for declared AARs.
 
-## R semantics
+## R semantics and namespacing
 
 *ccb-modules-r*
 
@@ -97,6 +100,14 @@ at runtime.
   classes.
 - Don't name your own class `R` in a module with resources: it would
   collide with the generated R class.
+- R symbols are namespaced by package: the app link passes every
+  module package as `--extra-packages`, so each module gets its own
+  R class and cannot collide with the app's.
+- Resource merging is app-wins: the app link passes library zips as
+  aapt2 `-R` overlays with the app zip last (see
+  [library.md](library.md)). A resource defined by more than one
+  source is a warning at link time, naming the winner and the
+  shadowed sources.
 
 ## Incremental builds
 
@@ -124,7 +135,5 @@ modules, app code, and dex correctly skip.
   project's jars/AARs on the classpath and have no native libs.
 - No dynamic feature modules.
 - No publishing library modules to a Maven repo.
-- No cross-module resource namespacing beyond what aapt2 already does
-  (`--extra-packages` + `--auto-add-overlay`).
 - The app module is not configurable per-module: all declared modules are
   built and consumed by every build.

@@ -23,6 +23,7 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [diagnostics.md](diagnostics.md) | Every `CCB-E` / `CCB-P` code and exit code |
 | [json-protocol.md](json-protocol.md) | `--json` output, `--explain`, `--dry-run` |
 | [modules.md](modules.md) | Library modules in `ccb.toml` |
+| [library.md](library.md) | Standalone library projects: `[library]`, path/Maven consumption, resource namespacing, `check` report |
 | [maven.md](maven.md) | Remote Maven dependencies, cache, lockfile |
 | [preview.md](preview.md) | Terminal UI preview: config, flow files, gate, output, JSON |
 | [preview-handlers.md](preview-handlers.md) | Click handlers: derived edges, bindings, precedence, outcomes |
@@ -132,6 +133,12 @@ Every section carries a `*ccb-<slug>*` tag. Find a section by tag here.
 | `*ccb-modules-r*` | modules.md | R semantics |
 | `*ccb-modules-incremental*` | modules.md | Incremental builds |
 | `*ccb-modules-limits*` | modules.md | Limitations |
+| `*ccb-library*` | library.md | Standalone library projects |
+| `*ccb-library-config*` | library.md | Declaring a library project |
+| `*ccb-library-aar*` | library.md | AAR contents |
+| `*ccb-library-consume*` | library.md | Consuming a library from a path |
+| `*ccb-library-r*` | library.md | Resource merging and namespacing |
+| `*ccb-library-check*` | library.md | `ccb check` reports libraries |
 | `*ccb-device*` | device-setup.md | Connecting a device |
 | `*ccb-device-wireless*` | device-setup.md | Wireless debugging over Tailscale |
 | `*ccb-device-no-device*` | device-setup.md | No device attached |

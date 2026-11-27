@@ -77,6 +77,11 @@ foreach(test_src ${CCB_TEST_SOURCES})
     # ASan (the post-kotlinc pipeline alone is ~95 s there).
     add_test(NAME ${test_name} COMMAND ${test_name})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 900)
+  elseif(test_name STREQUAL "test_library")
+    # Builds a standalone library, three consuming apps (path project,
+    # built .aar file, Maven coordinates) plus kotlinc/d8 subprocesses.
+    add_test(NAME ${test_name} COMMAND ${test_name} $<TARGET_FILE:ccb>)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 900)
   else()
     add_test(NAME ${test_name} COMMAND ${test_name})
   endif()
@@ -103,14 +108,15 @@ add_test(NAME fuzz_preview_flow
 # Test labels: speed (fast/slow) + area. Every test gets exactly one of
 # each. `ctest -L fast` is the quick gate (no real Android build, seconds);
 # `ctest -L <area>` runs one area; plain `ctest` runs the full suite.
-# fast counts: config 2, setup 2, pipeline 5, preview 29, misc 5 (= 43).
-# slow counts: pipeline 3, dexcheck 1, daemon 1, maven 1, modules 1 (= 7).
+# fast counts: config 2, setup 2, pipeline 6, preview 29, misc 5 (= 44).
+# slow counts: pipeline 3, dexcheck 1, daemon 1, maven 1, modules 1,
+# library 1 (= 8).
 set_tests_properties(test_config test_toml
   PROPERTIES LABELS "fast;config")
 set_tests_properties(test_sdk_tools test_setup
   PROPERTIES LABELS "fast;setup")
 set_tests_properties(test_bundle test_cache test_d8_heap test_manifest_merge
-  test_probes
+  test_probes test_resns
   PROPERTIES LABELS "fast;pipeline")
 set_tests_properties(test_preview test_preview_cli_gate_diff
   test_preview_correctness_a test_preview_correctness_b
@@ -130,3 +136,4 @@ set_tests_properties(test_dexcheck PROPERTIES LABELS "slow;dexcheck")
 set_tests_properties(test_kotlinc_daemon PROPERTIES LABELS "slow;daemon")
 set_tests_properties(test_maven PROPERTIES LABELS "slow;maven")
 set_tests_properties(test_modules PROPERTIES LABELS "slow;modules")
+set_tests_properties(test_library PROPERTIES LABELS "slow;library")

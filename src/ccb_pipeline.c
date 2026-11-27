@@ -12,6 +12,7 @@
 #include "ccb_manifest.h"
 #include "ccb_maven.h"
 #include "ccb_net.h"
+#include "ccb_resns.h"
 #include "ccb_zip.h"
 #include "ccb_bundle.h"
 #include "ccb_dexcheck.h"
@@ -44,6 +45,12 @@ typedef struct {
   char **aar_res_dirs;
   size_t aar_res_dirs_count;
   size_t aar_res_dirs_cap;
+  // Parallel to aar_res_dirs: display names for resource-collision
+  // warnings ("app" never appears here; declared AARs use their path,
+  // modules and path libraries "module <name>" / "library <name>").
+  char **aar_res_names;
+  size_t aar_res_names_count;
+  size_t aar_res_names_cap;
   char **aar_res_zips;
   size_t aar_res_zips_count;
   size_t aar_res_zips_cap;
@@ -79,6 +86,8 @@ typedef struct {
   size_t merge_aar_names_cap;
   // Library-module work area: intermediates/modules/<name>/.
   char *modules_dir;
+  // Path-library work area: intermediates/libraries/<name>/.
+  char *libraries_dir;
   // Merged manifest (NULL when no AARs): what aapt2 link sees.
   char *merged_manifest;
   // Fingerprint of the merge inputs (app manifest + AAR manifests).
@@ -450,7 +459,8 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     return CCB_ERR_TOOLCHAIN;
   }
   // Release signing pre-checks: fail before any compilation.
-  if (strcmp(p->cfg->variant, "release") == 0) {
+  // Libraries build an unsigned .aar, so they skip this.
+  if (!p->cfg->is_library && strcmp(p->cfg->variant, "release") == 0) {
     if (!p->cfg->has_release_signing) {
       ccb_pipe_diag(p, "CCB-E3001", "sign", "release build requires a [signing.release] section");
       return CCB_ERR_SIGNING;
@@ -508,6 +518,24 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     free(mv.jars);
     ccb_maven_entries_free(mv.entries, mv.entries_count);
   }
+  // A library project builds an .aar, never an AAB.
+  if (p->cfg->is_library && p->opts->aab) {
+    ccb_pipe_diag(p, "CCB-E1005", "config",
+      "library projects cannot build an AAB; they build an .aar");
+    return CCB_ERR_CONFIG;
+  }
+  // Path libraries that point at a built .aar need no build: they
+  // join the declared AARs, so deps/merge/classpath/dex treat them as
+  // local files. Project dirs are built by the libraries step.
+  for (size_t i = 0; i < p->cfg->libraries_count; i++) {
+    if (!p->cfg->libraries[i].is_file) {
+      continue;
+    }
+    p->cfg->aars = ccb_xrealloc(p->cfg->aars,
+      (p->cfg->aars_count + 1) * sizeof(*p->cfg->aars));
+    p->cfg->aars[p->cfg->aars_count++] =
+      ccb_xstrdup(p->cfg->libraries[i].dir);
+  }
   // Compiler plugins (cache-only: builds never touch the network).
   // Resolved jars are passed to kotlinc as -Xplugin=... in the
   // compile-code step (and the module compile step). A cache miss
@@ -530,6 +558,7 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
   p->dex_dir = ccb_path_join(p->intermediates, "dex");
   p->aar_dir = ccb_path_join(p->intermediates, "aar");
   p->modules_dir = ccb_path_join(p->intermediates, "modules");
+  p->libraries_dir = ccb_path_join(p->intermediates, "libraries");
   p->out_dir = ccb_path_join3(p->cfg->build_dir, "outputs", p->cfg->variant);
   p->linked_apk = ccb_path_join(p->intermediates, "linked.ap_");
   p->linked_aab = ccb_path_join(p->intermediates, "linked-aab.ap_");
@@ -537,7 +566,10 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
   p->unsigned_aab = ccb_path_join(p->intermediates, "app-unsigned.aab");
   p->aligned_apk = ccb_path_join(p->intermediates, "app-aligned.apk");
   if (!p->opts->dry_run && !p->opts->explain) {
-    if (ccb_mkdir_p(p->intermediates) != CCB_OK || ccb_mkdir_p(p->out_dir) != CCB_OK) {
+    // Libraries build an .aar under build/, not an APK under
+    // outputs/, so they create no out dir.
+    if (ccb_mkdir_p(p->intermediates) != CCB_OK ||
+        (!p->cfg->is_library && ccb_mkdir_p(p->out_dir) != CCB_OK)) {
       ccb_pipe_diag(p, "CCB-E3016", "build", "cannot create build directories");
       return CCB_ERR_BUILD;
     }
@@ -688,6 +720,8 @@ static ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
     if (has_res) {
       ccb_push_str(&p->aar_res_dirs, &p->aar_res_dirs_count, &p->aar_res_dirs_cap,
         ccb_path_join(dest, "res"));
+      ccb_push_str(&p->aar_res_names, &p->aar_res_names_count, &p->aar_res_names_cap,
+        ccb_xstrdup(aar_path));
     }
     if (has_assets) {
       ccb_push_str(&p->aar_assets_dirs, &p->aar_assets_count, &p->aar_assets_cap,
@@ -1111,16 +1145,18 @@ static int ccb_mod_is_r_class(const char *path) {
 // Register a module's outputs in the AAR machinery. Runs in every mode
 // (explain, dry-run, real): downstream steps plan from these lists.
 // classes.jar is registered only when the module has real sources;
-// a resources-only module contributes no classes.
+// a resources-only module contributes no classes. kind is "module"
+// for [modules.<name>] and "library" for [deps.library.<name>].
 static void ccb_mod_register(ccb_pipe *p, ccb_module *m, const char *aar_path,
-    const char *classes_jar) {
+    const char *classes_jar, const char *kind) {
   ccb_push_str(&p->merge_aar_paths, &p->merge_aar_paths_count,
     &p->merge_aar_paths_cap, ccb_xstrdup(aar_path));
   ccb_push_str(&p->merge_aar_srcs, &p->merge_aar_srcs_count,
     &p->merge_aar_srcs_cap, ccb_xstrdup(m->manifest));
   ccb_str disp;
   ccb_str_init(&disp);
-  ccb_str_append(&disp, "module ");
+  ccb_str_append(&disp, kind);
+  ccb_str_append_c(&disp, ' ');
   ccb_str_append(&disp, m->name);
   ccb_push_str(&p->merge_aar_names, &p->merge_aar_names_count,
     &p->merge_aar_names_cap, ccb_str_steal(&disp));
@@ -1131,6 +1167,13 @@ static void ccb_mod_register(ccb_pipe *p, ccb_module *m, const char *aar_path,
   if (m->res != NULL) {
     ccb_push_str(&p->aar_res_dirs, &p->aar_res_dirs_count,
       &p->aar_res_dirs_cap, ccb_xstrdup(m->res));
+    ccb_str rdisp;
+    ccb_str_init(&rdisp);
+    ccb_str_append(&rdisp, kind);
+    ccb_str_append_c(&rdisp, ' ');
+    ccb_str_append(&rdisp, m->name);
+    ccb_push_str(&p->aar_res_names, &p->aar_res_names_count,
+      &p->aar_res_names_cap, ccb_str_steal(&rdisp));
   }
   if (m->assets != NULL) {
     ccb_push_str(&p->aar_assets_dirs, &p->aar_assets_count,
@@ -1152,25 +1195,33 @@ typedef struct {
   char *classes_jar;
   char *compiled;
   char *link_out;
+  char *rtxt; // aapt2 --output-text-symbols file (R.txt source)
   int has_sources;
   int has_res_files;
 } ccb_mod_ctx;
 
-static void ccb_mod_ctx_init(ccb_mod_ctx *c, ccb_pipe *p, ccb_module *m) {
+// work is the module work dir; aar_path NULL means <work>/<name>.aar.
+static void ccb_mod_ctx_init_at(ccb_mod_ctx *c, ccb_pipe *p, ccb_module *m,
+    char *work, char *aar_path) {
   c->p = p;
   c->m = m;
-  c->work = ccb_path_join(p->modules_dir, m->name);
-  ccb_str an;
-  ccb_str_init(&an);
-  ccb_str_append(&an, m->name);
-  ccb_str_append(&an, ".aar");
-  c->aar_path = ccb_path_join(c->work, an.buf);
-  ccb_str_free(&an);
+  c->work = work;
+  if (aar_path != NULL) {
+    c->aar_path = aar_path;
+  } else {
+    ccb_str an;
+    ccb_str_init(&an);
+    ccb_str_append(&an, m->name);
+    ccb_str_append(&an, ".aar");
+    c->aar_path = ccb_path_join(c->work, an.buf);
+    ccb_str_free(&an);
+  }
   c->gen_dir = ccb_path_join(c->work, "gen");
   c->classes_dir = ccb_path_join(c->work, "classes");
   c->classes_jar = ccb_path_join(c->work, "classes.jar");
   c->compiled = ccb_path_join(c->work, "compiled.zip");
   c->link_out = ccb_path_join(c->work, "lib.ap_");
+  c->rtxt = ccb_path_join(c->work, "R.txt");
   // A module produces a classes.jar only when it has real Kotlin/Java
   // sources. Resources alone generate R.java at link time, but the R
   // classes are stripped (see below), so a resources-only module
@@ -1188,6 +1239,7 @@ static void ccb_mod_ctx_free(ccb_mod_ctx *c) {
   free(c->classes_jar);
   free(c->compiled);
   free(c->link_out);
+  free(c->rtxt);
 }
 
 // A module name must not collide with a declared AAR's extraction
@@ -1353,6 +1405,8 @@ static ccb_status ccb_mod_compile_resources(ccb_mod_ctx *c) {
   ccb_argv_push(&av, p->sdk->android_jar);
   ccb_argv_push(&av, "--java");
   ccb_argv_push(&av, c->gen_dir);
+  ccb_argv_push(&av, "--output-text-symbols");
+  ccb_argv_push(&av, c->rtxt);
   ccb_argv_push(&av, "--auto-add-overlay");
   ccb_argv_push(&av, "--min-sdk-version");
   ccb_argv_pushf(&av, "%ld", p->cfg->min_sdk);
@@ -1621,6 +1675,18 @@ static ccb_status ccb_mod_assemble_aar(ccb_mod_ctx *c) {
     }
     free(mtext);
   }
+  // R.txt: the module link writes it (see ccb_mod_compile_resources);
+  // a module with no resources, or a resources-only module whose link
+  // never ran, ships an empty one so every AAR carries the file.
+  if (!bad) {
+    if (ccb_path_exists(c->rtxt)) {
+      if (ccb_zip_writer_add_file(&w, "R.txt", c->rtxt) != CCB_OK) {
+        bad = 1;
+      }
+    } else if (ccb_zip_writer_add_data(&w, "R.txt", "", 0) != CCB_OK) {
+      bad = 1;
+    }
+  }
   if (!bad && m->res != NULL &&
       ccb_mod_zip_tree(&w, m->res, "res") != CCB_OK) {
     bad = 1;
@@ -1651,7 +1717,10 @@ static ccb_status ccb_mod_run(ccb_mod_ctx *c, const char *fp,
       return CCB_ERR_BUILD;
     }
   }
-  if (c->has_sources && c->has_res_files &&
+  // Resources link whenever the module has them, even without code:
+  // the link also writes R.txt for the AAR. A resources-only module
+  // never compiles the generated R.java (no sources to reference it).
+  if (c->has_res_files &&
       ccb_mod_compile_resources(c) != CCB_OK) {
     return CCB_ERR_BUILD;
   }
@@ -1674,20 +1743,24 @@ static ccb_status ccb_mod_run(ccb_mod_ctx *c, const char *fp,
   return CCB_OK;
 }
 
-static ccb_status ccb_build_one_module(ccb_pipe *p, ccb_module *m) {
-  if (ccb_mod_name_clash(p, m)) {
+// Build one module (or path library, or the standalone library
+// project): fingerprint, run or skip, register outputs. work_root is
+// the parent of the <name> work dir; aar_path NULL means
+// <work>/<name>.aar. kind is "module" or "library" (display names,
+// explain lines, cache stage). do_register 0 builds the AAR without
+// registering it in the app's merge lists (standalone library).
+static ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
+    const char *work_root, char *aar_path, const char *key,
+    const char *kind, int do_register) {
+  if (do_register && ccb_mod_name_clash(p, m)) {
     return CCB_ERR_BUILD;
   }
   ccb_mod_ctx c;
-  ccb_mod_ctx_init(&c, p, m);
-  ccb_str key;
-  ccb_str_init(&key);
-  ccb_str_append(&key, "module-");
-  ccb_str_append(&key, m->name);
+  ccb_mod_ctx_init_at(&c, p, m, ccb_path_join(work_root, m->name), aar_path);
   char *fp = NULL;
   const char *old = NULL;
   ccb_status rc = CCB_OK;
-  if (ccb_mod_fingerprint(p, m, &fp, &old, key.buf) != 0) {
+  if (ccb_mod_fingerprint(p, m, &fp, &old, key) != 0) {
     ccb_pipe_diag(p, "CCB-E3016", "modules", "cannot read module inputs");
     rc = CCB_ERR_BUILD;
     goto done;
@@ -1699,25 +1772,42 @@ static ccb_status ccb_build_one_module(ccb_pipe *p, ccb_module *m) {
     run = 0;
   }
   if (p->opts->explain) {
-    printf("module %s: %s\n", m->name,
+    printf("%s %s: %s\n", kind, m->name,
       run ? "run (inputs changed)" : "skip (inputs unchanged)");
-    ccb_mod_register(p, m, c.aar_path, c.has_sources ? c.classes_jar : NULL);
+    if (do_register) {
+      ccb_mod_register(p, m, c.aar_path,
+        c.has_sources ? c.classes_jar : NULL, kind);
+    }
     goto done;
   }
   if (run) {
-    if (ccb_mod_run(&c, fp, key.buf) != CCB_OK) {
+    if (ccb_mod_run(&c, fp, key) != CCB_OK) {
       rc = CCB_ERR_BUILD;
       goto done;
     }
   } else {
     p->steps_skipped++;
-    ccb_log_cache(&p->log, "modules", 1, "module inputs unchanged");
+    ccb_log_cache(&p->log, strcmp(kind, "library") == 0 ? "libraries" : "modules",
+      1, strcmp(kind, "library") == 0 ? "library inputs unchanged" : "module inputs unchanged");
   }
-  ccb_mod_register(p, m, c.aar_path, c.has_sources ? c.classes_jar : NULL);
+  if (do_register) {
+    ccb_mod_register(p, m, c.aar_path,
+      c.has_sources ? c.classes_jar : NULL, kind);
+  }
 done:
   free(fp);
-  ccb_str_free(&key);
   ccb_mod_ctx_free(&c);
+  return rc;
+}
+
+static ccb_status ccb_build_one_module(ccb_pipe *p, ccb_module *m) {
+  ccb_str key;
+  ccb_str_init(&key);
+  ccb_str_append(&key, "module-");
+  ccb_str_append(&key, m->name);
+  ccb_status rc = ccb_build_module_at(p, m, p->modules_dir, NULL, key.buf,
+    "module", 1);
+  ccb_str_free(&key);
   return rc;
 }
 
@@ -1735,6 +1825,72 @@ static ccb_status ccb_step_modules(ccb_pipe *p) {
     }
   }
   return CCB_OK;
+}
+
+// ---------- path libraries ----------
+
+// Build each [deps.library.<name>] project into
+// intermediates/libraries/<name>/<name>.aar and register it in the
+// AAR machinery, in declaration order. A built .aar path needs no
+// build: stage 0 already appended it to the declared AARs.
+static ccb_status ccb_step_libraries(ccb_pipe *p) {
+  if (p->cfg->libraries_count == 0) {
+    if (p->opts->explain) {
+      printf("libraries: skip (no path libraries)\n");
+    }
+    return CCB_OK;
+  }
+  for (size_t i = 0; i < p->cfg->libraries_count; i++) {
+    ccb_module *m = &p->cfg->libraries[i];
+    if (m->is_file) {
+      continue;
+    }
+    ccb_str key;
+    ccb_str_init(&key);
+    ccb_str_append(&key, "library-");
+    ccb_str_append(&key, m->name);
+    ccb_status rc = ccb_build_module_at(p, m, p->libraries_dir, NULL,
+      key.buf, "library", 1);
+    ccb_str_free(&key);
+    if (rc != CCB_OK) {
+      return rc;
+    }
+  }
+  return CCB_OK;
+}
+
+// Output AAR of a library project: build/<name>-<version>.aar.
+static char *ccb_library_aar_path(const ccb_config *cfg) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, cfg->build_dir);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, cfg->name);
+  ccb_str_append_c(&s, '-');
+  ccb_str_append(&s, cfg->version);
+  ccb_str_append(&s, ".aar");
+  return ccb_str_steal(&s);
+}
+
+// Build this project as a library: one module synthesized from the
+// project config, no merge/link/dex/package. The AAR lands at
+// build/<name>-<version>.aar.
+static ccb_status ccb_step_library(ccb_pipe *p) {
+  ccb_config *cfg = p->cfg;
+  ccb_module m;
+  memset(&m, 0, sizeof(m));
+  m.name = cfg->name;
+  m.dir = cfg->project_root;
+  m.manifest = cfg->manifest;
+  m.res = cfg->res;
+  m.assets = cfg->assets;
+  m.kotlin_dir = cfg->kotlin_dir;
+  m.java_dir = cfg->java_dir;
+  m.package = cfg->package;
+  char *aar_path = ccb_library_aar_path(cfg);
+  // aar_path ownership moves into the module context.
+  return ccb_build_module_at(p, &m, p->libraries_dir, aar_path,
+    "library", "library", 0);
 }
 
 // ---------- aapt2 compile ----------
@@ -1891,6 +2047,57 @@ compile_fail:
 
 // ---------- aapt2 link ----------
 
+// Cross-module resource namespacing: a resource defined by more than
+// one source is won by the earliest source (the app, then libraries in
+// merge order). Warn once per collision, naming the winner and the
+// shadowed sources. Runs only when the link runs, so a cached link
+// stays quiet.
+static void ccb_link_warn_collisions(ccb_pipe *p) {
+  size_t nsrc = 1 + p->aar_res_dirs_count;
+  char **names = ccb_xcalloc(nsrc, sizeof(*names));
+  ccb_res_entry **entries = ccb_xcalloc(nsrc, sizeof(*entries));
+  size_t *counts = ccb_xcalloc(nsrc, sizeof(*counts));
+  names[0] = "app";
+  ccb_resns_scan_dir(p->cfg->res, &entries[0], &counts[0]);
+  for (size_t i = 0; i < p->aar_res_dirs_count; i++) {
+    names[1 + i] = p->aar_res_names[i];
+    ccb_resns_scan_dir(p->aar_res_dirs[i], &entries[1 + i],
+      &counts[1 + i]);
+  }
+  ccb_res_collision *colls = NULL;
+  size_t ncolls = 0;
+  ccb_resns_collisions(names, entries, counts, nsrc, &colls, &ncolls);
+  for (size_t i = 0; i < ncolls; i++) {
+    ccb_str msg;
+    ccb_str_init(&msg);
+    ccb_str_append(&msg, "resource '");
+    ccb_str_append(&msg, colls[i].type);
+    ccb_str_append_c(&msg, '/');
+    ccb_str_append(&msg, colls[i].name);
+    ccb_str_append(&msg, "' defined by ");
+    ccb_str_append(&msg, colls[i].winner);
+    ccb_str_append(&msg, " and ");
+    for (size_t k = 0; k < colls[i].nlosers; k++) {
+      if (k > 0) {
+        ccb_str_append(&msg, ", ");
+      }
+      ccb_str_append(&msg, colls[i].losers[k]);
+    }
+    ccb_str_append(&msg, "; ");
+    ccb_str_append(&msg, colls[i].winner);
+    ccb_str_append(&msg, " wins");
+    ccb_log_warning(&p->log, "%s", msg.buf);
+    ccb_str_free(&msg);
+  }
+  ccb_resns_collisions_free(colls, ncolls);
+  for (size_t i = 0; i < nsrc; i++) {
+    ccb_resns_entries_free(entries[i], counts[i]);
+  }
+  free(entries);
+  free(counts);
+  free(names);
+}
+
 static ccb_status ccb_step_link(ccb_pipe *p) {
   // AAB builds link with --proto-format into a separate intermediate
   // (linked-aab.ap_) under its own cache key, so APK and AAB builds
@@ -1904,6 +2111,9 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
   ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
   ccb_fp_add(&b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
   ccb_fp_add(&b, "package", p->cfg->package);
+  // Overlay order: libraries link as -R overlays with the app last,
+  // so the app wins conflicts (see the argv below).
+  ccb_fp_add(&b, "overlay", "1");
   ccb_fp_add(&b, "version", p->cfg->version);
   ccb_fp_addl(&b, "version_code", p->cfg->version_code);
   ccb_fp_addl(&b, "min_sdk", p->cfg->min_sdk);
@@ -1958,6 +2168,7 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
     return CCB_OK;
   }
   p->link_will_run = 1;
+  ccb_link_warn_collisions(p);
   if (!p->opts->dry_run) {
     ccb_remove_recursive(p->gen_dir);
     if (ccb_mkdir_p(p->gen_dir) != CCB_OK) {
@@ -1996,8 +2207,22 @@ static ccb_status ccb_step_link(ccb_pipe *p) {
     ccb_argv_push(&av, "--extra-packages");
     ccb_argv_push(&av, p->aar_packages[i]);
   }
-  for (size_t i = 0; i < p->aar_res_zips_count; i++) {
+  // Overlay semantics (-R): the last conflicting resource wins. The
+  // app zip goes last so the app wins; library zips go in reverse
+  // merge order so the first library wins among libraries. A plain
+  // positional arg would make a same-named app/library resource a
+  // hard link error instead.
+  size_t app_idx = p->cfg->res != NULL ? 0 : (size_t)-1;
+  for (size_t i = p->aar_res_zips_count; i-- > 0;) {
+    if (i == app_idx) {
+      continue;
+    }
+    ccb_argv_push(&av, "-R");
     ccb_argv_push(&av, p->aar_res_zips[i]);
+  }
+  if (app_idx != (size_t)-1) {
+    ccb_argv_push(&av, "-R");
+    ccb_argv_push(&av, p->aar_res_zips[app_idx]);
   }
   ccb_status rc = ccb_run_tool(p, "aapt2-link", "CCB-E3003", av.v, NULL,
     "check the manifest and resource configuration");
@@ -4493,10 +4718,12 @@ static void ccb_pipe_free(ccb_pipe *p) {
   free(p->merged_manifest);
   free(p->merge_fp);
   free(p->modules_dir);
+  free(p->libraries_dir);
   ccb_free_str_array(p->merge_aar_paths, p->merge_aar_paths_count);
   ccb_free_str_array(p->merge_aar_srcs, p->merge_aar_srcs_count);
   ccb_free_str_array(p->merge_aar_names, p->merge_aar_names_count);
   ccb_free_str_array(p->aar_res_dirs, p->aar_res_dirs_count);
+  ccb_free_str_array(p->aar_res_names, p->aar_res_names_count);
   ccb_free_str_array(p->aar_res_zips, p->aar_res_zips_count);
   ccb_free_str_array(p->aar_class_jars, p->aar_class_jars_count);
   ccb_free_str_array(p->aar_packages, p->aar_packages_count);
@@ -4524,6 +4751,26 @@ ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *resu
   }
   int deps_ran = 0;
   rc = ccb_step_deps(&p, &deps_ran);
+  if (rc == CCB_OK && p.cfg->is_library) {
+    // A library project stops after deps: its single module builds
+    // the AAR, and there is no merge/link/dex/package.
+    rc = ccb_step_library(&p);
+    if (rc == CCB_OK) {
+      ccb_save_cache(&p);
+      result->steps_run = p.steps_run;
+      result->steps_skipped = p.steps_skipped;
+      result->up_to_date = (p.steps_run == 0 && !opts->dry_run && !opts->explain) ? 1 : 0;
+      result->is_library = 1;
+      result->apk_path = ccb_library_aar_path(p.cfg);
+    } else {
+      ccb_save_cache(&p);
+    }
+    ccb_pipe_free(&p);
+    return rc;
+  }
+  if (rc == CCB_OK) {
+    rc = ccb_step_libraries(&p);
+  }
   if (rc == CCB_OK) {
     rc = ccb_step_modules(&p);
   }

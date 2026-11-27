@@ -80,7 +80,7 @@ severity in the tables below and by the exit code, not by the prefix.
 | CCB-E3019 | Maven resolution failed: unresolvable coordinate, malformed or unsupported POM, or artifact not found in any configured repository |
 | CCB-E3020 | Maven checksum mismatch: downloaded or cached file does not match its published or recorded checksum |
 | CCB-E3021 | Maven artifact not in the local cache; run `ccb setup` to prefetch it (builds never download) |
-| CCB-E3022 | Library module name collides with a declared AAR's base name (their extraction paths would overwrite each other) |
+| CCB-E3022 | Library module or path-library name collides with a declared AAR's base name (their extraction paths would overwrite each other) |
 | CCB-E3023 | Maven lockfile mismatch: resolved tree deviates from `ccb.lock` (version, packaging, hash, missing, or stale entry), or the lockfile is malformed; run `ccb setup` to regenerate it |
 | CCB-E3024 | Maven parent POM chain error: a cycle in the chain, or more than 10 ancestors, naming the chain |
 | CCB-E3025 | Dex check failed: the dex references one or more classes it does not define (first 10 named, then "+ N more"), or a dex file is malformed/truncated; the build stops before packaging |

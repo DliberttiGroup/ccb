@@ -30,7 +30,8 @@ typedef struct {
   int steps_skipped;
   int up_to_date;
   int aab;
-  char *apk_path;
+  int is_library; // the build produced an .aar, not an APK/AAB
+  char *apk_path; // APK/AAB path, or the .aar path for a library build
 } ccb_build_result;
 
 // d8 heap sizing (see ccb_d8_heap_mb in ccb_pipeline.c).

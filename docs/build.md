@@ -15,19 +15,26 @@ Sub-pages: [kotlinc daemon](build-daemon.md) · [release binary](build-release.m
 | - | ----- | ------------ |
 | 0 | Load | Load + validate `ccb.toml`, report every problem at once. Resolve the toolchain. Release builds verify signing config before compiling anything. |
 | 1 | deps | Extract AARs (classes, resources, assets, JNI). |
-| 2 | merge-manifest | Merge AAR manifests into the app manifest, in config order. Output: `build/intermediates/merged-manifest/`. Skipped with no AARs. |
-| 3 | compile-res | `aapt2 compile` each resource directory into a `.flat` zip. |
-| 4 | link | `aapt2 link` into `linked.ap_`, generating `R.java`. Uses the merged manifest when AARs are present, else the app manifest. The manifest's `package` must match `[project] package`. |
-| 5 | compile-code | `kotlinc` (Kotlin + `R.java` + Java sources), then `javac` for Java sources and generated `R.java`. kotlinc resolves R symbols but emits no R.class files, so javac must compile them — otherwise library R classes are missing from the dex at runtime. Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files. When `[build] kotlin_plugins` is set, kotlinc also gets `-Xplugin=<jar>` per resolved plugin jar and `-P plugin:<id>:<key>=<value>` per `kotlin_plugin_options` entry; plugin jars and options join the compile fingerprint, so changing either recompiles (see [maven](maven.md)). |
-| 6 | dex | `d8` (or `r8` for release + minify). See below. |
-| 7 | dexcheck | Parse the dex files, verify every referenced class is defined in the dex. Referenced-but-undefined program class fails the build with `CCB-E3025` naming the missing classes, before packaging. Platform classes (`java.*`, `android.*`, …) come from `--lib` inputs, never in the dex: allowlisted, never reported. Annotation- and signature-only references still count. Runs even when dex was cache-skipped, and for AAB builds. Milliseconds, no cache of its own, doesn't count toward `steps_run`, so a no-op rebuild still reports "up to date". `--explain` prints its plan line; `--dry-run` doesn't run it. |
-| 8 | native | NDK clang per ABI (only with an `[ndk]` section). |
-| 9 | package | CCB's own ZIP writer: `linked.ap_` entries, dex files, assets (app assets win over AAR assets with the same name), `lib/<abi>/*.so` (duplicate `.so` names are an error). |
-| 10 | align | `zipalign -f 4`. |
-| 11 | sign | `apksigner`. Debug uses `~/.android/debug.keystore` (created with keytool when missing). Release uses `env:VAR` password references; passwords never appear in commands or logs. |
-| 12 | verify | `apksigner verify` and `aapt2 dump badging`. An APK counts as built only when both pass. |
+| 2 | libraries | Build each `[deps.library.<name>]` path library into `build/intermediates/libraries/<name>/<name>.aar` (a built `.aar` path joins the declared AARs in stage 0 instead). Skipped with no path libraries. See [library.md](library.md). |
+| 3 | modules | Build each `[modules.<name>]` library module into `build/intermediates/modules/<name>/<name>.aar`, in topological order. Skipped with no modules. See [modules.md](modules.md). |
+| 4 | merge-manifest | Merge AAR manifests into the app manifest, in config order. Output: `build/intermediates/merged-manifest/`. Skipped with no AARs. |
+| 5 | compile-res | `aapt2 compile` each resource directory into a `.flat` zip. |
+| 6 | link | `aapt2 link` into `linked.ap_`, generating `R.java`. Uses the merged manifest when AARs are present, else the app manifest. The manifest's `package` must match `[project] package`. Library zips link as `-R` overlays with the app zip last, so the app wins resource conflicts (see [library.md](library.md)); a resource defined by more than one source warns, naming the winner. |
+| 7 | compile-code | `kotlinc` (Kotlin + `R.java` + Java sources), then `javac` for Java sources and generated `R.java`. kotlinc resolves R symbols but emits no R.class files, so javac must compile them — otherwise library R classes are missing from the dex at runtime. Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files. When `[build] kotlin_plugins` is set, kotlinc also gets `-Xplugin=<jar>` per resolved plugin jar and `-P plugin:<id>:<key>=<value>` per `kotlin_plugin_options` entry; plugin jars and options join the compile fingerprint, so changing either recompiles (see [maven](maven.md)). |
+| 8 | dex | `d8` (or `r8` for release + minify). See below. |
+| 9 | dexcheck | Parse the dex files, verify every referenced class is defined in the dex. Referenced-but-undefined program class fails the build with `CCB-E3025` naming the missing classes, before packaging. Platform classes (`java.*`, `android.*`, …) come from `--lib` inputs, never in the dex: allowlisted, never reported. Annotation- and signature-only references still count. Runs even when dex was cache-skipped, and for AAB builds. Milliseconds, no cache of its own, doesn't count toward `steps_run`, so a no-op rebuild still reports "up to date". `--explain` prints its plan line; `--dry-run` doesn't run it. |
+| 10 | native | NDK clang per ABI (only with an `[ndk]` section). |
+| 11 | package | CCB's own ZIP writer: `linked.ap_` entries, dex files, assets (app assets win over AAR assets with the same name), `lib/<abi>/*.so` (duplicate `.so` names are an error). |
+| 12 | align | `zipalign -f 4`. |
+| 13 | sign | `apksigner`. Debug uses `~/.android/debug.keystore` (created with keytool when missing). Release uses `env:VAR` password references; passwords never appear in commands or logs. |
+| 14 | verify | `apksigner verify` and `aapt2 dump badging`. An APK counts as built only when both pass. |
 
-Merge rules (stage 2): app entries win on name conflict (warning names
+A library project (`[library]` in `ccb.toml`) runs only stages 0–2
+in the list above — deps, then its single module build into
+`build/<name>-<version>.aar` — and stops: no merge, link, dex, or
+package. See [library.md](library.md).
+
+Merge rules (stage 4): app entries win on name conflict (warning names
 the AAR and entry); identical entries from two AARs dedup silently; same
 name with different attributes keeps the first AAR's version (warning
 names both AARs). Merged: application components (`activity`, `service`,
@@ -39,7 +46,7 @@ with `CCB-E3018` before packaging; an AAR with no manifest merges as
 nothing. Fingerprinted from inputs, so `link` re-runs when any manifest
 changes.
 
-### Dex (stage 6)
+### Dex (stage 8)
 
 *ccb-build-dex*
 

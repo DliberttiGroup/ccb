@@ -7,6 +7,7 @@
 #include "ccb_config.h"
 #include "ccb_daemon.h"
 #include "ccb_manifest.h"
+#include "ccb_zip.h"
 #include <unistd.h>
 
 ccb_status ccb_config_discover(const char *start_dir, const char *explicit, char **out_path) {
@@ -537,8 +538,23 @@ void ccb_config_free(ccb_config *c) {
     free(m->kotlin_dir);
     free(m->java_dir);
     free(m->package);
+    free(m->version);
   }
   free(c->modules);
+  for (size_t i = 0; i < c->libraries_count; i++) {
+    ccb_module *m = &c->libraries[i];
+    free(m->name);
+    free(m->dir);
+    ccb_free_str_array(m->depends, m->depends_count);
+    free(m->manifest);
+    free(m->res);
+    free(m->assets);
+    free(m->kotlin_dir);
+    free(m->java_dir);
+    free(m->package);
+    free(m->version);
+  }
+  free(c->libraries);
   for (size_t i = 0; i < c->preview_scenario_count; i++) {
     ccb_scenario *sc = &c->preview_scenarios[i];
     size_t j = 0;
@@ -802,6 +818,7 @@ static void ccb_load_unknown_keys(ccb_validator *v) {
   ccb_check_unknown_keys(v, "deps", deps_keys, 7);
   ccb_check_unknown_keys(v, "ndk", ndk_keys, 3);
   ccb_check_unknown_keys(v, "preview", preview_keys, 9);
+  ccb_check_unknown_keys(v, "library", NULL, 0);
 }
 
 // Root: ccb_version.
@@ -1542,6 +1559,407 @@ static void ccb_load_modules(ccb_validator *v, const ccb_toml_doc *doc,
   ccb_sort_modules(v, c);
 }
 
+// ---------- [library] + [deps.library.<name>] ----------
+
+// The [library] table marks a project as a library: it builds an .aar,
+// not an APK. The table takes no keys; subtables are unknown tables.
+static void ccb_load_library_table(ccb_validator *v,
+    const ccb_toml_doc *doc, ccb_config *c) {
+  if (ccb_toml_find_table(doc, "library") == NULL) {
+    return;
+  }
+  c->is_library = 1;
+  ccb_check_unknown_keys(v, "library", NULL, 0);
+  for (size_t ti = 0; ti < doc->count; ti++) {
+    if (strncmp(doc->tables[ti].name, "library.", 8) == 0) {
+      ccb_vdiagf(v, "CCB-E1001", "unknown table '[%s]'",
+        doc->tables[ti].name, "");
+    }
+  }
+}
+
+// Package of an AAR's AndroidManifest.xml, or NULL when the AAR has no
+// readable manifest.
+static char *ccb_aar_package(const char *aar_path) {
+  ccb_zip_archive *a = NULL;
+  if (ccb_zip_open(aar_path, &a) != CCB_OK) {
+    return NULL;
+  }
+  char *pkg = NULL;
+  const ccb_zip_entry *e = ccb_zip_find(a, "AndroidManifest.xml");
+  if (e != NULL) {
+    void *data = NULL;
+    size_t len = 0;
+    if (ccb_zip_read_entry(a, e, &data, &len) == CCB_OK) {
+      char *text = ccb_xmalloc(len + 1);
+      memcpy(text, data, len);
+      text[len] = '\0';
+      pkg = ccb_manifest_package(text);
+      free(text);
+      free(data);
+    }
+  }
+  ccb_zip_close(a);
+  return pkg;
+}
+
+// A path library's package must exist and differ from the app package,
+// every module package, and every earlier library package.
+static void ccb_library_check_package(ccb_validator *v, ccb_config *c,
+    ccb_module *m, const char *lib_name, size_t li) {
+  if (m->package == NULL || m->package[0] == '\0') {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library '%s' manifest must declare a package attribute",
+      lib_name, "");
+    return;
+  }
+  if (c->package != NULL && strcmp(m->package, c->package) == 0) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library '%s' package must differ from the app package",
+      lib_name, "");
+    return;
+  }
+  for (size_t k = 0; k < c->modules_count; k++) {
+    if (c->modules[k].package != NULL &&
+        strcmp(c->modules[k].package, m->package) == 0) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "library '%s' and module '%s' share a package",
+        lib_name, c->modules[k].name);
+      return;
+    }
+  }
+  for (size_t k = 0; k < li; k++) {
+    if (c->libraries[k].package != NULL &&
+        strcmp(c->libraries[k].package, m->package) == 0) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "libraries '%s' and '%s' share a package",
+        c->libraries[k].name, lib_name);
+      return;
+    }
+  }
+}
+
+// One string value from a parsed library ccb.toml (table.key). Missing
+// keys are CCB-E1004, wrong types CCB-E1007; the message names the
+// library file. Returns 1 on success, 0 on failure (*out untouched).
+static int ccb_lib_get_str(ccb_validator *v, const ccb_toml_doc *doc,
+    const char *lib_toml, const char *table, const char *key,
+    char **out) {
+  const ccb_toml_table *t = ccb_toml_find_table(doc, table);
+  const ccb_toml_value *val = ccb_toml_find_value(t, key);
+  if (val == NULL) {
+    ccb_str msg;
+    ccb_str_init(&msg);
+    ccb_str_append(&msg, "library '");
+    ccb_str_append(&msg, lib_toml);
+    ccb_str_append(&msg, "' is missing required key '");
+    ccb_str_append(&msg, table);
+    ccb_str_append(&msg, ".");
+    ccb_str_append(&msg, key);
+    ccb_str_append(&msg, "'");
+    ccb_diag d = ccb_diag_make("CCB-E1004", "config", msg.buf);
+    ccb_str_free(&msg);
+    ccb_diag_list_push(v->diags, &d);
+    return 0;
+  }
+  if (val->type != CCB_TOML_STRING) {
+    ccb_str msg;
+    ccb_str_init(&msg);
+    ccb_str_append(&msg, "library '");
+    ccb_str_append(&msg, lib_toml);
+    ccb_str_append(&msg, "' key '");
+    ccb_str_append(&msg, table);
+    ccb_str_append(&msg, ".");
+    ccb_str_append(&msg, key);
+    ccb_str_append(&msg, "' must be a string");
+    ccb_diag d = ccb_diag_make("CCB-E1007", "config", msg.buf);
+    ccb_str_free(&msg);
+    ccb_diag_list_push(v->diags, &d);
+    return 0;
+  }
+  *out = ccb_xstrdup(val->str);
+  return 1;
+}
+
+// Optional string value from a parsed library ccb.toml: NULL when the
+// key is absent (wrong types are still an error, as above).
+static int ccb_lib_get_opt_str(ccb_validator *v, const ccb_toml_doc *doc,
+    const char *lib_toml, const char *table, const char *key,
+    char **out) {
+  const ccb_toml_table *t = ccb_toml_find_table(doc, table);
+  const ccb_toml_value *val = ccb_toml_find_value(t, key);
+  *out = NULL;
+  if (val == NULL) {
+    return 1;
+  }
+  return ccb_lib_get_str(v, doc, lib_toml, table, key, out);
+}
+
+// Standard-layout inputs under a library project root: the manifest is
+// required, res/assets/kotlin/java are present only when the directory
+// exists on disk. Paths in [paths] override the standard layout.
+static void ccb_library_layout(ccb_validator *v, const ccb_toml_doc *doc,
+    const char *lib_toml, ccb_module *m) {
+  char *p = NULL;
+  if (!ccb_lib_get_opt_str(v, doc, lib_toml, "paths", "manifest", &p)) {
+    return;
+  }
+  if (p != NULL) {
+    m->manifest = ccb_resolve(m->dir, p);
+    free(p);
+  } else {
+    m->manifest = ccb_path_join3(m->dir, "src/main",
+      "AndroidManifest.xml");
+  }
+  if (!ccb_path_exists(m->manifest) || ccb_path_is_dir(m->manifest)) {
+    ccb_vdiagf(v, "CCB-E1006", "library manifest does not exist: %s",
+      m->manifest, "");
+    return;
+  }
+  char *text = NULL;
+  size_t len = 0;
+  if (ccb_read_file(m->manifest, &text, &len) == CCB_OK) {
+    m->package = ccb_manifest_package(text);
+    free(text);
+  }
+  const char *keys[4] = { "res", "assets", "kotlin", "java" };
+  char **slots[4] = { &m->res, &m->assets, &m->kotlin_dir, &m->java_dir };
+  for (size_t i = 0; i < 4; i++) {
+    char *rel = NULL;
+    if (!ccb_lib_get_opt_str(v, doc, lib_toml, "paths", keys[i], &rel)) {
+      return;
+    }
+    char *cand = NULL;
+    if (rel != NULL) {
+      cand = ccb_resolve(m->dir, rel);
+      free(rel);
+    } else {
+      cand = ccb_path_join3(m->dir, "src/main", keys[i]);
+    }
+    if (ccb_path_is_dir(cand)) {
+      *slots[i] = cand;
+    } else {
+      free(cand);
+    }
+  }
+}
+
+// Register one library project dir: read its ccb.toml minimally (no
+// recursive config load, so a library cycle cannot recurse). The
+// library must declare [library], a [project] name/version/package,
+// and a manifest whose package matches [project] package; it must not
+// declare its own deps, modules, or NDK (a path library is built with
+// the app's toolchain and classpath).
+static void ccb_library_register_project(ccb_validator *v,
+    ccb_config *c, ccb_module *m, size_t li, const char *lib_name) {
+  char *lib_toml = ccb_path_join(m->dir, "ccb.toml");
+  if (!ccb_path_exists(lib_toml) || ccb_path_is_dir(lib_toml)) {
+    ccb_vdiagf(v, "CCB-E1006", "library project has no ccb.toml: %s",
+      lib_toml, "");
+    free(lib_toml);
+    return;
+  }
+  char *text = NULL;
+  size_t len = 0;
+  if (ccb_read_file(lib_toml, &text, &len) != CCB_OK) {
+    ccb_vdiagf(v, "CCB-E1006", "cannot read library ccb.toml: %s",
+      lib_toml, "");
+    free(lib_toml);
+    return;
+  }
+  ccb_toml_error *perrors = NULL;
+  size_t nperrors = 0;
+  ccb_toml_doc *doc = ccb_toml_parse(text, &perrors, &nperrors);
+  free(text);
+  if (doc == NULL) {
+    for (size_t i = 0; i < nperrors; i++) {
+      ccb_diag d = ccb_diag_make("CCB-E1008", "config", perrors[i].message);
+      d.file = ccb_xstrdup(lib_toml);
+      d.line = perrors[i].line;
+      ccb_diag_list_push(v->diags, &d);
+    }
+    ccb_toml_free_errors(perrors, nperrors);
+    free(lib_toml);
+    return;
+  }
+  if (ccb_toml_find_table(doc, "library") == NULL) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library path '%s' is not a library project (no [library] table)",
+      m->dir, "");
+    ccb_toml_free_doc(doc);
+    free(lib_toml);
+    return;
+  }
+  const ccb_toml_table *deps = ccb_toml_find_table(doc, "deps");
+  if (deps != NULL && (ccb_toml_find_value(deps, "jars") != NULL ||
+      ccb_toml_find_value(deps, "aars") != NULL ||
+      ccb_toml_find_value(deps, "maven") != NULL)) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library '%s' cannot declare its own [deps] jars/aars/maven",
+      lib_name, "");
+    ccb_toml_free_doc(doc);
+    free(lib_toml);
+    return;
+  }
+  int bad = 0;
+  for (size_t ti = 0; ti < doc->count; ti++) {
+    if (strncmp(doc->tables[ti].name, "modules.", 8) == 0 ||
+        strcmp(doc->tables[ti].name, "ndk") == 0) {
+      bad = 1;
+      break;
+    }
+  }
+  if (bad) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library '%s' cannot declare modules or [ndk]", lib_name, "");
+    ccb_toml_free_doc(doc);
+    free(lib_toml);
+    return;
+  }
+  char *proj_name = NULL;
+  char *proj_version = NULL;
+  char *proj_package = NULL;
+  if (!ccb_lib_get_str(v, doc, lib_toml, "project", "name", &proj_name) ||
+      !ccb_lib_get_str(v, doc, lib_toml, "project", "version",
+        &proj_version) ||
+      !ccb_lib_get_str(v, doc, lib_toml, "project", "package",
+        &proj_package)) {
+    free(proj_name);
+    free(proj_version);
+    free(proj_package);
+    ccb_toml_free_doc(doc);
+    free(lib_toml);
+    return;
+  }
+  free(proj_name);
+  m->version = proj_version;
+  ccb_library_layout(v, doc, lib_toml, m);
+  if (m->package != NULL && proj_package != NULL &&
+      strcmp(m->package, proj_package) != 0) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library '%s' manifest package does not match its project.package",
+      lib_name, "");
+  }
+  free(proj_package);
+  ccb_toml_free_doc(doc);
+  free(lib_toml);
+  if (m->package != NULL) {
+    ccb_library_check_package(v, c, m, lib_name, li);
+  }
+}
+
+// Register one [deps.library.<name>] table: path is a library project
+// dir or a built .aar file.
+static void ccb_library_register(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c, const char *tname, const char *lib_name) {
+  static const char *library_keys[] = { "path" };
+  ccb_check_unknown_keys(v, tname, library_keys, 1);
+  size_t li = c->libraries_count++;
+  c->libraries = ccb_xrealloc(c->libraries,
+    c->libraries_count * sizeof(*c->libraries));
+  ccb_module *m = &c->libraries[li];
+  memset(m, 0, sizeof(*m));
+  m->name = ccb_xstrdup(lib_name);
+  char *path = NULL;
+  if (!ccb_get_str(v, tname, "path", &path)) {
+    if (!ccb_key_present(doc, tname, "path")) {
+      ccb_vdiagf(v, "CCB-E1004", "missing required key '%s.path'", tname, "");
+    }
+  } else {
+    m->dir = ccb_resolve(c->project_root, path);
+    free(path);
+  }
+  if (m->dir == NULL) {
+    return;
+  }
+  if (!ccb_path_exists(m->dir)) {
+    ccb_vdiagf(v, "CCB-E1006", "library path does not exist: %s",
+      m->dir, "");
+    return;
+  }
+  if (ccb_path_is_dir(m->dir)) {
+    ccb_library_register_project(v, c, m, li, lib_name);
+    return;
+  }
+  size_t len = strlen(m->dir);
+  if (len < 5 || strcmp(m->dir + len - 4, ".aar") != 0) {
+    ccb_vdiagf(v, "CCB-E1005",
+      "library path '%s' is neither a directory nor an .aar file",
+      m->dir, "");
+    return;
+  }
+  m->is_file = 1;
+  m->package = ccb_aar_package(m->dir);
+  ccb_library_check_package(v, c, m, lib_name, li);
+}
+
+// [deps.library.<name>] path libraries.
+static void ccb_load_dep_libraries(ccb_validator *v,
+    const ccb_toml_doc *doc, ccb_config *c) {
+  for (size_t ti = 0; ti < doc->count; ti++) {
+    const char *tname = doc->tables[ti].name;
+    if (strcmp(tname, "deps.library") == 0) {
+      ccb_vdiagf(v, "CCB-E1001", "unknown table '[%s]'", tname, "");
+      continue;
+    }
+    if (strncmp(tname, "deps.library.", 13) != 0) {
+      continue;
+    }
+    const char *lib_name = tname + 13;
+    if (lib_name[0] == '\0' || strchr(lib_name, '.') != NULL) {
+      ccb_vdiagf(v, "CCB-E1001", "unknown table '[%s]'", tname, "");
+      continue;
+    }
+    if (strchr(lib_name, '/') != NULL || strchr(lib_name, '\\') != NULL ||
+        strcmp(lib_name, ".") == 0 || strcmp(lib_name, "..") == 0) {
+      ccb_vdiagf(v, "CCB-E1005", "invalid library name '%s'", lib_name, "");
+      continue;
+    }
+    int dup = 0;
+    for (size_t i = 0; i < c->libraries_count; i++) {
+      if (strcmp(c->libraries[i].name, lib_name) == 0) {
+        dup = 1;
+        break;
+      }
+    }
+    if (dup) {
+      ccb_vdiagf(v, "CCB-E1005", "duplicate library '%s'", lib_name, "");
+      continue;
+    }
+    if (ccb_find_module(c, lib_name) != NULL) {
+      ccb_vdiagf(v, "CCB-E1005",
+        "library '%s' collides with a module of the same name",
+        lib_name, "");
+      continue;
+    }
+    ccb_library_register(v, doc, c, tname, lib_name);
+  }
+}
+
+// A library project cannot contain modules or NDK, declare its own
+// deps, or consume path libraries: it is built with the consuming
+// app's toolchain and classpath.
+static void ccb_check_library_rules(ccb_validator *v, ccb_config *c) {
+  if (!c->is_library) {
+    return;
+  }
+  if (c->modules_count > 0) {
+    ccb_vdiag(v, "CCB-E1005",
+      "library projects cannot declare [modules.<name>] tables");
+  }
+  if (c->has_ndk) {
+    ccb_vdiag(v, "CCB-E1005", "library projects cannot declare [ndk]");
+  }
+  if (c->jars_count > 0 || c->aars_count > 0 || c->maven_count > 0) {
+    ccb_vdiag(v, "CCB-E1005",
+      "library projects cannot declare [deps] jars/aars/maven");
+  }
+  if (c->libraries_count > 0) {
+    ccb_vdiag(v, "CCB-E1005",
+      "library projects cannot consume path libraries");
+  }
+}
+
 // Path existence checks (only when no earlier error already explains
 // the path, and only for declared paths).
 static void ccb_check_paths(ccb_validator *v, ccb_config *c) {
@@ -1661,6 +2079,9 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   ccb_load_preview(&v, doc, c);
   ccb_load_scenarios(&v, doc, c);
   ccb_load_modules(&v, doc, c);
+  ccb_load_library_table(&v, doc, c);
+  ccb_load_dep_libraries(&v, doc, c);
+  ccb_check_library_rules(&v, c);
   ccb_check_paths(&v, c);
 
   ccb_toml_free_doc(doc);

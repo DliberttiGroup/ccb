@@ -14,6 +14,7 @@
 #include "ccb_daemon.h"
 #include "ccb_sdk.h"
 #include "ccb_pipeline.h"
+#include "ccb_zip.h"
 #include "ccb_preview.h"
 #include "ccb_preview_lsp.h"
 #include "ccb_preview_tree.h"
@@ -2052,6 +2053,162 @@ static int ccb_run_preview_gate(ccb_args *a, ccb_config *cfg) {
   return 0;
 }
 
+// ---------- `ccb check` library report ----------
+
+// AAR contents summary for `ccb check` library lines.
+typedef struct {
+  int exists;
+  int has_classes;
+  size_t res_files;
+  size_t r_symbols;
+  size_t assets;
+} ccb_aar_summary;
+
+// Non-empty lines in text (R.txt has one symbol per line).
+static size_t ccb_count_lines(const char *text, size_t len) {
+  size_t count = 0;
+  size_t at = 0;
+  while (at < len) {
+    size_t end = at;
+    while (end < len && text[end] != '\n') {
+      end++;
+    }
+    int nonempty = 0;
+    for (size_t k = at; k < end; k++) {
+      if (text[k] != '\r' && text[k] != ' ' && text[k] != '\t') {
+        nonempty = 1;
+        break;
+      }
+    }
+    if (nonempty) {
+      count++;
+    }
+    at = end + 1;
+  }
+  return count;
+}
+
+static void ccb_aar_summarize(const char *path, ccb_aar_summary *s) {
+  memset(s, 0, sizeof(*s));
+  if (path == NULL || !ccb_path_exists(path)) {
+    return;
+  }
+  ccb_zip_archive *a = NULL;
+  if (ccb_zip_open(path, &a) != CCB_OK) {
+    return;
+  }
+  s->exists = 1;
+  for (size_t i = 0; i < a->count; i++) {
+    const char *name = a->entries[i].name;
+    if (strcmp(name, "classes.jar") == 0) {
+      s->has_classes = 1;
+    } else if (strncmp(name, "res/", 4) == 0) {
+      s->res_files++;
+    } else if (strncmp(name, "assets/", 7) == 0) {
+      s->assets++;
+    }
+  }
+  const ccb_zip_entry *rtxt = ccb_zip_find(a, "R.txt");
+  if (rtxt != NULL) {
+    void *data = NULL;
+    size_t len = 0;
+    if (ccb_zip_read_entry(a, rtxt, &data, &len) == CCB_OK) {
+      s->r_symbols = ccb_count_lines(data, len);
+      free(data);
+    }
+  }
+  ccb_zip_close(a);
+}
+
+// "(classes.jar, 3 res files, 2 R symbols)" or "(not built yet)".
+static void ccb_aar_summary_text(const ccb_aar_summary *s, ccb_str *out) {
+  if (!s->exists) {
+    ccb_str_append(out, "(not built yet)");
+    return;
+  }
+  ccb_str_append(out, "(");
+  ccb_str_append(out, s->has_classes ? "classes.jar" : "no classes.jar");
+  ccb_str_appendf(out, ", %zu res files, %zu R symbols", s->res_files,
+    s->r_symbols);
+  if (s->assets > 0) {
+    ccb_str_appendf(out, ", %zu assets", s->assets);
+  }
+  ccb_str_append(out, ")");
+}
+
+// Human check lines for one library: header line + AAR summary line.
+static void ccb_check_print_library(const char *header,
+    const char *aar_path) {
+  ccb_aar_summary sum;
+  ccb_aar_summarize(aar_path, &sum);
+  ccb_str t;
+  ccb_str_init(&t);
+  ccb_aar_summary_text(&sum, &t);
+  printf("  library %s\n    aar: %s %s\n", header, aar_path, t.buf);
+  ccb_str_free(&t);
+}
+
+// One JSON library object (no surrounding comma handling: the caller
+// tracks it).
+static void ccb_check_json_library(ccb_str *s, const char *name,
+    const char *version, const char *package, const char *source,
+    const char *ref, const char *aar_path) {
+  ccb_aar_summary sum;
+  ccb_aar_summarize(aar_path, &sum);
+  ccb_str_append(s, "{\"name\":");
+  ccb_json_escape(s, name);
+  ccb_str_append(s, ",\"version\":");
+  if (version != NULL) {
+    ccb_json_escape(s, version);
+  } else {
+    ccb_str_append(s, "null");
+  }
+  ccb_str_append(s, ",\"package\":");
+  if (package != NULL) {
+    ccb_json_escape(s, package);
+  } else {
+    ccb_str_append(s, "null");
+  }
+  ccb_str_append(s, ",\"source\":");
+  ccb_json_escape(s, source);
+  ccb_str_append(s, ",\"ref\":");
+  ccb_json_escape(s, ref);
+  ccb_str_append(s, ",\"aar\":");
+  ccb_json_escape(s, aar_path);
+  ccb_str_appendf(s, ",\"built\":%s,\"classes\":%s,\"res_files\":%zu,"
+    "\"r_symbols\":%zu}",
+    sum.exists ? "true" : "false",
+    sum.has_classes ? "true" : "false", sum.res_files, sum.r_symbols);
+}
+
+// Output AAR of a library project: build/<name>-<version>.aar.
+static char *ccb_check_library_aar_path(const ccb_config *cfg) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, cfg->build_dir);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, cfg->name);
+  ccb_str_append_c(&s, '-');
+  ccb_str_append(&s, cfg->version);
+  ccb_str_append(&s, ".aar");
+  return ccb_str_steal(&s);
+}
+
+// Built AAR of a consumed path library:
+// build/intermediates/libraries/<name>/<name>.aar.
+static char *ccb_check_pathlib_aar_path(const ccb_config *cfg,
+    const char *name) {
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, cfg->build_dir);
+  ccb_str_append(&s, "/intermediates/libraries/");
+  ccb_str_append(&s, name);
+  ccb_str_append_c(&s, '/');
+  ccb_str_append(&s, name);
+  ccb_str_append(&s, ".aar");
+  return ccb_str_steal(&s);
+}
+
 static int ccb_cmd_check(ccb_args *a) {
   ccb_diag_list diags;
   ccb_config *cfg = NULL;
@@ -2076,12 +2233,15 @@ static int ccb_cmd_check(ccb_args *a) {
   }
   // Maven dependencies (cache-only): a missing prefetch is reported
   // here, not as a surprise at build time. The counts print with the
-  // rest of the report below, after the ok line.
+  // rest of the report below, after the ok line. The result stays
+  // alive until the report is printed (library lines need the AAR
+  // entries), so it is freed at the exits below.
   size_t mv_aars = 0;
   size_t mv_jars = 0;
   int have_maven = 0;
+  ccb_maven_result mv;
+  memset(&mv, 0, sizeof(mv));
   if (cfg->maven_count > 0) {
-    ccb_maven_result mv;
     if (ccb_maven_resolve(cfg, 0, a->verbose, 0, &mv, &diags) != CCB_OK) {
       ccb_print_diags(a, &diags);
       ccb_sdk_free(sdk);
@@ -2092,7 +2252,6 @@ static int ccb_cmd_check(ccb_args *a) {
     mv_aars = mv.aars_count;
     mv_jars = mv.jars_count;
     have_maven = 1;
-    ccb_maven_result_free(&mv);
   }
   // Compiler plugins (cache-only): same treatment as Maven deps.
   size_t nplugins = 0;
@@ -2105,6 +2264,7 @@ static int ccb_cmd_check(ccb_args *a) {
       ccb_sdk_free(sdk);
       ccb_config_free(cfg);
       ccb_diag_list_free(&diags);
+      ccb_maven_result_free(&mv);
       return 3;
     }
     have_plugins = 1;
@@ -2120,6 +2280,7 @@ static int ccb_cmd_check(ccb_args *a) {
       ccb_sdk_free(sdk);
       ccb_config_free(cfg);
       ccb_diag_list_free(&diags);
+      ccb_maven_result_free(&mv);
       return gate;
     }
   }
@@ -2147,6 +2308,66 @@ static int ccb_cmd_check(ccb_args *a) {
     ccb_str_append(&s, ",\"kotlin\":");
     ccb_json_escape(&s, sdk->kotlin_version);
     ccb_str_appendf(&s, ",\"java\":%d", sdk->java_major);
+    if (cfg->is_library) {
+      char *aar_path = ccb_check_library_aar_path(cfg);
+      ccb_str_append(&s, ",\"library\":");
+      ccb_check_json_library(&s, cfg->name, cfg->version, cfg->package,
+        "self", cfg->project_root, aar_path);
+      free(aar_path);
+    }
+    {
+      int lib_first = 1;
+      ccb_str_append(&s, ",\"libraries\":[");
+      for (size_t i = 0; i < cfg->libraries_count; i++) {
+        ccb_module *m = &cfg->libraries[i];
+        char *aar_path = m->is_file ? ccb_xstrdup(m->dir)
+          : ccb_check_pathlib_aar_path(cfg, m->name);
+        if (!lib_first) {
+          ccb_str_append_c(&s, ',');
+        }
+        lib_first = 0;
+        ccb_check_json_library(&s, m->name, m->version, m->package,
+          m->is_file ? "file" : "path", m->dir, aar_path);
+        free(aar_path);
+      }
+      if (have_maven) {
+        for (size_t i = 0; i < mv.entries_count; i++) {
+          ccb_maven_entry *e = &mv.entries[i];
+          if (strcmp(e->packaging, "aar") != 0) {
+            continue;
+          }
+          ccb_str coord;
+          ccb_str_init(&coord);
+          ccb_str_append(&coord, e->group);
+          ccb_str_append_c(&coord, ':');
+          ccb_str_append(&coord, e->artifact);
+          ccb_str_append_c(&coord, ':');
+          ccb_str_append(&coord, e->version);
+          if (!lib_first) {
+            ccb_str_append_c(&s, ',');
+          }
+          lib_first = 0;
+          ccb_check_json_library(&s, e->artifact, e->version, NULL,
+            "maven", coord.buf, e->path);
+          ccb_str_free(&coord);
+        }
+      }
+      for (size_t i = 0; i < cfg->aars_count; i++) {
+        char *base = ccb_basename(cfg->aars[i]);
+        char *dot = strrchr(base, '.');
+        if (dot != NULL) {
+          *dot = '\0';
+        }
+        if (!lib_first) {
+          ccb_str_append_c(&s, ',');
+        }
+        lib_first = 0;
+        ccb_check_json_library(&s, base, NULL, NULL, "file",
+          cfg->aars[i], cfg->aars[i]);
+        free(base);
+      }
+      ccb_str_append_c(&s, ']');
+    }
     if (have_maven && cfg->maven_exclude_count > 0) {
       ccb_str_append(&s, ",\"maven_excluded\":[");
       for (size_t i = 0; i < cfg->maven_exclude_count; i++) {
@@ -2187,10 +2408,85 @@ static int ccb_cmd_check(ccb_args *a) {
       }
       printf("\n");
     }
+    if (cfg->is_library) {
+      char *aar_path = ccb_check_library_aar_path(cfg);
+      ccb_str h;
+      ccb_str_init(&h);
+      ccb_str_append(&h, cfg->name);
+      ccb_str_append_c(&h, ' ');
+      ccb_str_append(&h, cfg->version);
+      ccb_str_append(&h, " (");
+      ccb_str_append(&h, cfg->package);
+      ccb_str_append_c(&h, ')');
+      ccb_check_print_library(h.buf, aar_path);
+      ccb_str_free(&h);
+      free(aar_path);
+    }
+    for (size_t i = 0; i < cfg->libraries_count; i++) {
+      ccb_module *m = &cfg->libraries[i];
+      ccb_str h;
+      ccb_str_init(&h);
+      ccb_str_append(&h, m->name);
+      if (m->version != NULL) {
+        ccb_str_append_c(&h, ' ');
+        ccb_str_append(&h, m->version);
+      }
+      if (m->package != NULL) {
+        ccb_str_append(&h, " (");
+        ccb_str_append(&h, m->package);
+        ccb_str_append_c(&h, ')');
+      }
+      if (m->is_file) {
+        ccb_str_append(&h, " file ");
+        ccb_str_append(&h, m->dir);
+        ccb_check_print_library(h.buf, m->dir);
+      } else {
+        ccb_str_append(&h, " path ");
+        ccb_str_append(&h, m->dir);
+        char *aar_path = ccb_check_pathlib_aar_path(cfg, m->name);
+        ccb_check_print_library(h.buf, aar_path);
+        free(aar_path);
+      }
+      ccb_str_free(&h);
+    }
+    if (have_maven) {
+      for (size_t i = 0; i < mv.entries_count; i++) {
+        ccb_maven_entry *e = &mv.entries[i];
+        if (strcmp(e->packaging, "aar") != 0) {
+          continue;
+        }
+        ccb_str h;
+        ccb_str_init(&h);
+        ccb_str_append(&h, e->group);
+        ccb_str_append_c(&h, ':');
+        ccb_str_append(&h, e->artifact);
+        ccb_str_append_c(&h, ':');
+        ccb_str_append(&h, e->version);
+        ccb_str_append(&h, " maven");
+        ccb_check_print_library(h.buf, e->path);
+        ccb_str_free(&h);
+      }
+    }
+    for (size_t i = 0; i < cfg->aars_count; i++) {
+      char *base = ccb_basename(cfg->aars[i]);
+      char *dot = strrchr(base, '.');
+      if (dot != NULL) {
+        *dot = '\0';
+      }
+      ccb_str h;
+      ccb_str_init(&h);
+      ccb_str_append(&h, base);
+      ccb_str_append(&h, " file ");
+      ccb_str_append(&h, cfg->aars[i]);
+      ccb_check_print_library(h.buf, cfg->aars[i]);
+      ccb_str_free(&h);
+      free(base);
+    }
   }
   ccb_sdk_free(sdk);
   ccb_config_free(cfg);
   ccb_diag_list_free(&diags);
+  ccb_maven_result_free(&mv);
   return 0;
 }
 
@@ -2251,7 +2547,7 @@ static int ccb_cmd_build(ccb_args *a) {
       ccb_str s;
       ccb_str_init(&s);
       ccb_str_append(&s, "{\"event\":\"build_done\",\"");
-      ccb_str_append(&s, result.aab ? "aab" : "apk");
+      ccb_str_append(&s, result.is_library ? "aar" : result.aab ? "aab" : "apk");
       ccb_str_append(&s, "\":");
       ccb_json_escape(&s, result.apk_path);
       ccb_str_appendf(&s, ",\"steps_run\":%d,\"steps_skipped\":%d,\"up_to_date\":%s}",
