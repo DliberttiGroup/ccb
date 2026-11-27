@@ -7,13 +7,13 @@
 Build CCB first ([README](../README.md#build-from-source)). Then:
 
 ```
-ctest --test-dir build -L fast     # quick gate: 46 tests, ~16s quiet
+ctest --test-dir build -L fast     # quick gate: 47 tests, ~16s quiet
                                    # (~45s when the VM is busy)
 ctest --test-dir build -L <area>   # one area: config, setup, pipeline,
                                    # preview, misc, dexcheck, daemon,
                                    # maven, modules, library
 ctest --test-dir build -LE slow    # same as -L fast
-ctest --test-dir build             # full suite: 56 tests; runs in CI
+ctest --test-dir build             # full suite: 58 tests; runs in CI
 ```
 
 Every test has two labels: speed (`fast` / `slow`) and area. Fast means
@@ -36,4 +36,4 @@ runs): run them sequentially. Each test binary uses a per-process `mkdtemp`
 dir (`/tmp/ccb_test_<name>_XXXXXX`), so parallel tests within one `ctest
 --jN` run can't collide — but two concurrent `ctest` runs still share CPU
 and memory. On this VM `-j4` plain measured 1037s vs 739s sequential, `-j2`
-1082s (2026-11-25, 47 tests). 56 tests total.
+1082s (2026-11-25, 47 tests). 58 tests total.

@@ -152,6 +152,11 @@ ccb_status ccb_step_sign(ccb_pipe *p) {
     ccb_str_append(&fpbuf, keystore_hash);
     free(keystore_hash);
   }
+  // The alias selects the signing key: changing it must re-sign, or
+  // the build ships an APK signed with the previous key (the keystore
+  // path and hash alone cannot see the switch).
+  ccb_str_append_c(&fpbuf, '|');
+  ccb_str_append(&fpbuf, alias == NULL ? "" : alias);
   char *fp = ccb_str_steal(&fpbuf);
   const char *old = ccb_cache_step_fp(p->cache, sign_key);
   if (p->opts->explain) {

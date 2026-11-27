@@ -255,10 +255,12 @@ ccb_status ccb_step_native(ccb_pipe *p) {
   }
   // [cmake] replaces the clang-per-source step: CMake drives the
   // build per ABI, and the .so files land in intermediates/jni/<abi>/
-  // exactly like [ndk]-built libs. The fingerprint is the CMakeLists
-  // file itself; CMake handles incrementality inside its own build
-  // directory, so the step is skipped only when the lists file is
-  // unchanged and its outputs are already in place.
+  // exactly like [ndk]-built libs. The fingerprint covers every
+  // configure input, not just the lists file: NDK (toolchain),
+  // min_sdk (ANDROID_PLATFORM), variant (CMAKE_BUILD_TYPE), and the
+  // declared extra args. CMake handles incrementality inside its own
+  // build directory, so the step is skipped only when all of these
+  // are unchanged and its outputs are already in place.
   if (p->cfg->has_cmake) {
     int any_ran = 0;
     for (size_t ai = 0; ai < p->cfg->ndk_abis_count; ai++) {
@@ -268,6 +270,12 @@ ccb_status ccb_step_native(ccb_pipe *p) {
       {
         ccb_fp_builder b;
         memset(&b, 0, sizeof(b));
+        ccb_fp_add(&b, "ndk", p->cfg->ndk_version);
+        ccb_fp_addl(&b, "min_sdk", p->cfg->min_sdk);
+        ccb_fp_add(&b, "variant", p->cfg->variant);
+        for (size_t i = 0; i < p->cfg->cmake_args_count; i++) {
+          ccb_fp_add(&b, "cmake_arg", p->cfg->cmake_args[i]);
+        }
         ccb_fp_add_file(p, &b, p->cfg->cmake_lists);
         fp = ccb_cache_fingerprint((const char **)b.keys,
           (const char **)b.vals, b.count);

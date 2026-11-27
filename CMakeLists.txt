@@ -66,6 +66,11 @@ foreach(test_src ${CCB_TEST_SOURCES})
     # deleted/truncated intermediates between rebuilds).
     add_test(NAME ${test_name} COMMAND ${test_name})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 600)
+  elseif(test_name STREQUAL "test_cache_regression")
+    # Runs ~25 real `ccb build`s (hello mutation series, AAR
+    # variants, cmake) plus keytool/apksigner subprocesses.
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 900)
   elseif(test_name STREQUAL "test_dexcheck")
     # Runs three real `ccb build`s (hello, hello --aab, negative)
     # plus kotlinc/d8 subprocesses.
@@ -119,16 +124,16 @@ add_test(NAME fuzz_preview_flow
 # Test labels: speed (fast/slow) + area. Every test gets exactly one of
 # each. `ctest -L fast` is the quick gate (no real Android build, seconds);
 # `ctest -L <area>` runs one area; plain `ctest` runs the full suite.
-# fast counts: config 2, setup 2, pipeline 6, preview 29, tui 1,
-# misc 5, graph 1 (= 46).
-# slow counts: pipeline 4, dexcheck 1, daemon 1, maven 1, modules 1,
-# library 1, native 1 (= 10).
+# fast counts: config 2, setup 2, pipeline 7, preview 29, tui 1,
+# misc 5, graph 1 (= 47).
+# slow counts: pipeline 5, dexcheck 1, daemon 1, maven 1, modules 1,
+# library 1, native 1 (= 11).
 set_tests_properties(test_config test_toml
   PROPERTIES LABELS "fast;config")
 set_tests_properties(test_sdk_tools test_setup
   PROPERTIES LABELS "fast;setup")
-set_tests_properties(test_bundle test_cache test_d8_heap test_manifest_merge
-  test_probes test_resns
+set_tests_properties(test_bundle test_cache test_cache_meta test_d8_heap
+  test_manifest_merge test_probes test_resns
   PROPERTIES LABELS "fast;pipeline")
 set_tests_properties(test_preview test_preview_cli_gate_diff
   test_preview_correctness_a test_preview_correctness_b
@@ -145,7 +150,7 @@ set_tests_properties(test_hash test_json test_proc test_str test_zip
 set_tests_properties(test_graph PROPERTIES LABELS "fast;graph")
 set_tests_properties(test_tui PROPERTIES LABELS "fast;tui")
 set_tests_properties(test_aab test_dex_contents test_r8_minify
-  test_cache_outputs
+  test_cache_outputs test_cache_regression
   PROPERTIES LABELS "slow;pipeline")
 set_tests_properties(test_dexcheck PROPERTIES LABELS "slow;dexcheck")
 set_tests_properties(test_kotlinc_daemon PROPERTIES LABELS "slow;daemon")

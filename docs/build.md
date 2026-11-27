@@ -118,6 +118,9 @@ CCB-built bundles.
 
 Per step: each fingerprint hashes inputs (file contents + relevant config
 values + tool versions). Unchanged step is skipped, previous outputs reused.
+The full task → fingerprint-input table is
+[cache-fingerprints.md](cache-fingerprints.md); it is verified against the
+code by `test_cache_meta`.
 
 - Comment-only Kotlin change re-runs kotlinc (source hash changed) but
   skips dex and downstream: `.class` files — and every downstream

@@ -15,6 +15,7 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [graph.md](graph.md) | Task graph engine: task model, validation, plan, build summary |
 | [architecture-audit.md](architecture-audit.md) | Phase 0 audit: layer map, coupling, correctness risks, migration plan per phase, scope freeze, benchmark baseline |
 | [remediation-baseline.md](remediation-baseline.md) | Step 1 remediation baseline: branch/commit, fast-suite result, benchmark status, verified findings, work queue for Steps 2–12 |
+| [cache-fingerprints.md](cache-fingerprints.md) | Step 3 fingerprint table: task → fingerprint inputs, config coverage, verified against the code by test_cache_meta |
 | [build-daemon.md](build-daemon.md) | Opt-in kotlinc daemon |
 | [build-release.md](build-release.md) | Static + stripped release binary |
 | [build-tests.md](build-tests.md) | Running the test suite |
@@ -109,6 +110,7 @@ Every section carries a `*ccb-<slug>*` tag. Find a section by tag here.
 | `*ccb-build-dex*` | build.md | Dex |
 | `*ccb-build-aab*` | build.md | AAB output |
 | `*ccb-build-cache*` | build.md | Caching |
+| `*ccb-cache-fingerprints*` | cache-fingerprints.md | Task → fingerprint inputs table |
 | `*ccb-build-reproducible*` | build.md | Reproducible builds |
 | `*ccb-build-limits*` | build.md | Known limits |
 | `*ccb-build-daemon*` | build-daemon.md | Kotlinc daemon |
