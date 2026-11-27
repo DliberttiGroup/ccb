@@ -209,9 +209,45 @@ static char *ccb_native_fingerprint(ccb_pipe *p, const char *abi,
   return fp;
 }
 
+// True when path is a whole native library: non-empty with the
+// ELF magic. A truncated .so would otherwise be packaged and
+// shipped: the package fingerprint hashes the current (truncated)
+// bytes, so only the .so check itself can catch it.
+static int ccb_native_so_valid(const char *path) {
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 8) {
+    return 0;
+  }
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return 0;
+  }
+  unsigned char head[4];
+  size_t n = fread(head, 1, sizeof(head), f);
+  fclose(f);
+  return n == sizeof(head) && head[0] == 0x7F && head[1] == 'E' &&
+    head[2] == 'L' && head[3] == 'F';
+}
+
+// True when abi_dir holds at least one whole .so.
+static int ccb_native_abi_sos_valid(const char *abi_dir) {
+  char **sos = NULL;
+  size_t nsos = 0;
+  if (ccb_collect_files(abi_dir, ".so", &sos, &nsos) != CCB_OK) {
+    return 0;
+  }
+  int ok = nsos > 0;
+  for (size_t i = 0; i < nsos && ok; i++) {
+    if (!ccb_native_so_valid(sos[i])) {
+      ok = 0;
+    }
+  }
+  ccb_free_str_array(sos, nsos);
+  return ok;
+}
+
 ccb_status ccb_step_native(ccb_pipe *p) {
-  if (!p->cfg->has_ndk) {
-    if (p->opts->explain) {
+  if (!p->cfg->has_ndk) {    if (p->opts->explain) {
       printf("native: skip (no [ndk] section)\n");
     }
     p->native_will_run = 0;
@@ -241,11 +277,7 @@ ccb_status ccb_step_native(ccb_pipe *p) {
         ccb_fp_free(&b);
       }
       char *abi_dir = ccb_path_join3(p->intermediates, "jni", abi);
-      char **sos = NULL;
-      size_t nsos = 0;
-      int has_so = ccb_collect_files(abi_dir, ".so", &sos, &nsos) == CCB_OK
-        && nsos > 0;
-      ccb_free_str_array(sos, nsos);
+      int has_so = ccb_native_abi_sos_valid(abi_dir);
       if (p->opts->explain) {
         if (old != NULL && strcmp(old, fp) == 0 && has_so) {
           printf("native-%s: skip (inputs unchanged)\n", abi);
@@ -329,7 +361,7 @@ ccb_status ccb_step_native(ccb_pipe *p) {
       return CCB_ERR_BUILD;
     }
     if (p->opts->explain) {
-      if (old != NULL && strcmp(old, fp) == 0) {
+      if (old != NULL && strcmp(old, fp) == 0 && ccb_native_so_valid(so_path)) {
         printf("native-%s: skip (inputs unchanged)\n", abi);
       } else {
         printf("native-%s: run (native inputs changed)\n", abi);
@@ -341,7 +373,8 @@ ccb_status ccb_step_native(ccb_pipe *p) {
       free(so_path);
       continue;
     }
-    if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(so_path)) {
+    if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 &&
+        ccb_native_so_valid(so_path)) {
       free(fp);
       free(abi_dir);
       free(soname);

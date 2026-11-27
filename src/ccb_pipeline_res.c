@@ -223,6 +223,28 @@ static void ccb_link_warn_collisions(ccb_pipe *p) {
   free(names);
 }
 
+// True when aapt2 link's second output is intact: gen_dir holds
+// at least one non-empty generated .java file (R.java). link_out
+// alone is not enough: a failed link can leave gen empty while
+// link_out still exists, and the skip would then starve kotlinc
+// of R symbols.
+static int ccb_link_gen_valid(ccb_pipe *p) {
+  char **files = NULL;
+  size_t n = 0;
+  if (ccb_collect_files(p->gen_dir, ".java", &files, &n) != CCB_OK) {
+    return 0;
+  }
+  int ok = n > 0;
+  for (size_t i = 0; i < n && ok; i++) {
+    struct stat st;
+    if (stat(files[i], &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+      ok = 0;
+    }
+  }
+  ccb_free_str_array(files, n);
+  return ok;
+}
+
 ccb_status ccb_step_link(ccb_pipe *p) {
   // AAB builds link with --proto-format into a separate intermediate
   // (linked-aab.ap_) under its own cache key, so APK and AAB builds
@@ -272,7 +294,7 @@ ccb_status ccb_step_link(ccb_pipe *p) {
     return CCB_ERR_BUILD;
   }
   if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(link_out) &&
-      !(p->opts->explain && p->compile_will_run)) {
+      ccb_link_gen_valid(p) && !(p->opts->explain && p->compile_will_run)) {
     free(fp);
     p->steps_skipped++;
     if (p->opts->explain) {
@@ -285,6 +307,8 @@ ccb_status ccb_step_link(ccb_pipe *p) {
   if (p->opts->explain) {
     if (p->compile_will_run) {
       printf("link: run (compiled resources will change)\n");
+    } else if (old != NULL && strcmp(old, fp) == 0) {
+      printf("link: run (generated R.java missing or invalid)\n");
     } else {
       printf("link: run (link inputs changed)\n");
     }

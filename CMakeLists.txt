@@ -61,6 +61,11 @@ foreach(test_src ${CCB_TEST_SOURCES})
     # Runs two real `ccb build`s (kotlinc + d8 on the stdlib).
     add_test(NAME ${test_name} COMMAND ${test_name})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 600)
+  elseif(test_name STREQUAL "test_cache_outputs")
+    # Runs six real `ccb build`s (hello + AAR variants, with
+    # deleted/truncated intermediates between rebuilds).
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600)
   elseif(test_name STREQUAL "test_dexcheck")
     # Runs three real `ccb build`s (hello, hello --aab, negative)
     # plus kotlinc/d8 subprocesses.
@@ -116,8 +121,8 @@ add_test(NAME fuzz_preview_flow
 # `ctest -L <area>` runs one area; plain `ctest` runs the full suite.
 # fast counts: config 2, setup 2, pipeline 6, preview 29, tui 1,
 # misc 5, graph 1 (= 46).
-# slow counts: pipeline 3, dexcheck 1, daemon 1, maven 1, modules 1,
-# library 1, native 1 (= 9).
+# slow counts: pipeline 4, dexcheck 1, daemon 1, maven 1, modules 1,
+# library 1, native 1 (= 10).
 set_tests_properties(test_config test_toml
   PROPERTIES LABELS "fast;config")
 set_tests_properties(test_sdk_tools test_setup
@@ -140,6 +145,7 @@ set_tests_properties(test_hash test_json test_proc test_str test_zip
 set_tests_properties(test_graph PROPERTIES LABELS "fast;graph")
 set_tests_properties(test_tui PROPERTIES LABELS "fast;tui")
 set_tests_properties(test_aab test_dex_contents test_r8_minify
+  test_cache_outputs
   PROPERTIES LABELS "slow;pipeline")
 set_tests_properties(test_dexcheck PROPERTIES LABELS "slow;dexcheck")
 set_tests_properties(test_kotlinc_daemon PROPERTIES LABELS "slow;daemon")

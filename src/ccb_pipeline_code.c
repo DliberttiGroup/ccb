@@ -97,6 +97,47 @@ static char *ccb_classes_fingerprint(ccb_pipe *p) {
   return fp;
 }
 
+// True when path is a whole .class file: non-empty with the
+// CAFEBABE magic. A truncated class file fails, so a compile-code
+// skip never trusts it.
+static int ccb_class_file_valid(const char *path) {
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 8) {
+    return 0;
+  }
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return 0;
+  }
+  unsigned char head[4];
+  size_t n = fread(head, 1, sizeof(head), f);
+  fclose(f);
+  return n == sizeof(head) && head[0] == 0xCA && head[1] == 0xFE &&
+    head[2] == 0xBA && head[3] == 0xBE;
+}
+
+// True when the classes dir holds at least one whole .class file.
+// Existence of the dir alone is not enough: a dir left behind
+// after its classes were deleted must not validate a skip.
+static int ccb_classes_dir_valid(const char *dir) {
+  if (!ccb_path_is_dir(dir)) {
+    return 0;
+  }
+  char **files = NULL;
+  size_t n = 0;
+  if (ccb_collect_files(dir, ".class", &files, &n) != CCB_OK) {
+    return 0;
+  }
+  int ok = n > 0;
+  for (size_t i = 0; i < n && ok; i++) {
+    if (!ccb_class_file_valid(files[i])) {
+      ok = 0;
+    }
+  }
+  ccb_free_str_array(files, n);
+  return ok;
+}
+
 ccb_status ccb_step_code(ccb_pipe *p) {
   // Declared first: an early goto below must never jump over a
   // cleanup-attributed declaration, or cleanup would run on garbage.
@@ -212,9 +253,13 @@ ccb_status ccb_step_code(ccb_pipe *p) {
       if (p->link_will_run) {
         printf("compile-code: run (link outputs will change)\n");
         p->code_will_run = 1;
-      } else if (old != NULL && strcmp(old, fp) == 0) {
+      } else if (old != NULL && strcmp(old, fp) == 0 &&
+          ccb_classes_dir_valid(p->classes_dir)) {
         printf("compile-code: skip (inputs unchanged)\n");
         p->code_will_run = 0;
+      } else if (old != NULL && strcmp(old, fp) == 0) {
+        printf("compile-code: run (compiled classes missing or invalid)\n");
+        p->code_will_run = 1;
       } else {
         printf("compile-code: run (source inputs changed)\n");
         p->code_will_run = 1;
@@ -223,7 +268,12 @@ ccb_status ccb_step_code(ccb_pipe *p) {
       free(fp);
       goto code_done;
     }
-    if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0) {
+    // A fingerprint match alone never skips: the compiled classes
+    // must still be on disk and whole, or the step re-runs. Without
+    // this, deleting build/intermediates/classes reported a
+    // successful "up to date" build from a stale APK.
+    if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 &&
+        ccb_classes_dir_valid(p->classes_dir)) {
       free(cp_str);
       free(fp);
       p->code_will_run = 0;
@@ -324,6 +374,18 @@ ccb_status ccb_step_code(ccb_pipe *p) {
       }
     }
     free(cp_str);
+    // The compilers reported success but produced no classes: the
+    // sources declare nothing compilable (or the output was lost).
+    // Fail here, at the step that owns the output, instead of
+    // letting dex silently skip and packaging an APK with no code.
+    // Planning modes are exempt: in dry-run the compilers never
+    // actually run, so no classes exist yet.
+    if (!p->opts->dry_run && !ccb_classes_dir_valid(p->classes_dir)) {
+      ccb_pipe_diag(p, "CCB-E3004", "kotlinc",
+        "compilation produced no .class files from the project sources");
+      free(fp);
+      goto code_fail;
+    }
     ccb_cache_set_step(p->cache, "compile-code", fp);
     free(fp);
     p->cache_dirty = 1;
@@ -519,7 +581,7 @@ static char *ccb_stdlib_dex_dir(void) {
 // True when path is a whole dex file: the dex magic plus a header
 // file_size that matches the file on disk. A truncated or foreign
 // file fails, so it is re-dexed instead of fed to d8.
-static int ccb_dex_file_valid(const char *path) {
+int ccb_dex_file_valid(const char *path) {
   FILE *f = fopen(path, "rb");
   if (f == NULL) {
     return 0;

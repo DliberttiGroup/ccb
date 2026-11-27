@@ -13,7 +13,7 @@ ctest --test-dir build -L <area>   # one area: config, setup, pipeline,
                                    # preview, misc, dexcheck, daemon,
                                    # maven, modules, library
 ctest --test-dir build -LE slow    # same as -L fast
-ctest --test-dir build             # full suite: 55 tests; runs in CI
+ctest --test-dir build             # full suite: 56 tests; runs in CI
 ```
 
 Every test has two labels: speed (`fast` / `slow`) and area. Fast means
@@ -25,8 +25,10 @@ plain + sanitizer jobs) — do not run it on the VM.
 Slow tests, last full run (2026-11-25): `test_modules` 450s,
 `test_kotlinc_daemon` 330s, `test_dex_contents` 199s, `test_r8_minify`
 133s, `test_aab` 88s, `test_maven` 82s, `test_dexcheck` 49s.
-`test_library` 184s (2026-11-26). Area
-totals: pipeline ~7 min, modules ~7.5 min, daemon ~5.5 min, maven
+`test_library` 184s (2026-11-26).
+`test_cache_outputs` 81s (2026-11-27, single local VM run, not a
+full-suite run). Area
+totals: pipeline ~8.5 min, modules ~7.5 min, daemon ~5.5 min, maven
 ~1.5 min, library ~3 min, dexcheck ~1 min.
 
 Never run two `ctest` invocations at once (plain + sanitizer, or two plain
@@ -34,4 +36,4 @@ runs): run them sequentially. Each test binary uses a per-process `mkdtemp`
 dir (`/tmp/ccb_test_<name>_XXXXXX`), so parallel tests within one `ctest
 --jN` run can't collide — but two concurrent `ctest` runs still share CPU
 and memory. On this VM `-j4` plain measured 1037s vs 739s sequential, `-j2`
-1082s (2026-11-25, 47 tests). 55 tests total.
+1082s (2026-11-25, 47 tests). 56 tests total.

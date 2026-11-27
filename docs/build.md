@@ -131,6 +131,45 @@ values + tool versions). Unchanged step is skipped, previous outputs reused.
   downstream of `link` — see [json-protocol.md](json-protocol.md).
 - `--dry-run` prints the exact commands, executes nothing.
 
+**Output validation (Step 2).** A fingerprint match alone never
+skips a step: the skip also requires the step's outputs to still
+be present and whole. Tiers, cheapest first:
+
+- Existence everywhere a skip is decided (compiled resource zips,
+  linked output, classes, dex, AAR extractions, native `.so`,
+  packaged/aligned/signed outputs, merged manifest, module AAR).
+- Content checks only where they are cheap and a corrupt output
+  would otherwise ship: `.class` files must start with `CAFEBABE`,
+  `.dex` files must carry dex magic with a header size matching
+  the file, native `.so` files must start with the ELF magic.
+  Reading a few header bytes per output file costs far less than
+  the JVM boots a re-run would cost; no-op rebuild time is
+  unchanged (~1 s on hello).
+- A step whose outputs are missing or corrupt re-runs; a step
+  that cannot produce its outputs fails loudly instead of
+  skipping. In particular, a project with code sources that
+  reaches dex with no compiled classes fails with `CCB-E3006`
+  (dex) / `CCB-E3025` (dexcheck), and compilation that produces
+  no `.class` files fails with `CCB-E3004` — none of these
+  silently ship an APK without the app's code.
+- Downstream invalidation is by content, not by step order: dex
+  fingerprints the classes hash, packaging fingerprints the dex
+  files, align/sign fingerprint the APK bytes. A rebuilt upstream
+  whose bytes are identical correctly lets downstream steps skip;
+  changed bytes re-run them.
+- The cache itself is published atomically (temp file in the
+  same directory + rename), so an interrupted save leaves the
+  previous `ccb-cache.json` intact instead of a torn file.
+
+**Environment inputs.** Environment variables are not
+fingerprinted. What a step keys on is the *resolved* toolchain
+identity: tool paths (aapt2, zipalign), kotlinc version, java
+major, compile SDK. Changing `JAVA_HOME` between two JDKs of
+the same major version therefore invalidates nothing — accepted
+deliberately, since same-major JDKs produce the same output.
+Signing passwords are never fingerprinted or stored; only the
+keystore path and the input APK hash are.
+
 Cache lives at `build/ccb-cache.json`. Missing or corrupt cache means
 "rebuild everything", never an error. `ccb clean` removes `build/`,
 cache included.

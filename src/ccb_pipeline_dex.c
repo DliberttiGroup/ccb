@@ -390,6 +390,62 @@ static char *ccb_r8_keep_rules(ccb_pipe *p) {
   return ccb_str_steal(&s);
 }
 
+static size_t ccb_dex_count_files(const char *dir, const char *ext) {
+  if (dir == NULL) {
+    return 0;
+  }
+  char **files = NULL;
+  size_t n = 0;
+  if (ccb_collect_files(dir, ext, &files, &n) != CCB_OK) {
+    return 0;
+  }
+  ccb_free_str_array(files, n);
+  return n;
+}
+
+// True when the project has code sources: Kotlin/Java sources,
+// generated R.java, or vendored java_extra roots. A build with
+// sources must produce classes, so "no classes" at dex time is an
+// error there — not a resources-only skip.
+static int ccb_dex_has_sources(ccb_pipe *p) {
+  if (ccb_dex_count_files(p->cfg->kotlin_dir, ".kt") > 0) {
+    return 1;
+  }
+  if (ccb_dex_count_files(p->cfg->java_dir, ".java") > 0) {
+    return 1;
+  }
+  if (ccb_dex_count_files(p->gen_dir, ".java") > 0) {
+    return 1;
+  }
+  for (size_t d = 0; d < p->cfg->java_extra_dirs_count; d++) {
+    if (ccb_dex_count_files(p->cfg->java_extra_dirs[d], ".java") > 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// True when the dex dir holds at least one whole .dex file (dex
+// magic + header size). A truncated .dex must re-dex, never skip.
+static int ccb_dex_dir_valid(ccb_pipe *p) {
+  if (!ccb_path_is_dir(p->dex_dir)) {
+    return 0;
+  }
+  char **dexes = NULL;
+  size_t ndex = 0;
+  if (ccb_collect_files(p->dex_dir, ".dex", &dexes, &ndex) != CCB_OK) {
+    return 0;
+  }
+  int ok = ndex > 0;
+  for (size_t i = 0; i < ndex && ok; i++) {
+    if (!ccb_dex_file_valid(dexes[i])) {
+      ok = 0;
+    }
+  }
+  ccb_free_str_array(dexes, ndex);
+  return ok;
+}
+
 ccb_status ccb_step_dex(ccb_pipe *p) {
   CCB_AUTO_FREE char *stdlib = ccb_dex_stdlib(p);
   int use_r8 = strcmp(p->cfg->variant, "release") == 0 && p->cfg->minify;
@@ -417,13 +473,36 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
   if (ccb_path_is_dir(p->classes_dir)) {
     ccb_collect_files(p->classes_dir, ".class", &class_files, &nclass);
   }
+  // A project with code sources must reach dex with classes. When
+  // it does not, compile-code produced nothing (or its output was
+  // lost) — dexing the jars alone would ship an APK without the
+  // app's classes, so fail loudly instead of skipping silently.
+  // Planning modes are exempt: on a fresh tree the classes do not
+  // exist yet, and --explain reports the run via code_will_run.
+  if (!p->opts->explain && !p->opts->dry_run && nclass == 0 &&
+      ccb_dex_has_sources(p)) {
+    ccb_pipe_diag(p, "CCB-E3006", "d8",
+      "no compiled classes found, but the project has code sources: "
+      "the compile-code output is missing or empty — delete build/ "
+      "and rebuild if this persists");
+    ccb_free_str_array(class_files, nclass);
+    return CCB_ERR_BUILD;
+  }
   if (nclass == 0 && p->cfg->jars_count == 0 && p->aar_class_jars_count == 0) {
     if (p->opts->explain) {
-      printf("dex: skip (no classes or jars)\n");
+      if (ccb_dex_has_sources(p) && p->code_will_run) {
+        printf("dex: run (classes will change)\n");
+        p->dex_will_run = 1;
+      } else {
+        printf("dex: skip (no classes or jars)\n");
+        p->dex_will_run = 0;
+        p->steps_skipped++;
+      }
+    } else {
+      ccb_log_info(&p->log, "no classes or jars, skipping dex");
+      p->dex_will_run = 0;
+      p->steps_skipped++;
     }
-    ccb_log_info(&p->log, "no classes or jars, skipping dex");
-    p->dex_will_run = 0;
-    p->steps_skipped++;
     ccb_free_str_array(class_files, nclass);
     return CCB_OK;
   }
@@ -482,9 +561,12 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
     if (p->code_will_run) {
       printf("dex: run (classes will change)\n");
       p->dex_will_run = 1;
-    } else if (old != NULL && strcmp(old, fp) == 0) {
+    } else if (old != NULL && strcmp(old, fp) == 0 && ccb_dex_dir_valid(p)) {
       printf("dex: skip (inputs unchanged)\n");
       p->dex_will_run = 0;
+    } else if (old != NULL && strcmp(old, fp) == 0) {
+      printf("dex: run (dex outputs missing or invalid)\n");
+      p->dex_will_run = 1;
     } else {
       printf("dex: run (dex inputs changed)\n");
       p->dex_will_run = 1;
@@ -492,18 +574,14 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
     free(fp);
     return CCB_OK;
   }
-  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(p->dex_dir)) {
-    char **dexes = NULL;
-    size_t ndex = 0;
-    ccb_collect_files(p->dex_dir, ".dex", &dexes, &ndex);
-    ccb_free_str_array(dexes, ndex);
-    if (ndex > 0) {
-      free(fp);
-      p->dex_will_run = 0;
-      p->steps_skipped++;
-      ccb_log_cache(&p->log, "dex", 1, "dex inputs unchanged");
-      return CCB_OK;
-    }
+  // A fingerprint match alone never skips: every dex output must
+  // still be present and whole, or d8 re-runs.
+  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_dex_dir_valid(p)) {
+    free(fp);
+    p->dex_will_run = 0;
+    p->steps_skipped++;
+    ccb_log_cache(&p->log, "dex", 1, "dex inputs unchanged");
+    return CCB_OK;
   }
   p->dex_will_run = 1;
   if (!p->opts->dry_run) {
@@ -663,11 +741,22 @@ ccb_status ccb_step_dexcheck(ccb_pipe *p) {
     return CCB_OK;
   }
   // Mirror the dex step's skip case: with no classes or jars at
-  // all there is no dex to check.
+  // all there is no dex to check. But a project with code sources
+  // and no classes is a broken upstream, not a resources-only
+  // project: fail loudly instead of letting a class-less dex pass.
   char **class_files = NULL;
   size_t nclass = 0;
   if (ccb_path_is_dir(p->classes_dir)) {
     ccb_collect_files(p->classes_dir, ".class", &class_files, &nclass);
+  }
+  int has_sources = ccb_dex_has_sources(p);
+  if (nclass == 0 && has_sources) {
+    ccb_pipe_diag(p, "CCB-E3025", "dexcheck",
+      "no compiled classes found, but the project has code sources: "
+      "the compile-code output is missing or empty — delete build/ "
+      "and rebuild if this persists");
+    ccb_free_str_array(class_files, nclass);
+    return CCB_ERR_BUILD;
   }
   if (nclass == 0 && p->cfg->jars_count == 0 &&
       p->aar_class_jars_count == 0) {

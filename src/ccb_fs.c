@@ -140,6 +140,62 @@ ccb_status ccb_write_file(const char *path, const void *data, size_t len) {
   return bad != 0 ? CCB_ERR_IO : CCB_OK;
 }
 
+ccb_status ccb_write_file_atomic(const char *path, const void *data, size_t len) {
+  // A NULL buffer with bytes to write is a caller bug, not an empty
+  // file: write(NULL) segfaults. NULL with len 0 still writes empty.
+  if (data == NULL && len > 0) {
+    return CCB_ERR_IO;
+  }
+  ccb_str s;
+  ccb_str_init(&s);
+  ccb_str_append(&s, path);
+  ccb_str_appendf(&s, ".tmp-%ld", (long)getpid());
+  char *tmp = ccb_str_steal(&s);
+  int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    free(tmp);
+    return CCB_ERR_IO;
+  }
+  size_t off = 0;
+  int bad = 0;
+  while (off < len) {
+    ssize_t n = write(fd, (const char *)data + off, len - off);
+    if (n <= 0) {
+      bad = 1;
+      break;
+    }
+    off += (size_t)n;
+  }
+  if (!bad && fsync(fd) != 0) {
+    bad = 1;
+  }
+  if (close(fd) != 0) {
+    bad = 1;
+  }
+  if (bad) {
+    unlink(tmp);
+    free(tmp);
+    return CCB_ERR_IO;
+  }
+  if (rename(tmp, path) != 0) {
+    unlink(tmp);
+    free(tmp);
+    return CCB_ERR_IO;
+  }
+  free(tmp);
+  // Best effort: fsync the directory so the rename itself survives
+  // a crash. A failure here does not undo a rename that already
+  // happened; it only weakens the crash guarantee.
+  char *dir = ccb_dirname(path);
+  int dfd = open(dir, O_RDONLY);
+  if (dfd >= 0) {
+    (void)fsync(dfd);
+    close(dfd);
+  }
+  free(dir);
+  return CCB_OK;
+}
+
 static ccb_status ccb_remove_inner(const char *path) {
   struct stat st;
   if (lstat(path, &st) != 0) {

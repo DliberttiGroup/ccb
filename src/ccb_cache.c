@@ -125,7 +125,11 @@ ccb_status ccb_cache_save(const ccb_cache *cache, const char *path) {
     ccb_str_append(&s, "\n  ");
   }
   ccb_str_append(&s, "}\n}\n");
-  ccb_status rc = ccb_write_file(path, s.buf, s.len);
+  // Atomic publish: an interrupted save leaves the previous cache
+  // intact instead of a torn ccb-cache.json. A corrupt cache still
+  // loads as empty (see ccb_cache_load), so the worst case of any
+  // save failure is rebuilding everything, never a wrong build.
+  ccb_status rc = ccb_write_file_atomic(path, s.buf, s.len);
   ccb_str_free(&s);
   return rc;
 }

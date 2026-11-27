@@ -34,6 +34,57 @@ void ccb_push_str(char ***arr, size_t *count, size_t *cap, char *s) {
   (*arr)[(*count)++] = s;
 }
 
+// True when a regular file exists and is non-empty.
+static int ccb_deps_file_nonempty(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+// True when every extracted AAR output the later steps read still
+// exists: each declared AAR's extraction dir, plus the classes jar
+// and res/assets/jni dirs the scan found in the AAR. A fingerprint
+// match alone must not skip extraction when the outputs are gone.
+static int ccb_deps_outputs_valid(ccb_pipe *p) {
+  if (!ccb_path_is_dir(p->aar_dir)) {
+    return 0;
+  }
+  for (size_t i = 0; i < p->cfg->aars_count; i++) {
+    char *base = ccb_basename(p->cfg->aars[i]);
+    char *dot = strrchr(base, '.');
+    if (dot != NULL) {
+      *dot = '\0';
+    }
+    char *dest = ccb_path_join(p->aar_dir, base);
+    int ok = ccb_path_is_dir(dest);
+    free(base);
+    free(dest);
+    if (!ok) {
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < p->aar_class_jars_count; i++) {
+    if (!ccb_deps_file_nonempty(p->aar_class_jars[i])) {
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < p->aar_res_dirs_count; i++) {
+    if (!ccb_path_is_dir(p->aar_res_dirs[i])) {
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < p->aar_assets_count; i++) {
+    if (!ccb_path_is_dir(p->aar_assets_dirs[i])) {
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < p->aar_jni_count; i++) {
+    if (!ccb_path_is_dir(p->aar_jni_dirs[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 // ---------- deps / AAR extraction ----------
 // Scan AAR entries to populate the derived lists WITHOUT extracting, so
 // later steps know the AAR contents even when extraction is cached.
@@ -134,7 +185,12 @@ ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
   char *fp = ccb_cache_fingerprint((const char **)b.keys, (const char **)b.vals, b.count);
   ccb_fp_free(&b);
   const char *old = ccb_cache_step_fp(p->cache, "deps");
-  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0) {
+  // A fingerprint match alone never skips: the extracted AAR
+  // outputs must still be on disk, or extraction re-runs. Without
+  // this, deleting an extracted AAR dir skipped deps and the build
+  // failed later at link on the missing compiled resources.
+  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 &&
+      ccb_deps_outputs_valid(p)) {
     free(fp);
     p->steps_skipped++;
     if (p->opts->explain) {
@@ -144,7 +200,11 @@ ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
     return CCB_OK;
   }
   if (p->opts->explain) {
-    printf("deps: run (AAR inputs changed)\n");
+    if (old != NULL && strcmp(old, fp) == 0) {
+      printf("deps: run (extracted AAR outputs missing or invalid)\n");
+    } else {
+      printf("deps: run (AAR inputs changed)\n");
+    }
     free(fp);
     return CCB_OK;
   }

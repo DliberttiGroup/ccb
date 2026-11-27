@@ -220,6 +220,10 @@ char *ccb_java_home(ccb_pipe *p);
 char **ccb_jvm_env(ccb_pipe *p, ccb_arena *ar);
 ccb_status ccb_step_code(ccb_pipe *p);
 int ccb_dex_has_stdlib(ccb_pipe *p);
+// True when path is a whole dex file: dex magic plus a header
+// file_size matching the file on disk. A truncated or foreign file
+// fails, so it is re-dexed instead of fed to d8 or trusted by a skip.
+int ccb_dex_file_valid(const char *path);
 char *ccb_dex_stdlib(ccb_pipe *p);
 long ccb_d8_heap_mb(uint64_t input_bytes);
 uint64_t ccb_dex_input_bytes(ccb_pipe *p, const char *stdlib_input);
