@@ -395,6 +395,23 @@ int main(int argc, char **argv) {
   CHECK(ccb_path_exists(aar_apk));
   free(out);
 
+  free(aar_apk);
+  free(aar_extract);
+  free(aar_jar);
+  free(apk);
+  free(classes_dir);
+  free(main_class);
+  free(dex_dir);
+  free(dex_file);
+  free(r_java);
+  free(bin);
+  free(sdk_home);
+  free(java_home);
+  free(kotlin_home);
+  free(bt_ver);
+  ccb_str_free(&sdk_env);
+  ccb_str_free(&java_env);
+  ccb_str_free(&kot_env);
   ccb_remove_recursive(BASE);
   TEST_MAIN_END();
 }
