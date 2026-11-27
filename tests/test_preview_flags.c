@@ -29,37 +29,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static int write_all(const char *path, const char *data, size_t len) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
@@ -142,8 +111,8 @@ static char *join2(const char *a, const char *b) {
 }
 
 static int files_equal(const char *a_path, const char *b_path) {
-  char *a = try_read(a_path);
-  char *b = try_read(b_path);
+  char *a = ccb_test_try_read(a_path);
+  char *b = ccb_test_try_read(b_path);
   int eq = a != NULL && b != NULL && strcmp(a, b) == 0;
   free(a);
   free(b);
@@ -176,7 +145,7 @@ static int copy_tree(const char *src, const char *dst) {
         return -1;
       }
     } else {
-      char *data = try_read(sp);
+      char *data = ccb_test_try_read(sp);
       int rc = data == NULL ? -1 :
         write_all(dp, data, strlen(data));
       free(data);
@@ -195,7 +164,7 @@ static int copy_tree(const char *src, const char *dst) {
 // Count UTF-8 code points in the first line of a file (the frame
 // border line), so a frame width check is glyph-based, not byte-based.
 static long first_line_glyphs(const char *path) {
-  char *text = try_read(path);
+  char *text = ccb_test_try_read(path);
   long n = 0;
   size_t i = 0;
   if (text == NULL) {
@@ -316,7 +285,7 @@ int main(void) {
     }
     {
       char *gp = join2(gdir, "preview.json");
-      char *text = try_read(gp);
+      char *text = ccb_test_try_read(gp);
       CHECK(text != NULL);
       if (text != NULL) {
         CHECK(strstr(text, "\"version\":2") != NULL);
@@ -335,7 +304,7 @@ int main(void) {
     char *text = NULL;
     CHECK(rc == 0);
     CHECK(file_size(cap_path) == 0);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       CHECK(strstr(text, "My Notes") != NULL);
@@ -356,7 +325,7 @@ int main(void) {
     char *text = NULL;
     CHECK(rc == 0);
     CHECK(file_size(cap_path) == 0);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       CHECK(strncmp(text, "{\"event\":\"preview\",\"version\":2,",
@@ -466,7 +435,7 @@ int main(void) {
           ccb_str_append(&name, ".txt");
           path = join2(upd, name.buf);
           {
-            char *actual = try_read(path);
+            char *actual = ccb_test_try_read(path);
             CHECK(actual != NULL);
             if (actual != NULL) {
               CHECK_STR_EQ(actual, out.buf != NULL ? out.buf : "");
@@ -483,7 +452,7 @@ int main(void) {
           char *actual = NULL;
           ccb_str_init(&out);
           pv_render_logic_tree(&out, p);
-          actual = try_read(path);
+          actual = ccb_test_try_read(path);
           CHECK(actual != NULL);
           if (actual != NULL) {
             CHECK_STR_EQ(actual, out.buf != NULL ? out.buf : "");
@@ -498,7 +467,7 @@ int main(void) {
           char *actual = NULL;
           ccb_str_init(&out);
           pv_project_json(&out, p);
-          actual = try_read(path);
+          actual = ccb_test_try_read(path);
           CHECK(actual != NULL);
           if (actual != NULL) {
             CHECK_STR_EQ(actual, out.buf != NULL ? out.buf : "");
@@ -514,13 +483,13 @@ int main(void) {
     // and the file must match the pre-damage content exactly.
     {
       char *home = join2(upd, "Home.txt");
-      char *saved = try_read(home);
+      char *saved = ccb_test_try_read(home);
       CHECK(saved != NULL);
       CHECK(write_all(home, "DAMAGED\n", 8) == 0);
       rc = run_cli(sdir, cap_path, 3, argv);
       CHECK(rc == 0);
       {
-        char *restored = try_read(home);
+        char *restored = ccb_test_try_read(home);
         CHECK(restored != NULL && saved != NULL);
         if (restored != NULL && saved != NULL) {
           CHECK_STR_EQ(restored, saved);
@@ -551,7 +520,7 @@ int main(void) {
         flow = ccb_xstrdup(p.buf);
         ccb_str_free(&p);
       }
-      text = try_read(flow);
+      text = ccb_test_try_read(flow);
       CHECK(text != NULL);
       if (text != NULL) {
         hit = strstr(text, "My Notes");

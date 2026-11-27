@@ -34,10 +34,6 @@ static pv_screen *make_screen(ccb_arena *a, const char *name, pv_box *root) {
   return s;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
-}
-
 // Parse CSS, lay out a screen whose root has one child of the given
 // type/label, and return the laid-out child (project + diag list
 // live in the caller's arena; the caller frees p->diags).
@@ -301,11 +297,11 @@ int main(void) {
     t->h = 2;
     ccb_str_init(&out);
     pv_project_json(&out, &p);
-    CHECK(contains(out.buf, "\"version\":2"));
-    CHECK(contains(out.buf,
+    CHECK(ccb_test_contains(out.buf, "\"version\":2"));
+    CHECK(ccb_test_contains(out.buf,
       "\"type\":\"screen\",\"label\":null,\"x\":0,\"y\":0,\"w\":38,\"h\":2,"
       "\"w_dp\":390,\"h_dp\":20"));
-    CHECK(contains(out.buf,
+    CHECK(ccb_test_contains(out.buf,
       "\"type\":\"text\",\"label\":\"Hi\",\"x\":0,\"y\":0,\"w\":38,\"h\":2,"
       "\"w_dp\":390,\"h_dp\":20"));
     ccb_str_free(&out);

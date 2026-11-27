@@ -5,9 +5,13 @@
 
 // First: feature-test macros for mkdtemp, before any system header.
 #include "ccb_common.h"
+#include "ccb_alloc.h"
+#include "ccb_fs.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 // Unique per-process scratch dir, so parallel ctest runs (-j) and two
 // concurrent ctest invocations never share a path. Each test binary
@@ -35,8 +39,97 @@ static inline char *ccb_test_path(const char *base, const char *rel) {
   return buf;
 }
 
+// Read a whole file, or NULL when it cannot be read. Shared by the
+// preview tests; was twelve copies (two spellings: an fseek/ftell one
+// and an fread-loop one). This is the stricter spelling: a short read
+// or a seek failure is NULL, never partial content, and an empty file
+// reads as "" rather than NULL.
+static inline char *ccb_test_try_read(const char *path) {
+  FILE *f = fopen(path, "rb");
+  long size = 0;
+  char *buf = NULL;
+  if (f == NULL) {
+    return NULL;
+  }
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return NULL;
+  }
+  size = ftell(f);
+  if (size < 0) {
+    fclose(f);
+    return NULL;
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return NULL;
+  }
+  buf = ccb_xmalloc((size_t)size + 1);
+  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
+    free(buf);
+    fclose(f);
+    return NULL;
+  }
+  buf[size] = '\0';
+  fclose(f);
+  return buf;
+}
+
+// Substring check, NULL-safe. Shared by the preview tests; was
+// fifteen copies in three spellings (bare strstr, hay-only NULL
+// check, both NULL-checked). This is the both-NULL-checked spelling.
+static inline int ccb_test_contains(const char *hay,
+    const char *needle) {
+  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
+}
+
 static int ccb_test_failures = 0;
 static int ccb_test_checks = 0;
+
+// Highest build-tools version under sdk_home that has an aapt2, or
+// NULL. The version string (e.g. "36.0.0") is malloc'd. Shared by the
+// slow pipeline tests that need a real build-tools to build a hello
+// project; was five identical copies before.
+static inline char *ccb_test_find_build_tools(const char *sdk_home) {
+  char *bt_dir = ccb_path_join(sdk_home, "build-tools");
+  DIR *d = opendir(bt_dir);
+  if (d == NULL) {
+    free(bt_dir);
+    return NULL;
+  }
+  char *best = NULL;
+  struct dirent *e = NULL;
+  while ((e = readdir(d)) != NULL) {
+    if (e->d_name[0] == '.') {
+      continue;
+    }
+    // Only build-tools CCB accepts (major 34..36): the runner image
+    // ships newer ones (e.g. 37) with no matching platform, and
+    // deriving compile_sdk from them fails config load (CCB-E1005).
+    int major = 0;
+    const char *mp = e->d_name;
+    if (*mp < '0' || *mp > '9') {
+      continue;
+    }
+    while (*mp >= '0' && *mp <= '9') {
+      major = major * 10 + (*mp - '0');
+      mp++;
+    }
+    if (major < 34 || major > 36) {
+      continue;
+    }
+    char *cand = ccb_path_join3(bt_dir, e->d_name, "aapt2");
+    int ok = access(cand, X_OK) == 0;
+    free(cand);
+    if (ok && (best == NULL || strcmp(e->d_name, best) > 0)) {
+      free(best);
+      best = ccb_xstrdup(e->d_name);
+    }
+  }
+  closedir(d);
+  free(bt_dir);
+  return best;
+}
 
 #define CHECK(cond) do { \
     ++ccb_test_checks; \

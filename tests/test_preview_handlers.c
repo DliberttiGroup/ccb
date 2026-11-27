@@ -191,10 +191,6 @@ static int has_edge_from(pv_screen *s, const char *from) {
   return 0;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && strstr(hay, needle) != NULL;
-}
-
 // Build a scratch project: flow text plus an optional
 // [preview.bindings] body (NULL means no bindings table). Returns
 // the malloc'd project dir, or NULL.
@@ -316,12 +312,12 @@ int main(void) {
       // line and the JSON edge carry no derived marker.
       ccb_str_init(&tree);
       pv_render_logic_tree(&tree, p);
-      CHECK(contains(tree.buf, "-> Detail via \"Open note\""));
+      CHECK(ccb_test_contains(tree.buf, "-> Detail via \"Open note\""));
       ccb_str_free(&tree);
       ccb_str_init(&json);
       pv_project_json(&json, p);
-      CHECK(contains(json.buf, "\"from\":\"Open note\",\"target\":\"Detail\""));
-      CHECK(!contains(json.buf, "derived"));
+      CHECK(ccb_test_contains(json.buf, "\"from\":\"Open note\",\"target\":\"Detail\""));
+      CHECK(!ccb_test_contains(json.buf, "derived"));
       ccb_str_free(&json);
       pv_project_free(p);
     }

@@ -48,37 +48,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static int write_all(const char *path, const char *data, size_t n) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
@@ -118,7 +87,7 @@ static char *sample_dir(void) {
     ccb_str_append(&path, suffixes[i]);
     ccb_str_append(&path, "ccb.toml");
     {
-      char *probe = try_read(path.buf);
+      char *probe = ccb_test_try_read(path.buf);
       int found = probe != NULL;
       free(probe);
       if (found) {
@@ -134,7 +103,7 @@ static char *sample_dir(void) {
   }
   ccb_str_free(&dir);
   {
-    char *probe = try_read("examples/preview-sample/ccb.toml");
+    char *probe = ccb_test_try_read("examples/preview-sample/ccb.toml");
     if (probe != NULL) {
       free(probe);
       return ccb_xstrdup("examples/preview-sample/");
@@ -169,7 +138,7 @@ static int copy_tree(const char *src, const char *dst) {
     if (S_ISDIR(st.st_mode)) {
       rc = copy_tree(sp, dp);
     } else {
-      char *data = try_read(sp);
+      char *data = ccb_test_try_read(sp);
       rc = data == NULL ? -1 : write_all(dp, data, strlen(data));
       free(data);
     }
@@ -200,10 +169,6 @@ static char *scratch_sample(void) {
   }
   free(sdir);
   return proj;
-}
-
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
 }
 
 // ---------- in-process tests ----------
@@ -250,12 +215,12 @@ static void test_equivalence(void) {
   ccb_str_init(&gdir);
   test_dir(&gdir);
   ccb_str_append(&gdir, "/golden/preview/preview.json");
-  golden = try_read(gdir.buf);
+  golden = ccb_test_try_read(gdir.buf);
   if (golden == NULL) {
-    golden = try_read("tests/golden/preview/preview.json");
+    golden = ccb_test_try_read("tests/golden/preview/preview.json");
   }
   if (golden == NULL) {
-    golden = try_read("../tests/golden/preview/preview.json");
+    golden = ccb_test_try_read("../tests/golden/preview/preview.json");
   }
   CHECK(golden != NULL);
   if (golden != NULL && lj.buf != NULL) {
@@ -333,7 +298,7 @@ static void test_incremental(void) {
   flow_dir = join2(proj, "flow");
   styles_dir = join2(proj, "styles");
   home = join2(flow_dir, "Home.kt");
-  orig = try_read(home);
+  orig = ccb_test_try_read(home);
   CHECK(orig != NULL);
   s = pv_lsp_open(toml, NULL, NULL, &err);
   CHECK(s != NULL);
@@ -356,7 +321,7 @@ static void test_incremental(void) {
   pv_lsp_did_change(s, home, extra.buf);
   CHECK(pv_lsp_rebuild(s) == 1);
   tj = pv_lsp_tree_json(s);
-  CHECK(contains(tj, "\"name\":\"Extra\""));
+  CHECK(ccb_test_contains(tj, "\"name\":\"Extra\""));
   CHECK(pv_lsp_parse_count(s, home) == 2);
   {
     // Every other file still at its open-time count of 1.
@@ -378,14 +343,14 @@ static void test_incremental(void) {
   pv_lsp_did_close(s, home);
   CHECK(pv_lsp_rebuild(s) == 1);
   tj = pv_lsp_tree_json(s);
-  CHECK(!contains(tj, "\"name\":\"Extra\""));
+  CHECK(!ccb_test_contains(tj, "\"name\":\"Extra\""));
   CHECK(pv_lsp_parse_count(s, home) == 3);
   // Disk change: scan marks it dirty, rebuild re-parses from disk.
   CHECK(write_all(home, extra.buf, strlen(extra.buf)) == 0);
   CHECK(pv_lsp_scan_disk(s) == 1);
   CHECK(pv_lsp_rebuild(s) == 1);
   tj = pv_lsp_tree_json(s);
-  CHECK(contains(tj, "\"name\":\"Extra\""));
+  CHECK(ccb_test_contains(tj, "\"name\":\"Extra\""));
   CHECK(pv_lsp_parse_count(s, home) == 4);
   // No further disk change: scan reports clean.
   CHECK(pv_lsp_scan_disk(s) == 0);
@@ -395,7 +360,7 @@ static void test_incremental(void) {
   CHECK(pv_lsp_rebuild(s) == 1);
   tj = pv_lsp_tree_json(s);
   tj_copy = tj != NULL ? ccb_xstrdup(tj) : NULL;
-  CHECK(!contains(tj_copy, "\"name\":\"Extra\""));
+  CHECK(!ccb_test_contains(tj_copy, "\"name\":\"Extra\""));
   CHECK(pv_lsp_parse_count(s, home) == 5);
   pv_lsp_close(s);
   free(tj_copy);
@@ -520,8 +485,8 @@ static void test_css_merge(void) {
   char *styles = join2(sdir, "styles");
   char *common_path = join2(styles, "common.css");
   char *detail_path = join2(styles, "Detail.css");
-  char *common = try_read(common_path);
-  char *detail = try_read(detail_path);
+  char *common = ccb_test_try_read(common_path);
+  char *detail = ccb_test_try_read(detail_path);
   ccb_arena *arena = ccb_arena_create();
   ccb_diag_list dl;
   pv_rule *seq = NULL;
@@ -597,7 +562,7 @@ static void test_snapshot_diff(void) {
     CCB_OK);
   CHECK(npaths == 1);
   if (npaths == 1) {
-    CHECK(contains(paths[0], "Zeta.kt"));
+    CHECK(ccb_test_contains(paths[0], "Zeta.kt"));
   }
   ccb_free_str_array(paths, npaths);
   paths = NULL;
@@ -609,7 +574,7 @@ static void test_snapshot_diff(void) {
     CCB_OK);
   CHECK(npaths == 1);
   if (npaths == 1) {
-    CHECK(contains(paths[0], "Zeta.kt"));
+    CHECK(ccb_test_contains(paths[0], "Zeta.kt"));
   }
   ccb_free_str_array(paths, npaths);
   paths = NULL;
@@ -863,7 +828,7 @@ static void test_socket_session(void) {
   toml = join2(proj, "ccb.toml");
   flow_dir = join2(proj, "flow");
   home = join2(flow_dir, "Home.kt");
-  orig = try_read(home);
+  orig = ccb_test_try_read(home);
   CHECK(orig != NULL);
   fd = spawn_server(toml, &pid);
   CHECK(fd >= 0);
@@ -891,16 +856,16 @@ static void test_socket_session(void) {
   CHECK(m1 != NULL && m2 != NULL);
   if (m1 != NULL && m2 != NULL) {
     // One result, one publishTree, in either order.
-    int m1_result = contains(m1, "\"id\":1") &&
-      contains(m1, "\"textDocumentSync\":1") &&
-      contains(m1, "\"name\":\"ccb lsp\"");
-    int m2_result = contains(m2, "\"id\":1") &&
-      contains(m2, "\"textDocumentSync\":1") &&
-      contains(m2, "\"name\":\"ccb lsp\"");
-    int m1_pub = contains(m1, "\"method\":\"ccb/publishTree\"") &&
-      contains(m1, "\"name\":\"Home\"");
-    int m2_pub = contains(m2, "\"method\":\"ccb/publishTree\"") &&
-      contains(m2, "\"name\":\"Home\"");
+    int m1_result = ccb_test_contains(m1, "\"id\":1") &&
+      ccb_test_contains(m1, "\"textDocumentSync\":1") &&
+      ccb_test_contains(m1, "\"name\":\"ccb lsp\"");
+    int m2_result = ccb_test_contains(m2, "\"id\":1") &&
+      ccb_test_contains(m2, "\"textDocumentSync\":1") &&
+      ccb_test_contains(m2, "\"name\":\"ccb lsp\"");
+    int m1_pub = ccb_test_contains(m1, "\"method\":\"ccb/publishTree\"") &&
+      ccb_test_contains(m1, "\"name\":\"Home\"");
+    int m2_pub = ccb_test_contains(m2, "\"method\":\"ccb/publishTree\"") &&
+      ccb_test_contains(m2, "\"name\":\"Home\"");
     CHECK((m1_result && m2_pub) || (m2_result && m1_pub));
   }
   free(m1);
@@ -914,9 +879,9 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":2"));
-    CHECK(contains(m, "\"name\":\"Home\""));
-    CHECK(contains(m, "\"edges\""));
+    CHECK(ccb_test_contains(m, "\"id\":2"));
+    CHECK(ccb_test_contains(m, "\"name\":\"Home\""));
+    CHECK(ccb_test_contains(m, "\"edges\""));
   }
   free(m);
   m = NULL;
@@ -927,9 +892,9 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":3"));
-    CHECK(contains(m, "\"incoming\""));
-    CHECK(contains(m, "\"from_screen\":\"Detail\""));
+    CHECK(ccb_test_contains(m, "\"id\":3"));
+    CHECK(ccb_test_contains(m, "\"incoming\""));
+    CHECK(ccb_test_contains(m, "\"from_screen\":\"Detail\""));
   }
   free(m);
   m = NULL;
@@ -942,8 +907,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":4"));
-    CHECK(contains(m, "\"diagnostics\":[]"));
+    CHECK(ccb_test_contains(m, "\"id\":4"));
+    CHECK(ccb_test_contains(m, "\"diagnostics\":[]"));
   }
   free(m);
   m = NULL;
@@ -987,8 +952,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"method\":\"ccb/publishTree\""));
-    CHECK(contains(m, "\"name\":\"Extra\""));
+    CHECK(ccb_test_contains(m, "\"method\":\"ccb/publishTree\""));
+    CHECK(ccb_test_contains(m, "\"name\":\"Extra\""));
   }
   free(m);
   m = NULL;
@@ -1039,8 +1004,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":9"));
-    CHECK(contains(m, "\"code\":-32601"));
+    CHECK(ccb_test_contains(m, "\"id\":9"));
+    CHECK(ccb_test_contains(m, "\"code\":-32601"));
   }
   free(m);
   m = NULL;
@@ -1049,8 +1014,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":null"));
-    CHECK(contains(m, "\"code\":-32700"));
+    CHECK(ccb_test_contains(m, "\"id\":null"));
+    CHECK(ccb_test_contains(m, "\"code\":-32700"));
   }
   free(m);
   m = NULL;
@@ -1061,8 +1026,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":10"));
-    CHECK(contains(m, "\"code\":-32602"));
+    CHECK(ccb_test_contains(m, "\"id\":10"));
+    CHECK(ccb_test_contains(m, "\"code\":-32602"));
   }
   free(m);
   m = NULL;
@@ -1073,8 +1038,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":11"));
-    CHECK(contains(m, "\"result\":null"));
+    CHECK(ccb_test_contains(m, "\"id\":11"));
+    CHECK(ccb_test_contains(m, "\"result\":null"));
   }
   free(m);
   m = NULL;
@@ -1084,8 +1049,8 @@ static void test_socket_session(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":12"));
-    CHECK(contains(m, "\"code\":-32600"));
+    CHECK(ccb_test_contains(m, "\"id\":12"));
+    CHECK(ccb_test_contains(m, "\"code\":-32600"));
   }
   free(m);
   m = NULL;
@@ -1241,7 +1206,7 @@ static void test_socket_reroot(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"name\":\"Home\""));
+    CHECK(ccb_test_contains(m, "\"name\":\"Home\""));
   }
   free(m);
   m = NULL;
@@ -1257,14 +1222,14 @@ static void test_socket_reroot(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"id\":20"));
+    CHECK(ccb_test_contains(m, "\"id\":20"));
   }
   free(m);
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"method\":\"ccb/publishTree\""));
-    CHECK(contains(m, "\"name\":\"Solo\""));
+    CHECK(ccb_test_contains(m, "\"method\":\"ccb/publishTree\""));
+    CHECK(ccb_test_contains(m, "\"name\":\"Solo\""));
   }
   free(m);
   m = NULL;
@@ -1274,8 +1239,8 @@ static void test_socket_reroot(void) {
   m = sock_next(&r, 5000);
   CHECK(m != NULL);
   if (m != NULL) {
-    CHECK(contains(m, "\"name\":\"Solo\""));
-    CHECK(!contains(m, "\"name\":\"Home\""));
+    CHECK(ccb_test_contains(m, "\"name\":\"Solo\""));
+    CHECK(!ccb_test_contains(m, "\"name\":\"Home\""));
   }
   free(m);
   m = NULL;
@@ -1340,10 +1305,10 @@ static void test_socket_trailing_slash(void) {
   m2 = sock_next(&r, 5000);
   CHECK(m1 != NULL && m2 != NULL);
   if (m1 != NULL && m2 != NULL) {
-    int has_result = contains(m1, "\"id\":1") ||
-      contains(m2, "\"id\":1");
-    int has_pub = contains(m1, "\"method\":\"ccb/publishTree\"") ||
-      contains(m2, "\"method\":\"ccb/publishTree\"");
+    int has_result = ccb_test_contains(m1, "\"id\":1") ||
+      ccb_test_contains(m2, "\"id\":1");
+    int has_pub = ccb_test_contains(m1, "\"method\":\"ccb/publishTree\"") ||
+      ccb_test_contains(m2, "\"method\":\"ccb/publishTree\"");
     CHECK(has_result);
     CHECK(has_pub);
   }

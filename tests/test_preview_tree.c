@@ -97,11 +97,6 @@ static char *render_tree(const pv_tree *t) {
   return out.buf;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL &&
-    strstr(hay, needle) != NULL;
-}
-
 int main(void) {
   pv_tree t;
   char *text = NULL;
@@ -109,8 +104,8 @@ int main(void) {
 
   // Waiting view before the first publish.
   text = render_tree(&t);
-  CHECK(contains(text, "waiting for logic tree"));
-  CHECK(contains(text, "q: quit"));
+  CHECK(ccb_test_contains(text, "waiting for logic tree"));
+  CHECK(ccb_test_contains(text, "q: quit"));
   free(text);
 
   // First publish: screens, scenario/trace header, selection.
@@ -123,32 +118,32 @@ int main(void) {
   CHECK(pv_tree_selected(&t) != NULL);
   CHECK_STR_EQ(pv_tree_selected(&t)->name, "Home");
   text = render_tree(&t);
-  CHECK(contains(text, "scenario: loaded | trace: 2 steps"));
-  CHECK(contains(text, "3 screens"));
-  CHECK(contains(text, "> Home [entry]"));
-  CHECK(contains(text, "  Detail\n"));
-  CHECK(contains(text, "  Form (unreachable)"));
+  CHECK(ccb_test_contains(text, "scenario: loaded | trace: 2 steps"));
+  CHECK(ccb_test_contains(text, "3 screens"));
+  CHECK(ccb_test_contains(text, "> Home [entry]"));
+  CHECK(ccb_test_contains(text, "  Detail\n"));
+  CHECK(ccb_test_contains(text, "  Form (unreachable)"));
   // Home's detail pane: outgoing + incoming + diagnostics.
-  CHECK(contains(text, "Home [entry]:"));
-  CHECK(contains(text, "-> Detail(\"note-42\") via \"Open note\""));
-  CHECK(contains(text, "-> Form via \"New\""));
-  CHECK(contains(text, "<- Detail via \"Back\"(\"42\" [scenario]) [trace]"));
-  CHECK(contains(text, "<- Form via \"Save\" [if ready: then]"));
-  CHECK(contains(text, "(no branches on this screen)"));
-  CHECK(contains(text, "CCB-P1019 handler found, button not bound: "
+  CHECK(ccb_test_contains(text, "Home [entry]:"));
+  CHECK(ccb_test_contains(text, "-> Detail(\"note-42\") via \"Open note\""));
+  CHECK(ccb_test_contains(text, "-> Form via \"New\""));
+  CHECK(ccb_test_contains(text, "<- Detail via \"Back\"(\"42\" [scenario]) [trace]"));
+  CHECK(ccb_test_contains(text, "<- Form via \"Save\" [if ready: then]"));
+  CHECK(ccb_test_contains(text, "(no branches on this screen)"));
+  CHECK(ccb_test_contains(text, "CCB-P1019 handler found, button not bound: "
     "openButton (flow/Home.kt:12)"));
-  CHECK(contains(text, "CCB-P1006 unreachable screen: Form"));
+  CHECK(ccb_test_contains(text, "CCB-P1006 unreachable screen: Form"));
   free(text);
 
   // Scripted keys: down into Detail, clamps at the ends.
   pv_tree_apply_key(&t, PV_TREE_KEY_DOWN);
   CHECK_STR_EQ(pv_tree_selected(&t)->name, "Detail");
   text = render_tree(&t);
-  CHECK(contains(text, "> Detail\n"));
-  CHECK(contains(text, "-> Home(\"42\" [scenario]) via \"Back\" [trace]"));
-  CHECK(contains(text, "-> unknown via \"More\""));
-  CHECK(contains(text, "<- Home via \"Open note\"(\"note-42\")"));
-  CHECK(contains(text, "when state: is Loading, is Loaded, else "
+  CHECK(ccb_test_contains(text, "> Detail\n"));
+  CHECK(ccb_test_contains(text, "-> Home(\"42\" [scenario]) via \"Back\" [trace]"));
+  CHECK(ccb_test_contains(text, "-> unknown via \"More\""));
+  CHECK(ccb_test_contains(text, "<- Home via \"Open note\"(\"note-42\")"));
+  CHECK(ccb_test_contains(text, "when state: is Loading, is Loaded, else "
     "(picked: is Loaded [scenario])"));
   free(text);
   pv_tree_apply_key(&t, PV_TREE_KEY_DOWN);
@@ -176,12 +171,12 @@ int main(void) {
   CHECK(t.nscreens == 4);
   CHECK_STR_EQ(pv_tree_selected(&t)->name, "Detail");
   text = render_tree(&t);
-  CHECK(contains(text, "  Settings\n"));
-  CHECK(contains(text, "4 screens"));
+  CHECK(ccb_test_contains(text, "  Settings\n"));
+  CHECK(ccb_test_contains(text, "4 screens"));
   free(text);
   CHECK(pv_tree_select(&t, "Home") == 1);
   text = render_tree(&t);
-  CHECK(contains(text, "-> Settings via \"New\""));
+  CHECK(ccb_test_contains(text, "-> Settings via \"New\""));
   free(text);
 
   // Selection falls back to the clamped index when the selected
@@ -214,7 +209,7 @@ int main(void) {
   pv_tree_apply_key(&t, PV_TREE_KEY_DOWN); // no-op, no crash
   CHECK(pv_tree_selected(&t) == NULL);
   text = render_tree(&t);
-  CHECK(contains(text, "no screens in this project"));
+  CHECK(ccb_test_contains(text, "no screens in this project"));
   free(text);
   pv_tree_free(&t);
 

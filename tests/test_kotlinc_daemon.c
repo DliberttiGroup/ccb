@@ -69,49 +69,6 @@ static char *env_or_home(const char *env_name, const char *rel) {
   return ccb_path_join(home, rel);
 }
 
-// Highest build-tools version under sdk_home that has an aapt2, or
-// NULL. The version string (e.g. "36.0.0") is malloc'd.
-static char *find_build_tools(const char *sdk_home) {
-  char *bt_dir = ccb_path_join(sdk_home, "build-tools");
-  DIR *d = opendir(bt_dir);
-  if (d == NULL) {
-    free(bt_dir);
-    return NULL;
-  }
-  char *best = NULL;
-  struct dirent *e = NULL;
-  while ((e = readdir(d)) != NULL) {
-    if (e->d_name[0] == '.') {
-      continue;
-    }
-    // Only build-tools CCB accepts (major 34..36): the runner image
-    // ships newer ones (e.g. 37) with no matching platform, and
-    // deriving compile_sdk from them fails config load (CCB-E1005).
-    int major = 0;
-    const char *mp = e->d_name;
-    if (*mp < '0' || *mp > '9') {
-      continue;
-    }
-    while (*mp >= '0' && *mp <= '9') {
-      major = major * 10 + (*mp - '0');
-      mp++;
-    }
-    if (major < 34 || major > 36) {
-      continue;
-    }
-    char *cand = ccb_path_join3(bt_dir, e->d_name, "aapt2");
-    int ok = access(cand, X_OK) == 0;
-    free(cand);
-    if (ok && (best == NULL || strcmp(e->d_name, best) > 0)) {
-      free(best);
-      best = ccb_xstrdup(e->d_name);
-    }
-  }
-  closedir(d);
-  free(bt_dir);
-  return best;
-}
-
 // Minimal Kotlin hello project (no [deps] at all). daemon = 1 adds
 // [build] kotlinc_daemon = true with the given idle seconds.
 static void write_hello_project(const char *proj, const char *sdk_home,
@@ -220,10 +177,6 @@ static int run_ccb(char *bin, const char *proj, char **env,
   }
   free(args);
   return rc;
-}
-
-static int contains(const char *text, const char *needle) {
-  return text != NULL && strstr(text, needle) != NULL;
 }
 
 // Daemon port from "found daemon on port N" in text, or -1.
@@ -339,10 +292,10 @@ int main(int argc, char **argv) {
   CHECK(client_cp != NULL);
   CHECK(compiler_cp != NULL);
   for (size_t i = 0; i < sizeof(jars) / sizeof(*jars); i++) {
-    CHECK(contains(client_cp, jars[i]));
+    CHECK(ccb_test_contains(client_cp, jars[i]));
   }
-  CHECK(!contains(compiler_cp, "kotlin-daemon-client.jar"));
-  CHECK(contains(compiler_cp, "kotlin-daemon.jar"));
+  CHECK(!ccb_test_contains(compiler_cp, "kotlin-daemon-client.jar"));
+  CHECK(ccb_test_contains(compiler_cp, "kotlin-daemon.jar"));
   char *run_dir = ccb_daemon_run_dir(ar, "/proj/build");
   CHECK_STR_EQ(run_dir, "/proj/build/kotlin-daemon");
   char *kot_argv[] = { (char *)"/bin/kotlinc", (char *)"-jvm-target",
@@ -420,7 +373,7 @@ int main(int argc, char **argv) {
   }
   char *java_home = env_or_home("JAVA_HOME", "jdk17");
   char *kotlin_home = env_or_home("KOTLIN_HOME", "kotlin-2.4.21/kotlinc");
-  char *bt_ver = sdk_home != NULL ? find_build_tools(sdk_home) : NULL;
+  char *bt_ver = sdk_home != NULL ? ccb_test_find_build_tools(sdk_home) : NULL;
   if (sdk_home == NULL || !ccb_path_is_dir(sdk_home) ||
       kotlin_home == NULL || !ccb_path_is_dir(kotlin_home) ||
       bt_ver == NULL) {
@@ -498,27 +451,27 @@ int main(int argc, char **argv) {
   char *dry_extra[] = { "build", "--dry-run", NULL };
   ccb_proc_result r;
   CHECK(run_ccb(bin, HELLO_PROJ, env, dry_extra, &r) == 0);
-  CHECK(contains(r.out, "KotlinCompilerClient"));
-  CHECK(contains(r.out, "--daemon-autoshutdownIdleSeconds=180"));
-  CHECK(contains(r.out, "--daemon-shutdownDelayMilliseconds=180000"));
-  CHECK(contains(r.out, "-Djava.net.preferIPv4Stack=true"));
-  CHECK(contains(r.out, "build/kotlin-daemon"));
+  CHECK(ccb_test_contains(r.out, "KotlinCompilerClient"));
+  CHECK(ccb_test_contains(r.out, "--daemon-autoshutdownIdleSeconds=180"));
+  CHECK(ccb_test_contains(r.out, "--daemon-shutdownDelayMilliseconds=180000"));
+  CHECK(ccb_test_contains(r.out, "-Djava.net.preferIPv4Stack=true"));
+  CHECK(ccb_test_contains(r.out, "build/kotlin-daemon"));
   ccb_proc_result_free(&r);
   // --no-kotlinc-daemon overrides the config: plain kotlinc line.
   char *off_extra[] = { "build", "--dry-run", "--no-kotlinc-daemon", NULL };
   CHECK(run_ccb(bin, HELLO_PROJ, env, off_extra, &r) == 0);
-  CHECK(!contains(r.out, "KotlinCompilerClient"));
-  CHECK(contains(r.out, "/bin/kotlinc "));
+  CHECK(!ccb_test_contains(r.out, "KotlinCompilerClient"));
+  CHECK(ccb_test_contains(r.out, "/bin/kotlinc "));
   ccb_proc_result_free(&r);
   // Default off (no [build] section): plain kotlinc line.
   write_hello_project(HELLO_PROJ, sdk_home, bt_ver, kotlin_home, 0, 60);
   CHECK(run_ccb(bin, HELLO_PROJ, env, dry_extra, &r) == 0);
-  CHECK(!contains(r.out, "KotlinCompilerClient"));
+  CHECK(!ccb_test_contains(r.out, "KotlinCompilerClient"));
   ccb_proc_result_free(&r);
   // --kotlinc-daemon opts in on a default-off project.
   char *on_extra[] = { "build", "--dry-run", "--kotlinc-daemon", NULL };
   CHECK(run_ccb(bin, HELLO_PROJ, env, on_extra, &r) == 0);
-  CHECK(contains(r.out, "KotlinCompilerClient"));
+  CHECK(ccb_test_contains(r.out, "KotlinCompilerClient"));
   ccb_proc_result_free(&r);
 
   // 5. Live lifecycle: cold build, warm rebuild reusing the same
@@ -538,8 +491,8 @@ int main(int argc, char **argv) {
     port1 = daemon_port(r.out);
   }
   CHECK(port1 > 0);
-  CHECK(contains(r.err, "connected to the daemon") ||
-    contains(r.out, "connected to the daemon"));
+  CHECK(ccb_test_contains(r.err, "connected to the daemon") ||
+    ccb_test_contains(r.out, "connected to the daemon"));
   ccb_proc_result_free(&r);
   // One-file change: the daemon must recompile it (a touch alone
   // does not change the content-hash fingerprint).
@@ -566,7 +519,7 @@ int main(int argc, char **argv) {
   // idle timeout (the stop RPC schedules shutdown after the delay).
   char *stop_extra[] = { "daemon", "stop", NULL };
   CHECK(run_ccb(bin, HELLO_PROJ, env, stop_extra, &r) == 0);
-  CHECK(contains(r.out, "kotlinc daemon stopped"));
+  CHECK(ccb_test_contains(r.out, "kotlinc daemon stopped"));
   ccb_proc_result_free(&r);
   int gone = 0;
   for (int i = 0; i < (DAEMON_IDLE + 30) / 2; i++) {
@@ -605,8 +558,8 @@ int main(int argc, char **argv) {
   ccb_str_free(&changed);
   CHECK(run_ccb(bin, HELLO_PROJ, env, build_v, &r) == 0);
   CHECK(access(apk_path, R_OK) == 0);
-  CHECK(contains(r.err, "connected to the daemon") ||
-    contains(r.out, "connected to the daemon"));
+  CHECK(ccb_test_contains(r.err, "connected to the daemon") ||
+    ccb_test_contains(r.out, "connected to the daemon"));
   ccb_proc_result_free(&r);
   // Clean removes the build dir (and stops the daemon best-effort).
   char *clean_extra[] = { "clean", NULL };

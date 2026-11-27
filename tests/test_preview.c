@@ -23,38 +23,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-// Read a whole file, or NULL when it cannot be read.
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 // First candidate path (from a list of suffixes) that reads, or NULL.
 static char *read_first(const char *suffixes[], size_t n, const char *rel) {
   size_t i = 0;
@@ -68,7 +36,7 @@ static char *read_first(const char *suffixes[], size_t n, const char *rel) {
     ccb_str_append(&path, dir.buf != NULL ? dir.buf : ".");
     ccb_str_append(&path, suffixes[i]);
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
     if (out != NULL) {
       ccb_str_free(&dir);
@@ -88,11 +56,11 @@ static char *read_sample_toml(void) {
   if (out != NULL) {
     return out;
   }
-  out = try_read("examples/preview-sample/ccb.toml");
+  out = ccb_test_try_read("examples/preview-sample/ccb.toml");
   if (out != NULL) {
     return out;
   }
-  return try_read("../examples/preview-sample/ccb.toml");
+  return ccb_test_try_read("../examples/preview-sample/ccb.toml");
 }
 
 // The sample toml path itself (for ccb_config_load, which resolves
@@ -126,7 +94,7 @@ static char *sample_toml_path(void) {
   }
   ccb_str_free(&dir);
   {
-    char *probe = try_read("examples/preview-sample/ccb.toml");
+    char *probe = ccb_test_try_read("examples/preview-sample/ccb.toml");
     if (probe != NULL) {
       free(probe);
       return ccb_xstrdup("examples/preview-sample/ccb.toml");
@@ -149,7 +117,7 @@ static char *read_golden(const char *rel) {
     ccb_str_init(&path);
     ccb_str_append(&path, "tests/golden/preview/");
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
   }
   if (out != NULL) {
@@ -160,7 +128,7 @@ static char *read_golden(const char *rel) {
     ccb_str_init(&path);
     ccb_str_append(&path, "../tests/golden/preview/");
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
   }
   return out;
@@ -202,7 +170,7 @@ static char *fixture_toml_path(const char *name) {
     ccb_str_append(&path, name);
     ccb_str_append(&path, "/ccb.toml");
     {
-      char *probe = try_read(path.buf != NULL ? path.buf : "");
+      char *probe = ccb_test_try_read(path.buf != NULL ? path.buf : "");
       if (probe != NULL) {
         char *out = NULL;
         free(probe);

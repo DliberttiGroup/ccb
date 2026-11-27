@@ -70,26 +70,6 @@ static int write_joined(const char *dir, const char *name,
   return rc;
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "r");
-  ccb_str s;
-  char buf[4096];
-  size_t n = 0;
-  if (f == NULL) {
-    return NULL;
-  }
-  ccb_str_init(&s);
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    ccb_str_append_n(&s, buf, n);
-  }
-  fclose(f);
-  return s.buf;
-}
-
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
-}
-
 // Recursively copy a directory tree, skipping build/ output dirs.
 static int copy_tree(const char *src, const char *dst) {
   DIR *d = opendir(src);
@@ -118,7 +98,7 @@ static int copy_tree(const char *src, const char *dst) {
     if (S_ISDIR(st.st_mode)) {
       rc = copy_tree(sp, dp);
     } else {
-      char *text = try_read(sp);
+      char *text = ccb_test_try_read(sp);
       rc = text == NULL ? -1 : write_all(dp, text);
       free(text);
     }
@@ -424,7 +404,7 @@ int main(void) {
       CHECK(e != NULL && e->target != NULL &&
         strcmp(e->target, "Detail") == 0);
       CHECK(e != NULL && e->branch != NULL &&
-        contains(e->branch, "if ready"));
+        ccb_test_contains(e->branch, "if ready"));
       CHECK(diag_count(p, "CCB-P1024") == 0);
       pv_project_free(p);
     }
@@ -703,10 +683,10 @@ int main(void) {
         char *argv[] = { "ccb", "preview", "--json", NULL };
         char *out = NULL;
         CHECK(run_cli(copy, cap, 3, argv) == 0);
-        out = try_read(cap);
-        CHECK(contains(out, "\"from\":\"Helper nav\""));
-        CHECK(contains(out, "\"from\":\"Cross file\""));
-        CHECK(contains(out, "\"from\":\"Var ref\""));
+        out = ccb_test_try_read(cap);
+        CHECK(ccb_test_contains(out, "\"from\":\"Helper nav\""));
+        CHECK(ccb_test_contains(out, "\"from\":\"Cross file\""));
+        CHECK(ccb_test_contains(out, "\"from\":\"Var ref\""));
         free(out);
       }
       free(copy);

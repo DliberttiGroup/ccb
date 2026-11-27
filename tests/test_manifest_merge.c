@@ -38,10 +38,6 @@ static char *merge1(const char *app, const char *aar, const char *name,
   return ccb_manifest_merge(app, texts, names, 1, warns, err);
 }
 
-static int contains(const char *hay, const char *needle) {
-  return strstr(hay, needle) != NULL;
-}
-
 static int count_occurrences(const char *hay, const char *needle) {
   int n = 0;
   size_t nl = strlen(needle);
@@ -64,17 +60,17 @@ int main(void) {
     CHECK(err == NULL);
     CHECK(warns.count == 0);
     if (out != NULL) {
-      CHECK(contains(out, "android.permission.CAMERA"));
-      CHECK(contains(out, "android.hardware.camera"));
-      CHECK(contains(out, "com.example.lib.LibActivity"));
-      CHECK(contains(out, "com.example.lib.LibService"));
-      CHECK(contains(out, "com.example.lib.LibReceiver"));
-      CHECK(contains(out, "com.example.lib.ACTION"));
+      CHECK(ccb_test_contains(out, "android.permission.CAMERA"));
+      CHECK(ccb_test_contains(out, "android.hardware.camera"));
+      CHECK(ccb_test_contains(out, "com.example.lib.LibActivity"));
+      CHECK(ccb_test_contains(out, "com.example.lib.LibService"));
+      CHECK(ccb_test_contains(out, "com.example.lib.LibReceiver"));
+      CHECK(ccb_test_contains(out, "com.example.lib.ACTION"));
       // App entries preserved exactly once.
       CHECK(count_occurrences(out, "android.permission.INTERNET") == 1);
       CHECK(count_occurrences(out, ".MainActivity") == 1);
       // The merged receiver keeps its intent-filter children.
-      CHECK(contains(out, "<intent-filter>"));
+      CHECK(ccb_test_contains(out, "<intent-filter>"));
     }
     free(out);
     free(err);
@@ -94,15 +90,15 @@ int main(void) {
     CHECK(out != NULL);
     CHECK(warns.count == 1);
     if (warns.count == 1) {
-      CHECK(contains(warns.msgs[0], "lib2.aar"));
-      CHECK(contains(warns.msgs[0], "MainActivity"));
+      CHECK(ccb_test_contains(warns.msgs[0], "lib2.aar"));
+      CHECK(ccb_test_contains(warns.msgs[0], "MainActivity"));
     }
     if (out != NULL) {
       // App's MainActivity kept (exported=true); AAR's copy dropped.
-      CHECK(contains(out, ".MainActivity\" android:exported=\"true\""));
+      CHECK(ccb_test_contains(out, ".MainActivity\" android:exported=\"true\""));
       CHECK(count_occurrences(out, "MainActivity") == 1);
       // Non-conflicting component still merged.
-      CHECK(contains(out, "com.example.lib.Other"));
+      CHECK(ccb_test_contains(out, "com.example.lib.Other"));
     }
     free(out);
     free(err);
@@ -156,12 +152,12 @@ int main(void) {
     CHECK(out != NULL);
     CHECK(warns.count == 1);
     if (warns.count == 1) {
-      CHECK(contains(warns.msgs[0], "b.aar"));
-      CHECK(contains(warns.msgs[0], "a.aar"));
-      CHECK(contains(warns.msgs[0], "Shared"));
+      CHECK(ccb_test_contains(warns.msgs[0], "b.aar"));
+      CHECK(ccb_test_contains(warns.msgs[0], "a.aar"));
+      CHECK(ccb_test_contains(warns.msgs[0], "Shared"));
     }
     if (out != NULL) {
-      CHECK(contains(out, "android:exported=\"true\""));
+      CHECK(ccb_test_contains(out, "android:exported=\"true\""));
       CHECK(count_occurrences(out, "Shared") == 1);
     }
     free(out);
@@ -180,7 +176,7 @@ int main(void) {
     CHECK(out == NULL);
     CHECK(err != NULL);
     if (err != NULL) {
-      CHECK(contains(err, "bad.aar"));
+      CHECK(ccb_test_contains(err, "bad.aar"));
     }
     free(out);
     free(err);
@@ -281,7 +277,7 @@ int main(void) {
     CHECK(out == NULL);
     CHECK(err != NULL);
     if (err != NULL) {
-      CHECK(contains(err, "noname.aar"));
+      CHECK(ccb_test_contains(err, "noname.aar"));
     }
     free(out);
     free(err);
@@ -301,10 +297,10 @@ int main(void) {
     char *out = merge1(APP, lib, "lib3.aar", &warns, &err);
     CHECK(out != NULL);
     if (out != NULL) {
-      CHECK(!contains(out, "LibTheme"));
-      CHECK(!contains(out, "lib.key"));
-      CHECK(contains(out, "com.example.lib.LibProvider"));
-      CHECK(contains(out, "com.example.lib.Alias"));
+      CHECK(!ccb_test_contains(out, "LibTheme"));
+      CHECK(!ccb_test_contains(out, "lib.key"));
+      CHECK(ccb_test_contains(out, "com.example.lib.LibProvider"));
+      CHECK(ccb_test_contains(out, "com.example.lib.Alias"));
     }
     free(out);
     free(err);
@@ -337,7 +333,7 @@ int main(void) {
     out = merge1(noapp, lib_perm, "p.aar", &warns, &err);
     CHECK(out != NULL);
     if (out != NULL) {
-      CHECK(contains(out, "android.permission.CAMERA"));
+      CHECK(ccb_test_contains(out, "android.permission.CAMERA"));
     }
     free(out);
     free(err);
@@ -370,8 +366,8 @@ int main(void) {
     CHECK(out != NULL);
     CHECK(warns.count == 1);
     if (warns.count == 1) {
-      CHECK(contains(warns.msgs[0], "p.aar"));
-      CHECK(contains(warns.msgs[0], "INTERNET"));
+      CHECK(ccb_test_contains(warns.msgs[0], "p.aar"));
+      CHECK(ccb_test_contains(warns.msgs[0], "INTERNET"));
     }
     if (out != NULL) {
       CHECK(count_occurrences(out, "android.permission.INTERNET") == 1);
@@ -403,8 +399,8 @@ int main(void) {
     char *out = merge1(APP, lib, "startup.aar", &warns, &err);
     CHECK(out != NULL);
     if (out != NULL) {
-      CHECK(contains(out, "tools:node=\"merge\""));
-      CHECK(contains(out,
+      CHECK(ccb_test_contains(out, "tools:node=\"merge\""));
+      CHECK(ccb_test_contains(out,
         "xmlns:tools=\"http://schemas.android.com/tools\""));
       CHECK(count_occurrences(out, "xmlns:tools=") == 1);
     }
@@ -462,8 +458,8 @@ int main(void) {
     CHECK(out == NULL);
     CHECK(err != NULL);
     if (err != NULL) {
-      CHECK(contains(err, "custom"));
-      CHECK(contains(err, "weird.aar"));
+      CHECK(ccb_test_contains(err, "custom"));
+      CHECK(ccb_test_contains(err, "weird.aar"));
     }
     free(out);
     free(err);

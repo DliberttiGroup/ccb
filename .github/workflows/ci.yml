@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   plain:
-    name: plain (50 tests)
+    name: plain (52 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -79,7 +79,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   sanitizer:
-    name: sanitizer (50 tests)
+    name: sanitizer (52 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:

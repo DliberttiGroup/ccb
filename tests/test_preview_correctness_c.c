@@ -69,22 +69,6 @@ static int write_joined(const char *dir, const char *name,
   return rc;
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "r");
-  ccb_str s;
-  char buf[4096];
-  size_t n = 0;
-  if (f == NULL) {
-    return NULL;
-  }
-  ccb_str_init(&s);
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    ccb_str_append_n(&s, buf, n);
-  }
-  fclose(f);
-  return s.buf;
-}
-
 // Recursively copy a directory tree, skipping build/ output dirs.
 static int copy_tree(const char *src, const char *dst) {
   DIR *d = opendir(src);
@@ -113,7 +97,7 @@ static int copy_tree(const char *src, const char *dst) {
     if (S_ISDIR(st.st_mode)) {
       rc = copy_tree(sp, dp);
     } else {
-      char *text = try_read(sp);
+      char *text = ccb_test_try_read(sp);
       rc = text == NULL ? -1 : write_all(dp, text);
       free(text);
     }
@@ -299,7 +283,7 @@ static char *read_golden(const char *rel) {
     ccb_str_append(&path, td);
     ccb_str_append(&path, suffixes[si]);
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
     free(td);
     if (out != NULL) {
@@ -312,7 +296,7 @@ static char *read_golden(const char *rel) {
     ccb_str_init(&path);
     ccb_str_append(&path, "tests/golden/preview/");
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
     if (out != NULL) {
       return out;
@@ -324,7 +308,7 @@ static char *read_golden(const char *rel) {
     ccb_str_init(&path);
     ccb_str_append(&path, "../tests/golden/preview/");
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
     if (out != NULL) {
       return out;

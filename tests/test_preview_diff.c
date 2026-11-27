@@ -29,37 +29,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static int write_all(const char *path, const char *data, size_t len) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
@@ -165,7 +134,7 @@ static int copy_tree(const char *src, const char *dst) {
         return -1;
       }
     } else {
-      char *data = try_read(sp);
+      char *data = ccb_test_try_read(sp);
       int rc = data == NULL ? -1 :
         write_all(dp, data, strlen(data));
       free(data);
@@ -354,7 +323,7 @@ int main(void) {
     // that screen, with a unified diff of the changed line.
     {
       char *home = join2(snap, "Home.txt");
-      char *text = try_read(home);
+      char *text = ccb_test_try_read(home);
       char *hit = text != NULL ? strstr(text, "My Notes") : NULL;
       CHECK(hit != NULL);
       if (hit != NULL) {
@@ -436,7 +405,7 @@ int main(void) {
     // differing files, diff string only for "different" files.
     {
       char *home = join2(snap, "Home.txt");
-      char *text = try_read(home);
+      char *text = ccb_test_try_read(home);
       char *hit = text != NULL ? strstr(text, "My Notes") : NULL;
       if (hit != NULL) {
         ccb_str nw;
@@ -503,7 +472,7 @@ int main(void) {
     // scoped to Detail it must name only Detail.txt.
     {
       char *detail = join2(snap, "Detail.txt");
-      char *text = try_read(detail);
+      char *text = ccb_test_try_read(detail);
       CHECK(text != NULL);
       if (text != NULL) {
         ccb_str nw;

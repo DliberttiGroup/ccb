@@ -128,10 +128,6 @@ static pv_screen *find_screen(pv_project *p, const char *name) {
   return NULL;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && strstr(hay, needle) != NULL;
-}
-
 // Build a scratch project: flow + styles + res files as given
 // (strings_xml / colors_xml NULL means the file is not written).
 // Returns the malloc'd project dir, or NULL.
@@ -275,9 +271,9 @@ int main(void) {
       ccb_str_init(&out);
       if (home != NULL) {
         pv_render_screen(&out, home, p->frame_width, 0, 0);
-        CHECK(contains(out.buf, "My Notes & More"));
-        CHECK(contains(out.buf, "@string/missing"));
-        CHECK(!contains(out.buf, "Nope"));
+        CHECK(ccb_test_contains(out.buf, "My Notes & More"));
+        CHECK(ccb_test_contains(out.buf, "@string/missing"));
+        CHECK(!ccb_test_contains(out.buf, "Nope"));
       }
       ccb_str_free(&out);
       pv_project_free(p);

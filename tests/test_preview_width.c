@@ -34,10 +34,6 @@ static pv_screen *make_screen(ccb_arena *a, const char *name, pv_box *root) {
   return s;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return strstr(hay, needle) != NULL;
-}
-
 int main(void) {
   // --- CJK text: 4 wide chars = 8 cells, padded to a 10-cell interior.
   {
@@ -196,7 +192,7 @@ int main(void) {
     pv_layout_screen(&p, screen);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 12, 1, 0);
-    CHECK(contains(out.buf, "[ \xE4\xBD\xA0\xE5\xA5\xBD ]"));
+    CHECK(ccb_test_contains(out.buf, "[ \xE4\xBD\xA0\xE5\xA5\xBD ]"));
     ccb_str_free(&out);
     for (i = 0; i < p.diags.count; i++) {
       if (strcmp(p.diags.items[i].code, "CCB-P1009") == 0) {

@@ -21,37 +21,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static char *join2(const char *a, const char *b) {
   ccb_str s;
   char *out = NULL;
@@ -164,7 +133,7 @@ int main(void) {
       "Home,Detail", "--output", out_path, NULL };
     rc = run_cli(sdir, cap_path, 7, argv);
     CHECK(rc == 0);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       const char *h1 = strstr(text, "Journey 1/2: Home");
@@ -188,7 +157,7 @@ int main(void) {
       "Home,Detail,Home", "--output", out_path, NULL };
     rc = run_cli(sdir, cap_path, 7, argv);
     CHECK(rc == 0);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       CHECK(strstr(text, "Journey 1/3: Home") != NULL);
@@ -204,7 +173,7 @@ int main(void) {
       "Home, Detail", "--output", out_path, NULL };
     rc = run_cli(sdir, cap_path, 7, argv);
     CHECK(rc == 0);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       CHECK(strstr(text, "Journey 2/2: Detail") != NULL);
@@ -253,7 +222,7 @@ int main(void) {
       "--json", "--output", out_path, NULL };
     rc = run_cli(sdir, cap_path, 7, argv);
     CHECK(rc == 0);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       const char *detail = strstr(text, "\"name\":\"Detail\"");
@@ -272,10 +241,10 @@ int main(void) {
     rc = run_cli(sdir, cap_path, 7, argv);
     char *cap = NULL;
     CHECK(rc == 0);
-    cap = try_read(cap_path);
+    cap = ccb_test_try_read(cap_path);
     CHECK(cap != NULL && cap[0] == '\0');
     free(cap);
-    text = try_read(out_path);
+    text = ccb_test_try_read(out_path);
     CHECK(text != NULL);
     if (text != NULL) {
       CHECK(strstr(text, "Journey 1/1: Detail") != NULL);

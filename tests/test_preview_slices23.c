@@ -251,10 +251,6 @@ static int edge_args_is(pv_screen *s, const char *from,
   return 0;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && strstr(hay, needle) != NULL;
-}
-
 // Scratch flags for make_scratch2.
 #define SCR_LAYOUT_KEY 1
 #define SCR_GRAPH_KEY 2
@@ -434,15 +430,15 @@ int main(void) {
       }
       ccb_str_init(&tree);
       pv_render_logic_tree(&tree, p);
-      CHECK(contains(tree.buf,
+      CHECK(ccb_test_contains(tree.buf,
         "-> Detail via \"Cond\" [if ready: then]"));
-      CHECK(contains(tree.buf,
+      CHECK(ccb_test_contains(tree.buf,
         "-> Form via \"When\" [when state: else]"));
       ccb_str_free(&tree);
       ccb_str_init(&json);
       pv_project_json(&json, p);
-      CHECK(contains(json.buf, "\"branch\":\"if ready: then\""));
-      CHECK(contains(json.buf, "\"branch\":\"when state: else\""));
+      CHECK(ccb_test_contains(json.buf, "\"branch\":\"if ready: then\""));
+      CHECK(ccb_test_contains(json.buf, "\"branch\":\"when state: else\""));
       ccb_str_free(&json);
       pv_project_free(p);
     }
@@ -474,10 +470,10 @@ int main(void) {
       }
       ccb_str_init(&tree);
       pv_render_logic_tree(&tree, p);
-      CHECK(contains(tree.buf, "-> Detail(\"note-42\") via \"A\""));
-      CHECK(contains(tree.buf, "-> Detail(id = 7) via \"B\""));
-      CHECK(contains(tree.buf, "-> Detail(unknown) via \"C\""));
-      CHECK(contains(tree.buf, "-> unknown(\"note-42\") via \"D\""));
+      CHECK(ccb_test_contains(tree.buf, "-> Detail(\"note-42\") via \"A\""));
+      CHECK(ccb_test_contains(tree.buf, "-> Detail(id = 7) via \"B\""));
+      CHECK(ccb_test_contains(tree.buf, "-> Detail(unknown) via \"C\""));
+      CHECK(ccb_test_contains(tree.buf, "-> unknown(\"note-42\") via \"D\""));
       ccb_str_free(&tree);
       pv_project_free(p);
     }

@@ -33,10 +33,6 @@ static pv_screen *make_screen(ccb_arena *a, const char *name, pv_box *root) {
   return s;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return strstr(hay, needle) != NULL;
-}
-
 static int count_occurrences(const char *hay, const char *needle) {
   int n = 0;
   size_t m = strlen(needle);
@@ -96,8 +92,8 @@ int main(void) {
     add_child(a, root, col);
     render_screen(a, root, 40, &out);
     CHECK(list->h == 3);
-    CHECK(contains(out.buf, "* Alpha"));
-    CHECK(contains(out.buf, "* Beta"));
+    CHECK(ccb_test_contains(out.buf, "* Alpha"));
+    CHECK(ccb_test_contains(out.buf, "* Beta"));
     CHECK(count_occurrences(out.buf, "* item") == 1);
     // The box after the list sits exactly below its 3 rows.
     CHECK(after->y == 3);
@@ -155,8 +151,8 @@ int main(void) {
       CHECK(list->h == 2);
       ccb_str_init(&out);
       pv_render_screen(&out, screen, 40, 1, 0);
-      CHECK(contains(out.buf, "* Alpha"));
-      CHECK(contains(out.buf, "* Beta"));
+      CHECK(ccb_test_contains(out.buf, "* Alpha"));
+      CHECK(ccb_test_contains(out.buf, "* Beta"));
       CHECK(count_occurrences(out.buf, "* item") == 0);
       ccb_str_free(&out);
       ccb_diag_list_free(&p.diags);
@@ -183,8 +179,8 @@ int main(void) {
     add_child(a, root, list);
     render_screen(a, root, 40, &out);
     CHECK(list->h == 6);
-    CHECK(contains(out.buf, "* Row0"));
-    CHECK(contains(out.buf, "* Row5"));
+    CHECK(ccb_test_contains(out.buf, "* Row0"));
+    CHECK(ccb_test_contains(out.buf, "* Row5"));
     CHECK(count_occurrences(out.buf, "* Row") == 6);
     ccb_str_free(&out);
   }

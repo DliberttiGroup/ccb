@@ -31,46 +31,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-static char *try_read(const char *path) {
-  struct stat st;
-  FILE *f = NULL;
-  long size = 0;
-  char *buf = NULL;
-  // Only regular files: ftell on a directory stream returns LONG_MAX
-  // on some filesystems, and malloc(size + 1) then wraps to 2^63
-  // and aborts. A directory is not readable content, so fail
-  // cleanly instead of trusting ftell.
-  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
-    return NULL;
-  }
-  f = fopen(path, "rb");
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static int write_all(const char *path, const char *data, size_t len) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
@@ -109,7 +69,7 @@ static char *read_first(const char *suffixes[], size_t n,
     ccb_str_append(&path, dir.buf != NULL ? dir.buf : ".");
     ccb_str_append(&path, suffixes[i]);
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
     if (out != NULL) {
       ccb_str_free(&dir);
@@ -149,7 +109,7 @@ static char *sample_toml_path(void) {
   }
   ccb_str_free(&dir);
   {
-    char *probe = try_read("examples/preview-sample/ccb.toml");
+    char *probe = ccb_test_try_read("examples/preview-sample/ccb.toml");
     if (probe != NULL) {
       free(probe);
       return ccb_xstrdup("examples/preview-sample/ccb.toml");
@@ -168,7 +128,7 @@ static char *sample_dir(void) {
     return out;
   }
   {
-    char *probe = try_read("examples/preview-sample/ccb.toml");
+    char *probe = ccb_test_try_read("examples/preview-sample/ccb.toml");
     if (probe != NULL) {
       free(probe);
       return ccb_xstrdup("examples/preview-sample/");
@@ -191,7 +151,7 @@ static char *read_golden(const char *rel) {
     ccb_str_init(&path);
     ccb_str_append(&path, "tests/golden/preview/");
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
   }
   if (out != NULL) {
@@ -202,7 +162,7 @@ static char *read_golden(const char *rel) {
     ccb_str_init(&path);
     ccb_str_append(&path, "../tests/golden/preview/");
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
   }
   return out;
@@ -247,7 +207,7 @@ static int copy_tree(const char *src, const char *dst) {
     if (S_ISDIR(st.st_mode)) {
       rc = copy_tree(sp, dp);
     } else {
-      char *data = try_read(sp);
+      char *data = ccb_test_try_read(sp);
       rc = data == NULL ? -1 :
         write_all(dp, data, strlen(data));
       free(data);
@@ -297,10 +257,6 @@ static int run_cli(const char *workdir, const char *cap_path,
   close(saved);
   { int rc2 = chdir(cwd); (void)rc2; }
   return rc;
-}
-
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
 }
 
 // ---------- project helpers ----------
@@ -745,11 +701,11 @@ int main(void) {
         ccb_str out;
         ccb_str_init(&out);
         pv_render_logic_tree(&out, &p);
-        CHECK(contains(out.buf, "is Loaded [scenario]"));
-        CHECK(contains(out.buf, "(\"v1\" [scenario])"));
-        CHECK(contains(out.buf,
+        CHECK(ccb_test_contains(out.buf, "is Loaded [scenario]"));
+        CHECK(ccb_test_contains(out.buf, "(\"v1\" [scenario])"));
+        CHECK(ccb_test_contains(out.buf,
           "scenario: list \"notes\" = [\"a\", \"b\"] [scenario]"));
-        CHECK(contains(out.buf,
+        CHECK(ccb_test_contains(out.buf,
           "scenario: field \"Search\" = \"q\" [scenario]"));
         ccb_str_free(&out);
       }
@@ -772,9 +728,9 @@ int main(void) {
         NULL };
       char *out = NULL;
       CHECK(run_cli(proj, cap, 4, argv) == 0);
-      out = try_read(cap);
-      CHECK(contains(out, "scenario: list \"notes\""));
-      CHECK(contains(out, "[scenario]"));
+      out = ccb_test_try_read(cap);
+      CHECK(ccb_test_contains(out, "scenario: list \"notes\""));
+      CHECK(ccb_test_contains(out, "[scenario]"));
       free(out);
     }
     {
@@ -782,9 +738,9 @@ int main(void) {
         "--json", NULL };
       char *out = NULL;
       CHECK(run_cli(proj, cap, 5, argv) == 0);
-      out = try_read(cap);
-      CHECK(contains(out, "\"scenario\":\"loaded\""));
-      CHECK(contains(out, "\"provenance\":\"scenario\""));
+      out = ccb_test_try_read(cap);
+      CHECK(ccb_test_contains(out, "\"scenario\":\"loaded\""));
+      CHECK(ccb_test_contains(out, "\"provenance\":\"scenario\""));
       free(out);
     }
     {
@@ -792,8 +748,8 @@ int main(void) {
         "--screen", "Home", NULL };
       char *out = NULL;
       CHECK(run_cli(proj, cap, 6, argv) == 0);
-      out = try_read(cap);
-      CHECK(contains(out, "Buy milk"));
+      out = ccb_test_try_read(cap);
+      CHECK(ccb_test_contains(out, "Buy milk"));
       free(out);
     }
     {

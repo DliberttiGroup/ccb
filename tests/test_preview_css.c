@@ -73,43 +73,6 @@ static void setup_project(pv_project *p, ccb_arena *a, pv_rule *rules,
   ccb_diag_list_init(&p->diags);
 }
 
-static int contains(const char *hay, const char *needle) {
-  return strstr(hay, needle) != NULL;
-}
-
-// Read a whole file, or NULL. Tries a candidate path, built with
-// ccb_str so no sprintf is needed.
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static char *read_sample_style(const char *rel) {
   const char *file = __FILE__;
   const char *slash = strrchr(file, '/');
@@ -128,7 +91,7 @@ static char *read_sample_style(const char *rel) {
     }
     ccb_str_append(&path, suffixes[i]);
     ccb_str_append(&path, rel);
-    out = try_read(path.buf != NULL ? path.buf : "");
+    out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
     ccb_str_free(&path);
     if (out != NULL) {
       return out;
@@ -137,7 +100,7 @@ static char *read_sample_style(const char *rel) {
   ccb_str_init(&path);
   ccb_str_append(&path, "examples/preview-sample/");
   ccb_str_append(&path, rel);
-  out = try_read(path.buf != NULL ? path.buf : "");
+  out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
   ccb_str_free(&path);
   if (out != NULL) {
     return out;
@@ -145,7 +108,7 @@ static char *read_sample_style(const char *rel) {
   ccb_str_init(&path);
   ccb_str_append(&path, "../examples/preview-sample/");
   ccb_str_append(&path, rel);
-  out = try_read(path.buf != NULL ? path.buf : "");
+  out = ccb_test_try_read(path.buf != NULL ? path.buf : "");
   ccb_str_free(&path);
   return out;
 }
@@ -539,7 +502,7 @@ int main(void) {
       "\xE2\x94\x8C\xE2\x94\x80\xE2\x94\x80 Home \xE2\x94\x80\xE2\x94\x80\xE2\x94\x90\n"
       "\xE2\x94\x82Hi        \xE2\x94\x82\n"
       "\xE2\x94\x94\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x98\n");
-    CHECK(!contains(out.buf, "\x1b["));
+    CHECK(!ccb_test_contains(out.buf, "\x1b["));
     ccb_str_free(&out);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 12, 1, 0);
@@ -571,7 +534,7 @@ int main(void) {
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 10, 1, 0);
     CHECK_STR_EQ(out.buf, "+--------+\n+--------+\n");
-    CHECK(!contains(out.buf, "VeryLong"));
+    CHECK(!ccb_test_contains(out.buf, "VeryLong"));
     ccb_str_free(&out);
     ccb_diag_list_free(&p.diags);
   }
@@ -618,17 +581,17 @@ int main(void) {
     pv_layout_screen(&p, screen);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 0, 0);
-    CHECK(contains(out.buf, "[ Save ]"));
-    CHECK(contains(out.buf, "[Title]"));
-    CHECK(contains(out.buf, "\xE2\x80\xA2 item"));
-    CHECK(contains(out.buf, "[ image ]"));
-    CHECK(contains(out.buf, "[Widget]"));
-    CHECK(contains(out.buf, "Branch text"));
+    CHECK(ccb_test_contains(out.buf, "[ Save ]"));
+    CHECK(ccb_test_contains(out.buf, "[Title]"));
+    CHECK(ccb_test_contains(out.buf, "\xE2\x80\xA2 item"));
+    CHECK(ccb_test_contains(out.buf, "[ image ]"));
+    CHECK(ccb_test_contains(out.buf, "[Widget]"));
+    CHECK(ccb_test_contains(out.buf, "Branch text"));
     ccb_str_free(&out);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 1, 0);
-    CHECK(contains(out.buf, "* item"));
-    CHECK(!contains(out.buf, "\xE2\x80\xA2"));
+    CHECK(ccb_test_contains(out.buf, "* item"));
+    CHECK(!ccb_test_contains(out.buf, "\xE2\x80\xA2"));
     ccb_str_free(&out);
     ccb_diag_list_free(&p.diags);
   }
@@ -655,12 +618,12 @@ int main(void) {
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 0, 1);
     // #ffffff -> 231; red (255,0,0) -> 196.
-    CHECK(contains(out.buf, "48;5;231"));
-    CHECK(contains(out.buf, "38;5;196"));
+    CHECK(ccb_test_contains(out.buf, "48;5;231"));
+    CHECK(ccb_test_contains(out.buf, "38;5;196"));
     ccb_str_free(&out);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 0, 0);
-    CHECK(!contains(out.buf, "\x1b["));
+    CHECK(!ccb_test_contains(out.buf, "\x1b["));
     ccb_str_free(&out);
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
@@ -729,12 +692,12 @@ int main(void) {
     CHECK(diag_count(&p.diags, "CCB-P1009") == 0);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 0, 0);
-    CHECK(contains(out.buf, "My Notes"));
-    CHECK(contains(out.buf, "[ Open note ]"));
-    CHECK(contains(out.buf, "[ New note ]"));
-    CHECK(contains(out.buf, "[ Settings ]"));
-    CHECK(contains(out.buf, "\xE2\x80\xA2 item"));
-    CHECK(!contains(out.buf, "\x1b["));
+    CHECK(ccb_test_contains(out.buf, "My Notes"));
+    CHECK(ccb_test_contains(out.buf, "[ Open note ]"));
+    CHECK(ccb_test_contains(out.buf, "[ New note ]"));
+    CHECK(ccb_test_contains(out.buf, "[ Settings ]"));
+    CHECK(ccb_test_contains(out.buf, "\xE2\x80\xA2 item"));
+    CHECK(!ccb_test_contains(out.buf, "\x1b["));
     ccb_str_free(&out);
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
@@ -791,7 +754,7 @@ int main(void) {
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 1, 0);
     // (38 - 2) / 2 = 18 leading spaces.
-    CHECK(contains(out.buf, "|                  Hi"));
+    CHECK(ccb_test_contains(out.buf, "|                  Hi"));
     ccb_str_free(&out);
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
@@ -817,7 +780,7 @@ int main(void) {
     pv_layout_screen(&p, screen);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 1, 0);
-    CHECK(contains(out.buf, "|                                    Hi"));
+    CHECK(ccb_test_contains(out.buf, "|                                    Hi"));
     ccb_str_free(&out);
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
@@ -846,8 +809,8 @@ int main(void) {
     CHECK(t->w == 9);
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 1, 0);
-    CHECK(contains(out.buf, "|HelloWorl "));
-    CHECK(!contains(out.buf, "HelloWorld"));
+    CHECK(ccb_test_contains(out.buf, "|HelloWorl "));
+    CHECK(!ccb_test_contains(out.buf, "HelloWorld"));
     ccb_str_free(&out);
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
@@ -878,14 +841,14 @@ int main(void) {
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 1, 0);
     // ASCII outline: top row, content row with side bars, bottom row.
-    CHECK(contains(out.buf, "+--------------------------------------+\n"));
-    CHECK(contains(out.buf, "||[Title]"));
+    CHECK(ccb_test_contains(out.buf, "+--------------------------------------+\n"));
+    CHECK(ccb_test_contains(out.buf, "||[Title]"));
     ccb_str_free(&out);
     // Border color, not the text color, drives the outline's ANSI
     // code when color is enabled (the rule sets no text color).
     ccb_str_init(&out);
     pv_render_screen(&out, screen, 40, 0, 1);
-    CHECK(contains(out.buf, "38;5;196"));
+    CHECK(ccb_test_contains(out.buf, "38;5;196"));
     ccb_str_free(&out);
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
@@ -1062,7 +1025,7 @@ int main(void) {
     screen = make_screen(a, "S", root);
     pv_layout_screen(&p, screen);
     CHECK(diag_count(&p.diags, "CCB-P1014") == 1);
-    CHECK(contains(p.diags.items[0].message, "column"));
+    CHECK(ccb_test_contains(p.diags.items[0].message, "column"));
     ccb_diag_list_free(&diags);
     ccb_diag_list_free(&p.diags);
     ccb_diag_list_init(&diags);

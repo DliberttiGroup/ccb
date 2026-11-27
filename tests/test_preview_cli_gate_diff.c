@@ -30,37 +30,6 @@ static void test_dir(ccb_str *out) {
   }
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
-  long size = 0;
-  char *buf = NULL;
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  buf = ccb_xmalloc((size_t)size + 1);
-  if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
-    free(buf);
-    fclose(f);
-    return NULL;
-  }
-  buf[size] = '\0';
-  fclose(f);
-  return buf;
-}
-
 static int write_all(const char *path, const char *data, size_t len) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
@@ -154,7 +123,7 @@ static int copy_tree(const char *src, const char *dst) {
         return -1;
       }
     } else {
-      char *data = try_read(sp);
+      char *data = ccb_test_try_read(sp);
       int rc = data == NULL ? -1 :
         write_all(dp, data, strlen(data));
       free(data);
@@ -209,15 +178,11 @@ static int run_cli(const char *workdir, const char *cap_path,
   return rc;
 }
 
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
-}
-
 // Replace the first occurrence of `from` with `to` in the file at
 // path; returns 0 on success.
 static int replace_in_file(const char *path, const char *from,
     const char *to) {
-  char *data = try_read(path);
+  char *data = ccb_test_try_read(path);
   char *hit = NULL;
   ccb_str out;
   int rc = -1;
@@ -290,8 +255,8 @@ int main(void) {
     char *argv[] = { "ccb", "preview", "--diff", snap, NULL };
     char *text = NULL;
     CHECK(run_cli(proj, cap, 4, argv) == 0);
-    text = try_read(cap);
-    CHECK(contains(text, "preview identical to snapshot"));
+    text = ccb_test_try_read(cap);
+    CHECK(ccb_test_contains(text, "preview identical to snapshot"));
     free(text);
   }
 
@@ -308,19 +273,19 @@ int main(void) {
     char *argv[] = { "ccb", "preview", "--diff", snap, NULL };
     char *text = NULL;
     CHECK(run_cli(proj, cap, 4, argv) == 1);
-    text = try_read(cap);
-    CHECK(contains(text, "Home.txt"));
-    CHECK(contains(text, "differing files"));
+    text = ccb_test_try_read(cap);
+    CHECK(ccb_test_contains(text, "Home.txt"));
+    CHECK(ccb_test_contains(text, "differing files"));
     free(text);
   }
   {
     char *argv[] = { "ccb", "preview", "--diff", snap, "--json", NULL };
     char *text = NULL;
     CHECK(run_cli(proj, cap, 5, argv) == 1);
-    text = try_read(cap);
-    CHECK(contains(text, "\"event\":\"preview-diff\""));
-    CHECK(contains(text, "\"identical\":false"));
-    CHECK(contains(text, "Home.txt"));
+    text = ccb_test_try_read(cap);
+    CHECK(ccb_test_contains(text, "\"event\":\"preview-diff\""));
+    CHECK(ccb_test_contains(text, "\"identical\":false"));
+    CHECK(ccb_test_contains(text, "Home.txt"));
     free(text);
   }
   {
@@ -334,11 +299,11 @@ int main(void) {
     char *text = NULL;
     char *captext = NULL;
     CHECK(run_cli(proj, cap, 6, argv) == 1);
-    captext = try_read(cap);
+    captext = ccb_test_try_read(cap);
     CHECK(captext != NULL && captext[0] == '\0');
     free(captext);
-    text = try_read(out);
-    CHECK(contains(text, "Home.txt"));
+    text = ccb_test_try_read(out);
+    CHECK(ccb_test_contains(text, "Home.txt"));
     free(text);
   }
 
@@ -358,8 +323,8 @@ int main(void) {
     char *text = NULL;
     CHECK(write_all(ghost, "stale\n", 6) == 0);
     CHECK(run_cli(proj, cap, 4, argv) == 1);
-    text = try_read(cap);
-    CHECK(contains(text, "stale: Ghost.txt"));
+    text = ccb_test_try_read(cap);
+    CHECK(ccb_test_contains(text, "stale: Ghost.txt"));
     free(text);
     free(ghost);
   }
@@ -369,8 +334,8 @@ int main(void) {
     char *text = NULL;
     CHECK(unlink(detail) == 0);
     CHECK(run_cli(proj, cap, 4, argv) == 1);
-    text = try_read(cap);
-    CHECK(contains(text, "missing: Detail.txt"));
+    text = ccb_test_try_read(cap);
+    CHECK(ccb_test_contains(text, "missing: Detail.txt"));
     free(text);
     free(detail);
   }

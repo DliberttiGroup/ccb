@@ -70,49 +70,6 @@ static char *env_or_home(const char *env_name, const char *rel) {
   return ccb_path_join(home, rel);
 }
 
-// Highest build-tools version under sdk_home that has an aapt2, or
-// NULL. The version string (e.g. "36.0.0") is malloc'd.
-static char *find_build_tools(const char *sdk_home) {
-  char *bt_dir = ccb_path_join(sdk_home, "build-tools");
-  DIR *d = opendir(bt_dir);
-  if (d == NULL) {
-    free(bt_dir);
-    return NULL;
-  }
-  char *best = NULL;
-  struct dirent *e = NULL;
-  while ((e = readdir(d)) != NULL) {
-    if (e->d_name[0] == '.') {
-      continue;
-    }
-    // Only build-tools CCB accepts (major 34..36): the runner image
-    // ships newer ones (e.g. 37) with no matching platform, and
-    // deriving compile_sdk from them fails config load (CCB-E1005).
-    int major = 0;
-    const char *mp = e->d_name;
-    if (*mp < '0' || *mp > '9') {
-      continue;
-    }
-    while (*mp >= '0' && *mp <= '9') {
-      major = major * 10 + (*mp - '0');
-      mp++;
-    }
-    if (major < 34 || major > 36) {
-      continue;
-    }
-    char *cand = ccb_path_join3(bt_dir, e->d_name, "aapt2");
-    int ok = access(cand, X_OK) == 0;
-    free(cand);
-    if (ok && (best == NULL || strcmp(e->d_name, best) > 0)) {
-      free(best);
-      best = ccb_xstrdup(e->d_name);
-    }
-  }
-  closedir(d);
-  free(bt_dir);
-  return best;
-}
-
 // An r8 jar to build with, or NULL when none is discoverable.
 static char *find_r8_jar(const char *sdk_home) {
   const char *env = getenv("CCB_R8_JAR");
@@ -384,7 +341,7 @@ int main(int argc, char **argv) {
   }
   char *java_home = env_or_home("JAVA_HOME", "jdk17");
   char *kotlin_home = env_or_home("KOTLIN_HOME", "kotlin-2.4.21/kotlinc");
-  char *bt_ver = sdk_home != NULL ? find_build_tools(sdk_home) : NULL;
+  char *bt_ver = sdk_home != NULL ? ccb_test_find_build_tools(sdk_home) : NULL;
   char *kotlinc = kotlin_home != NULL ?
     ccb_path_join(kotlin_home, "bin/kotlinc") : NULL;
   char *keytool = java_home != NULL ?

@@ -77,26 +77,6 @@ static void mkdir_joined(const char *dir, const char *name) {
   free(path);
 }
 
-static char *try_read(const char *path) {
-  FILE *f = fopen(path, "r");
-  ccb_str s;
-  char buf[4096];
-  size_t n = 0;
-  if (f == NULL) {
-    return NULL;
-  }
-  ccb_str_init(&s);
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    ccb_str_append_n(&s, buf, n);
-  }
-  fclose(f);
-  return s.buf;
-}
-
-static int contains(const char *hay, const char *needle) {
-  return hay != NULL && needle != NULL && strstr(hay, needle) != NULL;
-}
-
 // Recursively copy a directory tree, skipping build/ output dirs.
 static int copy_tree(const char *src, const char *dst) {
   DIR *d = opendir(src);
@@ -125,7 +105,7 @@ static int copy_tree(const char *src, const char *dst) {
     if (S_ISDIR(st.st_mode)) {
       rc = copy_tree(sp, dp);
     } else {
-      char *text = try_read(sp);
+      char *text = ccb_test_try_read(sp);
       rc = text == NULL ? -1 : write_all(dp, text);
       free(text);
     }
@@ -252,7 +232,7 @@ static pv_edge *find_edge(pv_screen *screen, const char *from) {
 // Strip the explicit layout = / nav_graph = lines from a ccb.toml,
 // leaving every other line untouched.
 static int strip_layout_nav_keys(const char *toml_path) {
-  char *text = try_read(toml_path);
+  char *text = ccb_test_try_read(toml_path);
   ccb_str out;
   const char *cur = NULL;
   if (text == NULL) {
@@ -521,12 +501,12 @@ int main(void) {
         strcmp(e->target, "DetailActivity") == 0);
       ccb_str_init(&tree);
       pv_render_logic_tree(&tree, p);
-      CHECK(contains(tree.buf, "Extra [graph]"));
+      CHECK(ccb_test_contains(tree.buf, "Extra [graph]"));
       ccb_str_free(&tree);
       ccb_str_init(&json);
       pv_project_json(&json, p);
-      CHECK(contains(json.buf, "\"graph_only\":true"));
-      CHECK(contains(json.buf, "\"name\":\"Extra\""));
+      CHECK(ccb_test_contains(json.buf, "\"graph_only\":true"));
+      CHECK(ccb_test_contains(json.buf, "\"name\":\"Extra\""));
       ccb_str_free(&json);
       // Walk: following the suffix-matched "Open" edge lands on
       // the Detail screen, not on an unknown target.
@@ -729,9 +709,9 @@ int main(void) {
         char *argv[] = { "ccb", "preview", "--json", NULL };
         char *out = NULL;
         CHECK(run_cli(copy, cap, 3, argv) == 0);
-        out = try_read(cap);
-        CHECK(contains(out, "\"name\":\"Home\""));
-        CHECK(contains(out, "\"name\":\"Detail\""));
+        out = ccb_test_try_read(cap);
+        CHECK(ccb_test_contains(out, "\"name\":\"Home\""));
+        CHECK(ccb_test_contains(out, "\"name\":\"Detail\""));
         free(out);
       }
       free(p1_toml);
