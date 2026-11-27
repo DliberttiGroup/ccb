@@ -574,10 +574,19 @@ int main(int argc, char **argv) {
   char *const env_extra[] = { sdk_env, java_env, kotlin_env, home_env, NULL };
 
   // Scrubbed env: kotlinc nowhere to be found (KOTLIN_HOME removed
-  // entirely, PATH without any kotlin dir). JAVA_HOME still points
-  // at the JDK.
+  // entirely, PATH pointing at an empty dir the test owns: the
+  // runner image preinstalls kotlinc on PATH, so scrubbing to
+  // /usr/bin:/bin still finds it there). JAVA_HOME still points at
+  // the JDK.
   char *scrubbed_kotlin = ccb_xstrdup("KOTLIN_HOME");
-  char *scrubbed_path = ccb_xstrdup("PATH=/usr/bin:/bin");
+  char *scrubbed_path = NULL;
+  {
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, "PATH=");
+    ccb_str_append(&s, B("emptypath"));
+    scrubbed_path = ccb_str_steal(&s);
+  }
   char *const scrubbed_env[] = { sdk_env, java_env, home_env,
     scrubbed_kotlin, scrubbed_path, NULL };
 
@@ -587,6 +596,28 @@ int main(int argc, char **argv) {
   }
 
   ccb_remove_recursive(BASE);
+  mkdir_or_fail(B("emptypath"));
+  // Clean-room PATH: only the helpers the build-tools wrapper
+  // scripts need (basename, dirname, expr, java). kotlinc must not
+  // be reachable via PATH: the runner image preinstalls it, so
+  // scrubbing to /usr/bin:/bin still finds it there.
+  {
+    const char *helpers[] = { "basename", "dirname", "expr" };
+    for (size_t i = 0; i < 3; i++) {
+      char *src = ccb_path_join("/usr/bin", helpers[i]);
+      char *dst = ccb_path_join(B("emptypath"), helpers[i]);
+      CHECK(access(src, X_OK) == 0);
+      CHECK(symlink(src, dst) == 0);
+      free(src);
+      free(dst);
+    }
+    char *jsrc = ccb_path_join(java_home, "bin/java");
+    char *jdst = ccb_path_join(B("emptypath"), "java");
+    CHECK(access(jsrc, X_OK) == 0);
+    CHECK(symlink(jsrc, jdst) == 0);
+    free(jsrc);
+    free(jdst);
+  }
   test_native_header_deps(bin, env_extra, ndk_version, readelf);
   if (ccb_sdk_find_on_path("cmake") != NULL &&
       ccb_sdk_find_on_path("make") != NULL) {
