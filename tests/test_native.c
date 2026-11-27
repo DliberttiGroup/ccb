@@ -619,12 +619,15 @@ int main(int argc, char **argv) {
     free(jdst);
   }
   test_native_header_deps(bin, env_extra, ndk_version, readelf);
-  if (ccb_sdk_find_on_path("cmake") != NULL &&
-      ccb_sdk_find_on_path("make") != NULL) {
+  char *cmake = ccb_sdk_find_on_path("cmake");
+  char *make = ccb_sdk_find_on_path("make");
+  if (cmake != NULL && make != NULL) {
     test_cmake(bin, env_extra, ndk_version, readelf);
   } else {
     fprintf(stderr, "note: no cmake/make on PATH, skipping cmake checks\n");
   }
+  free(cmake);
+  free(make);
   test_java_only(bin, scrubbed_env);
 
   free(bin);
