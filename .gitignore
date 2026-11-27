@@ -5,3 +5,15 @@ build-outputs/
 *.apk
 *.o
 *.a
+
+# Internal-only working notes (kept locally, never committed)
+# NOTES.md, LAUNCH.md and the docs/*-plan.md + real-world-testing.md
+# working files live in the maintainer's local tree only.
+/NOTES.md
+/LAUNCH.md
+docs/deeper-coverage-plan.md
+docs/fidelity-behavior-plan.md
+docs/m5-plan.md
+docs/preview-correctness-plan.md
+docs/preview-runtime-plan.md
+docs/real-world-testing.md

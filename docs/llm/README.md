@@ -33,8 +33,6 @@
 ## 未翻译的文件
 
 - `requirement.md`（仓库根目录）：唯一的英文规范，特意不翻译；它是权威的规格说明。
-- `NOTES.md`：代理的工作笔记，不是用户文档，不翻译。
-- `docs/` 下的计划文档（`deeper-coverage-plan.md`、`fidelity-behavior-plan.md`、`m5-plan.md`、`preview-correctness-plan.md`、`preview-runtime-plan.md`、`real-world-testing.md`）：工作计划，不是用户文档，不翻译。
 
 ## 约定
 

@@ -35,7 +35,7 @@
 
 ## 事实的归属
 
-每个事实只有一个归属。工具链 → [setup.md](setup.md)。安装工具 → [setup-tools.md](setup-tools.md)。构建命令 → [README](../../README.md)。流水线 → [build.md](build.md)。Daemon → [build-daemon.md](build-daemon.md)。发布二进制 → [build-release.md](build-release.md)。测试数量 → [build-tests.md](build-tests.md)。错误代码含义与退出码 → [diagnostics.md](diagnostics.md)。实测数字 → [build.md](build.md)。状态 → [LAUNCH.md](../../LAUNCH.md)。
+每个事实只有一个归属。工具链 → [setup.md](setup.md)。安装工具 → [setup-tools.md](setup-tools.md)。构建命令 → [README](../../README.md)。流水线 → [build.md](build.md)。Daemon → [build-daemon.md](build-daemon.md)。发布二进制 → [build-release.md](build-release.md)。测试数量 → [build-tests.md](build-tests.md)。错误代码含义与退出码 → [diagnostics.md](diagnostics.md)。实测数字 → [build.md](build.md)。
 
 ## 标签
 

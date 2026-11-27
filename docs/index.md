@@ -43,7 +43,6 @@ Pipeline → [build.md](build.md). Daemon → [build-daemon.md](build-daemon.md)
 Release binary → [build-release.md](build-release.md). Test counts →
 [build-tests.md](build-tests.md). Error-code meanings and exit codes →
 [diagnostics.md](diagnostics.md). Measured numbers → [build.md](build.md).
-Status → [LAUNCH.md](../LAUNCH.md).
 
 ## Tags
 

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml/badge.svg)](https://github.com/DliberttiGroup/ccb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![C17](https://img.shields.io/badge/C-C17-blue.svg)](LAUNCH.md#code-rules)
+[![C17](https://img.shields.io/badge/C-C17-blue.svg)](CONTRIBUTING.md#code-rules)
 
 Build headless Android APKs without Gradle. One C binary, no daemon, no
 runtime dependencies. Every build reproducible and explainable
@@ -39,7 +39,7 @@ cmake --build build-release
 ```
 
 Tests: [docs/build-tests.md](docs/build-tests.md#running-the-tests). Run suites
-sequentially, never concurrently. No packages yet — see [LAUNCH.md](LAUNCH.md).
+sequentially, never concurrently. No packages yet.
 
 ## Transitioning from Gradle
 
@@ -68,7 +68,7 @@ package `com.example.hello` regardless of the directory name.
 ├─ docs/llm/      agent docs, Chinese (see llms.txt)
 ├─ examples/      hello, preview-sample, real-world
 ├─ requirement.md the specification
-├─ LAUNCH.md      prototype launch checklist
+├─ CONTRIBUTING.md contributing guide
 └─ LICENSE        Apache 2.0
 ```
 
