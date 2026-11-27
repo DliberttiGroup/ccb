@@ -36,6 +36,7 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [preview-styles.md](preview-styles.md) | CSS styles, layout model, lint diagnostics |
 | [preview-modes.md](preview-modes.md) | Diff, walk, watch modes |
 | [preview-lsp.md](preview-lsp.md) | LSP server, tree-live mode |
+| [tui.md](tui.md) | Terminal UI library: cells, diffing, input, terminal |
 | [device-setup.md](device-setup.md) | Connecting a device over wireless debugging |
 
 ## Where facts live
@@ -44,7 +45,7 @@ One home per fact. Toolchain → [setup.md](setup.md). Installing tools →
 [setup-tools.md](setup-tools.md). Build commands → [README](../README.md).
 Pipeline → [build.md](build.md). Daemon → [build-daemon.md](build-daemon.md).
 Release binary → [build-release.md](build-release.md). Test counts →
-[build-tests.md](build-tests.md). Error-code meanings and exit codes →
+[build-tests.md](build-tests.md). Terminal UI library → [tui.md](tui.md). Error-code meanings and exit codes →
 [diagnostics.md](diagnostics.md). Measured numbers → [build.md](build.md).
 Maven resolution → [maven-resolve.md](maven-resolve.md). Maven cache and
 lockfile → [maven-cache.md](maven-cache.md). Maven troubleshooting →
@@ -155,3 +156,12 @@ Every section carries a `*ccb-<slug>*` tag. Find a section by tag here.
 | `*ccb-json-diagnostics*` | json-protocol.md | Diagnostics |
 | `*ccb-json-commands*` | json-protocol.md | Other commands |
 | `*ccb-json-explain*` | json-protocol.md | --explain and --dry-run |
+| `*ccb-tui*` | tui.md | Terminal UI library |
+| `*ccb-tui-model*` | tui.md | Frame model |
+| `*ccb-tui-modules*` | tui.md | Modules |
+| `*ccb-tui-pipeline*` | tui.md | Render pipeline |
+| `*ccb-tui-ansi*` | tui.md | ANSI subset |
+| `*ccb-tui-input*` | tui.md | Input |
+| `*ccb-tui-resize*` | tui.md | Resize and signals |
+| `*ccb-tui-limits*` | tui.md | What it does not do |
+| `*ccb-tui-tests*` | tui.md | Tests |

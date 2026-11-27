@@ -7,7 +7,7 @@
 Build CCB first ([README](../README.md#build-from-source)). Then:
 
 ```
-ctest --test-dir build -L fast     # quick gate: 44 tests, ~16s quiet
+ctest --test-dir build -L fast     # quick gate: 45 tests, ~16s quiet
                                    # (~45s when the VM is busy)
 ctest --test-dir build -L <area>   # one area: config, setup, pipeline,
                                    # preview, misc, dexcheck, daemon,
