@@ -144,7 +144,14 @@ be present and whole. Tiers, cheapest first:
 - Content checks only where they are cheap and a corrupt output
   would otherwise ship: `.class` files must start with `CAFEBABE`,
   `.dex` files must carry dex magic with a header size matching
-  the file, native `.so` files must start with the ELF magic.
+  the file, native `.so` files must start with the ELF magic, and
+  the signed APK/AAB must start with ZIP magic (`PK\x03\x04`) — the
+  signer truncates its output on failure, so mere existence would
+  let a 0-byte artifact skip signing forever. The classes dir must
+  also hold the `R.class` for every generated `R.java`: the step
+  wipes the dir before compiling, so a failed `javac` leaves it
+  without `R.class`, and without that check every build after would
+  ship an APK without it.
   Reading a few header bytes per output file costs far less than
   the JVM boots a re-run would cost; no-op rebuild time is
   unchanged (~1 s on hello).

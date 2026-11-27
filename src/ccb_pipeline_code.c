@@ -119,7 +119,8 @@ static int ccb_class_file_valid(const char *path) {
 // True when the classes dir holds at least one whole .class file.
 // Existence of the dir alone is not enough: a dir left behind
 // after its classes were deleted must not validate a skip.
-static int ccb_classes_dir_valid(const char *dir) {
+static int ccb_classes_dir_valid(ccb_pipe *p, char **rjava, size_t nrjava) {
+  const char *dir = p->classes_dir;
   if (!ccb_path_is_dir(dir)) {
     return 0;
   }
@@ -135,6 +136,34 @@ static int ccb_classes_dir_valid(const char *dir) {
     }
   }
   ccb_free_str_array(files, n);
+  // Every generated R.java must have its R.class. The step wipes the
+  // classes dir before compiling, so a failed javac leaves it without
+  // R.class; a later skip must not trust a dir that lost it, or every
+  // build after would ship an APK without R.class and never notice.
+  // The R.java path is <gen>/<rel>.java; javac writes <classes>/<rel>.class.
+  size_t gen_len = strlen(p->gen_dir);
+  for (size_t i = 0; i < nrjava && ok; i++) {
+    const char *rel = rjava[i];
+    if (strncmp(rel, p->gen_dir, gen_len) == 0 && rel[gen_len] == '/') {
+      rel += gen_len + 1;
+    }
+    size_t rel_len = strlen(rel);
+    if (rel_len < 6 || strcmp(rel + rel_len - 5, ".java") != 0) {
+      ok = 0;
+      continue;
+    }
+    ccb_str s;
+    ccb_str_init(&s);
+    ccb_str_append(&s, dir);
+    ccb_str_append_c(&s, '/');
+    ccb_str_append_n(&s, rel, rel_len - 5);
+    ccb_str_append(&s, ".class");
+    char *want = ccb_str_steal(&s);
+    if (!ccb_path_exists(want)) {
+      ok = 0;
+    }
+    free(want);
+  }
   return ok;
 }
 
@@ -254,7 +283,7 @@ ccb_status ccb_step_code(ccb_pipe *p) {
         printf("compile-code: run (link outputs will change)\n");
         p->code_will_run = 1;
       } else if (old != NULL && strcmp(old, fp) == 0 &&
-          ccb_classes_dir_valid(p->classes_dir)) {
+          ccb_classes_dir_valid(p, rjava_files, nrjava)) {
         printf("compile-code: skip (inputs unchanged)\n");
         p->code_will_run = 0;
       } else if (old != NULL && strcmp(old, fp) == 0) {
@@ -273,7 +302,7 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     // this, deleting build/intermediates/classes reported a
     // successful "up to date" build from a stale APK.
     if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 &&
-        ccb_classes_dir_valid(p->classes_dir)) {
+        ccb_classes_dir_valid(p, rjava_files, nrjava)) {
       free(cp_str);
       free(fp);
       p->code_will_run = 0;
@@ -380,7 +409,7 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     // letting dex silently skip and packaging an APK with no code.
     // Planning modes are exempt: in dry-run the compilers never
     // actually run, so no classes exist yet.
-    if (!p->opts->dry_run && !ccb_classes_dir_valid(p->classes_dir)) {
+    if (!p->opts->dry_run && !ccb_classes_dir_valid(p, rjava_files, nrjava)) {
       ccb_pipe_diag(p, "CCB-E3004", "kotlinc",
         "compilation produced no .class files from the project sources");
       free(fp);

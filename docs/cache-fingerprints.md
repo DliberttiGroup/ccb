@@ -167,7 +167,11 @@ changes are caught by the jar file hashes, and android.jar content
 is hashed by `link` (its path here plus `compile_sdk` in the tool
 fingerprint cover the code step). `kotlin_plugin_option` is one key
 per `[build] kotlin_plugin_options` entry. Skip also requires the
-classes dir to hold at least one whole `.class` file (`CAFEBABE`).
+classes dir to hold at least one whole `.class` file (`CAFEBABE`)
+and the `R.class` for every generated `R.java`: the step wipes the
+classes dir before compiling, so a failed `javac` leaves it without
+`R.class`, and without that check every build after would ship an
+APK without it (Step 3 fix, proven by `test_cache_regression.c`).
 
 ### dex
 
@@ -346,9 +350,13 @@ cannot see the switch. The alias is a fingerprint component now
 (`test_cache_regression.c` proves it with a two-alias debug
 keystore). Password env var names and values are never fingerprinted
 or stored: a password unlocks the keystore, it does not change the
-signature bytes. Skip also requires the signed APK/AAB to exist. A
-truncated signed APK changes its hash, so verify reruns and
-apksigner verify fails loudly (`CCB-E3010`).
+signature bytes. Skip also requires the signed APK/AAB to be a
+whole ZIP (`PK\x03\x04` magic): the signer truncates its output file
+on failure, so a merely-existing 0-byte file must not pass the
+check — before this second Step 3 fix, sign skipped over it and
+every build failed at verify (`CCB-E3010`) forever, with no way to
+recover short of deleting the APK. A truncated signed APK now makes
+sign re-run and restore the byte-identical artifact.
 
 ### verify
 

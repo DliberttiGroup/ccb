@@ -12,14 +12,18 @@
 //   hello project: cold build; no-op (byte-identical APK);
 //     comment-only .kt change (only compile-code reruns);
 //     real code change; version_code change; strings.xml change;
-//     truncated compiled-res zip / linked.ap_ / aligned APK /
-//     final APK (each fails loudly with its CCB-E code, never
-//     ships, then recovers); torn ccb-cache.json (rebuild all);
+//     truncated compiled-res zip / linked.ap_ / aligned APK (each
+//     fails loudly with its CCB-E code, never ships, then recovers
+//     by rerunning exactly the affected step); truncated final APK
+//     (self-heals: sign re-runs on its corrupt output and restores
+//     the byte-identical APK); torn ccb-cache.json (rebuild all);
 //     aapt2 path swap (tool fingerprint invalidates all);
 //     debug keystore alias switch (sign reruns, cert changes).
 //   AAR project: cold build; no-op; truncated extracted
-//     classes.jar (fails loudly, CCB-E3005, then recovers);
-//     AAR content change (deps + compile-code downstream rerun).
+//     classes.jar (fails loudly, CCB-E3005, then recovers by
+//     rerunning compile-code, which restores the R.class the failed
+//     build wiped); AAR content change (deps + compile-code
+//     downstream rerun).
 //   cmake project: cold build; no-op (native skips); adding a
 //     [cmake] args entry (native reruns); no-op again.
 #include "ccb_common.h"
@@ -238,11 +242,6 @@ static void write_kt(const char *proj, const char *comment,
     "import android.os.Bundle\n"
     "\n"
     "class MainActivity : Activity() {\n");
-  if (comment != NULL) {
-    ccb_str_append(&s, "  // ");
-    ccb_str_append(&s, comment);
-    ccb_str_append(&s, "\n");
-  }
   if (extra_field != NULL) {
     ccb_str_append(&s, "  private val ");
     ccb_str_append(&s, extra_field);
@@ -254,6 +253,16 @@ static void write_kt(const char *proj, const char *comment,
     "    setContentView(R.layout.activity_main)\n"
     "  }\n"
     "}\n");
+  // A comment appended after the final brace shifts no code lines,
+  // so the compiled classes are byte-identical: only compile-code
+  // reruns. (Inserting the comment inside the class would shift the
+  // LineNumberTable and change the .class bytes — a real code change
+  // in everything but name.)
+  if (comment != NULL) {
+    ccb_str_append(&s, "// ");
+    ccb_str_append(&s, comment);
+    ccb_str_append(&s, "\n");
+  }
   char *kt = ccb_path_join(proj,
     "src/main/kotlin/com/example/hello/MainActivity.kt");
   write_text(kt, s.buf);
@@ -644,6 +653,20 @@ static void check_noop(char *bin, const char *proj, char **env,
   CHECK((skipped & track) == track);
 }
 
+// Assert a recovery build: after a corrupt output is restored, the
+// build succeeds and reruns exactly the affected step(s) — the
+// failure itself leaves the tree self-healing (a deleted R.java, a
+// recorded corrupt input hash, a corrupt signed artifact), and the
+// step that owns the output regenerates it. The following build must
+// then be a full no-op (checked by the caller).
+static void check_recovery(char *bin, const char *proj, char **env,
+    unsigned track, unsigned want_done) {
+  unsigned done = 0;
+  unsigned skipped = 0;
+  CHECK(run_json(bin, proj, env, &done, &skipped));
+  CHECK((done & track) == want_done);
+}
+
 // Generate a debug keystore with two aliases (storepass/keypass
 // "android", the debug signing passwords) and return its path.
 static void gen_two_alias_keystore(const char *java_home) {
@@ -762,7 +785,8 @@ static void test_hello(char *bin, char **env, const char *sdk_home,
     T_ALIGN | T_SIGN | T_VERIFY));
 
   // Truncated compiled-res zip: aapt2 link fails loudly (CCB-E3003),
-  // never ships; restoring the bytes returns to a no-op build.
+  // never ships. The failed link deletes R.java, so restoring the
+  // zip reruns link once, then the build is a no-op again.
   size_t len = 0;
   char *bak = backup_file(compiled_res, &len);
   CHECK(bak != NULL);
@@ -770,33 +794,53 @@ static void test_hello(char *bin, char **env, const char *sdk_home,
   check_loud_failure(bin, HELLO_PROJ, env, "CCB-E3003", 1);
   restore_file(compiled_res, bak, len);
   free(bak);
+  check_recovery(bin, HELLO_PROJ, env, CORE8, T_LINK);
   check_noop(bin, HELLO_PROJ, env, CORE8);
 
   // Truncated linked.ap_: package fails loudly (CCB-E3007).
+  // Restoring it reruns package once, then the build is a no-op.
   bak = backup_file(linked, &len);
   CHECK(bak != NULL);
   truncate_file(linked);
   check_loud_failure(bin, HELLO_PROJ, env, "CCB-E3007", 1);
   restore_file(linked, bak, len);
   free(bak);
+  check_recovery(bin, HELLO_PROJ, env, CORE8, T_PACKAGE);
   check_noop(bin, HELLO_PROJ, env, CORE8);
 
   // Truncated aligned APK: sign fails loudly (CCB-E3009, exit 4).
+  // The failed signer leaves the final APK empty (0 bytes); restoring
+  // the aligned APK must re-sign (the empty output fails sign's
+  // ZIP-magic check) and restore the byte-identical APK. Before the
+  // Step 3 sign output validation fix, sign skipped over the empty
+  // file and every build failed at verify forever.
+  char *sha_before = apk_sha(apk);
   bak = backup_file(aligned, &len);
   CHECK(bak != NULL);
   truncate_file(aligned);
   check_loud_failure(bin, HELLO_PROJ, env, "CCB-E3009", 4);
   restore_file(aligned, bak, len);
   free(bak);
+  check_recovery(bin, HELLO_PROJ, env, CORE8, T_SIGN);
+  char *sha_after = apk_sha(apk);
+  CHECK_STR_EQ(sha_before, sha_after);
+  free(sha_before);
+  free(sha_after);
   check_noop(bin, HELLO_PROJ, env, CORE8);
 
-  // Truncated final APK: verify fails loudly (CCB-E3010).
-  bak = backup_file(apk, &len);
-  CHECK(bak != NULL);
+  // Truncated final APK: the signed artifact is sign's own output,
+  // so the build self-heals instead of failing — sign re-runs (the
+  // corrupt output fails its ZIP-magic check) and restores the
+  // byte-identical APK. Same regression pin as above: before the
+  // fix this failed loudly at verify (CCB-E3010) on every build,
+  // forever, with no way to recover short of deleting the APK.
+  sha_before = apk_sha(apk);
   truncate_file(apk);
-  check_loud_failure(bin, HELLO_PROJ, env, "CCB-E3010", 1);
-  restore_file(apk, bak, len);
-  free(bak);
+  check_recovery(bin, HELLO_PROJ, env, CORE8, T_SIGN);
+  sha_after = apk_sha(apk);
+  CHECK_STR_EQ(sha_before, sha_after);
+  free(sha_before);
+  free(sha_after);
   check_noop(bin, HELLO_PROJ, env, CORE8);
 
   // Torn cache file: falls back to rebuilding everything.
@@ -821,9 +865,13 @@ static void test_hello(char *bin, char **env, const char *sdk_home,
   write_config(HELLO_PROJ, sdk_home, bt_ver, kotlin_home, &o);
   CHECK(explain_and_build(bin, HELLO_PROJ, env, CORE8, 1, &done, &skipped));
   CHECK((done & CORE8) == CORE8);
-  // Restoring the original path restores the no-op state.
+  // Restoring the original path is itself a tool change, so it
+  // reruns everything once more — the cache wipe is per-change, not
+  // per-path — and only the build after that is a no-op.
   o.aapt2 = NULL;
   write_config(HELLO_PROJ, sdk_home, bt_ver, kotlin_home, &o);
+  CHECK(explain_and_build(bin, HELLO_PROJ, env, CORE8, 1, &done, &skipped));
+  CHECK((done & CORE8) == CORE8);
   check_noop(bin, HELLO_PROJ, env, CORE8);
   ccb_str_free(&aapt2_real);
   free(aapt2_link);
@@ -885,7 +933,12 @@ static void test_aar(char *bin, char **env, const char *sdk_home,
   CHECK((skipped & track) == track);
 
   // Truncated extracted classes.jar: javac fails loudly
-  // (CCB-E3005), never ships; restoring the bytes returns to no-op.
+  // (CCB-E3005), never ships. The failed compile wiped the classes
+  // dir and never wrote R.class, so restoring the jar reruns
+  // compile-code once (the missing R.class fails its output check)
+  // and restores the byte-identical APK; then the build is a no-op.
+  // Before the Step 3 R.class fix, compile-code skipped and every
+  // build after shipped an APK without R.class.
   size_t len = 0;
   char *bak = backup_file(aar_jar, &len);
   CHECK(bak != NULL);
@@ -893,6 +946,7 @@ static void test_aar(char *bin, char **env, const char *sdk_home,
   check_loud_failure(bin, AAR_PROJ, env, "CCB-E3005", 1);
   restore_file(aar_jar, bak, len);
   free(bak);
+  check_recovery(bin, AAR_PROJ, env, track, T_CODE);
   check_noop(bin, AAR_PROJ, env, track);
 
   // AAR content change (Lib.answer 42 -> 43): deps reruns, the

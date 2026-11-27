@@ -95,6 +95,27 @@ ccb_status ccb_step_align(ccb_pipe *p) {
 
 // ---------- sign ----------
 
+// True when path is a whole signed artifact: a non-empty ZIP, for
+// both APK and AAB (a bundle is a ZIP too). The signer truncates its
+// output file on failure, so a later skip must not trust a 0-byte
+// (or otherwise non-ZIP) file that merely exists: the build would
+// skip signing forever and fail at verify instead of re-signing.
+static int ccb_signed_artifact_valid(const char *path) {
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 4) {
+    return 0;
+  }
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return 0;
+  }
+  unsigned char head[4];
+  size_t n = fread(head, 1, sizeof(head), f);
+  fclose(f);
+  return n == sizeof(head) && head[0] == 'P' && head[1] == 'K' &&
+    head[2] == 0x03 && head[3] == 0x04;
+}
+
 static char *ccb_keytool_path(ccb_pipe *p) {
   char *home = ccb_java_home(p);
   char *kt = ccb_path_join(home, "bin/keytool");
@@ -176,7 +197,8 @@ ccb_status ccb_step_sign(ccb_pipe *p) {
     free(keystore);
     return CCB_OK;
   }
-  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 && ccb_path_exists(apk_path)) {
+  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 &&
+      ccb_signed_artifact_valid(apk_path)) {
     free(fp);
     free(hash);
     free(apk_path);
