@@ -1,106 +1,126 @@
 # CCB — Requirement Document
 
-> Status: DRAFT — 2026-10-24. This document defines what CCB must be able to do.
-> It is a requirements spec, not a design doc and not code. Nothing here is built yet.
+> Status: SPEC — 2026-11-27. Rewritten from scratch. This document defines
+> what CCB must do. It is a requirements spec, not a design doc and not
+> code. Normative rules are stated as rules. `docs/` holds the user guide;
+> where this spec and a doc disagree, this spec wins.
 
 ## 1. What CCB is
 
-**CCB (working expansion: Custom C Builder)** is a small, fast, headless Android
-build system written in C. It turns an Android app project into a signed,
-installable APK **without Gradle and without Android Studio**.
+**CCB** is a build system for Android apps. Headless-first: one static
+binary, no daemon by default, no GUI, no background processes unless the
+user opts in. It turns an Android app project into a signed, installable
+APK (or an AAB with `--aab`) from a single TOML file, without Gradle and
+without Android Studio.
 
-It is **agent-oriented first**: a human can read its output, but its primary
-consumer is an AI agent driving builds from a terminal. Every behavior in this
-document is judged against one question: *can an agent run this, understand what
-happened, and fix what broke, without guessing?*
+Three design commitments, in order:
 
-### 1.1 The problem it solves
+1. **Speed.** Cold builds, caching, no wasted work. A build that can be
+   skipped is skipped. A tool that can be probed once is probed once.
+2. **LLM-optimized.** Structured docs, JSON protocol, deterministic
+   explainable output. Every diagnostic names a file, a line, and a
+   rule. An agent must be able to run a build, understand what happened,
+   and fix what broke, without guessing.
+3. **Human-optimized.** TOML config, plain-language errors, a README a
+   stranger can follow. No hidden state: everything CCB needs lives in
+   `ccb.toml` or in environment variables.
 
-Gradle is the wrong tool for small, agent-driven Android work:
+### 1.1 Scope line
 
-- It is slow (JVM startup, daemon, configuration phase) for projects that
-  should build in seconds.
-- Its output is long, noisy, and non-deterministic, which makes agent
-  debugging expensive and unreliable.
-- It downloads plugins and dependencies implicitly, so a build can fail for
-  reasons unrelated to the project.
-- It is a general-purpose build platform; CCB is a single-purpose APK builder.
+CCB **is**:
 
-### 1.2 What "headless" means (and does not mean)
+- A build system for Android apps: Kotlin first, Java second, C/C++
+  native libs via the NDK.
+- A fixed, ordered pipeline (stages 0–14, §5) with per-stage caching.
+- A Maven resolver for remote AAR/JAR dependencies (§5.4).
+- A library builder: in-tree library modules and standalone library
+  projects (§4.3, §5.12).
+- A terminal UI preview for projects that follow the preview convention
+  (§10). A linter with a picture, not a simulator.
 
-- Headless means: no Android Studio, no Gradle daemon, no GUI, no background
-  processes by default. One binary, one command, one result — unless the
-  user opts into the kotlinc daemon (see §2 goal 4 and docs/build.md):
-  an opt-in, per-project daemon with auto-shutdown after an idle
-  timeout. The daemon is never started unless opted in, and it never
-  outlives its project.
-- It does **not** mean "no JVM". The Kotlin compiler (`kotlinc`) and the dexer
-  (`d8`) are JVM tools and CCB orchestrates them. CCB itself is native C and
-  starts instantly; the JVM only runs for the two steps that genuinely need it.
+CCB **is not**:
+
+- A Gradle replacement for every workflow. One app module; library
+  modules are supported; dynamic feature modules are out of scope.
+- A plugin ecosystem. There is no plugin API and no plugin registry.
+  The one exception is kotlinc compiler plugins declared in TOML
+  (`[build] kotlin_plugins`, §5.3) — resolved via Maven, exact versions
+  only, no transitive walk.
+- A build scripting language. TOML is the whole configuration surface.
+  No hooks, no scripts, no prebuild commands. CCB never executes
+  anything from the project directory.
+- A dependency manager beyond Maven coordinates in TOML. No Gradle
+  daemon, no build scripts, no implicit downloads during a build.
+- An annotation processor host. kapt/KSP apps (Dagger, Hilt, Room
+  codegen) are out of scope; CCB fails with a clear message if it
+  detects them, not a cryptic compiler error.
+- iOS or Windows. Linux first, macOS second.
+
+Rule: if a feature cannot be expressed in a few TOML lines and cannot
+build fast, it does not go in.
+
+### 1.2 "Headless" means
+
+- No Android Studio, no Gradle daemon, no GUI, no background processes
+  by default. One binary, one command, one result.
+- It does **not** mean "no JVM". The Kotlin compiler (`kotlinc`) and the
+  dexer (`d8`) are JVM tools and CCB orchestrates them. CCB itself is
+  native C and starts instantly; the JVM only runs for the steps that
+  genuinely need it.
+- The opt-in kotlinc daemon (§5.13) is the only background process CCB
+  ever starts. It is per-project, auto-shuts down after an idle timeout,
+  and never outlives its project.
 
 ## 2. Goals
 
-1. **Build a real APK from a TOML file.** A complete project (manifest,
-   resources, Kotlin/Java sources, assets, native libs) builds to a signed,
-   zipaligned, installable APK with one command.
-2. **Be fast.** Cold build of a hello-world app in under 10 seconds on a
-   normal machine. Incremental rebuild (one source file changed) in under
-   2 seconds.
+1. **Build a real APK from a TOML file.** Manifest, resources,
+   Kotlin/Java sources, assets, native libs → a signed, zipaligned,
+   installable APK with one command.
+2. **Be fast.** Cold build of a hello-world app in under 10 seconds.
+   Incremental rebuild (one source file changed) in under 2 seconds.
+   See §8 for the targets and the measured status.
 3. **Be agent-readable.** Structured machine output, stable exit codes,
-   actionable errors, dry-run planning, and cache explanations (see §6).
-4. **Be hermetic by default.** No network access during a build. No implicit
-   downloads. No daemon by default; an opt-in kotlinc daemon is allowed
-   when the user enables it (`[build] kotlinc_daemon = true` or
-   `ccb build --kotlinc-daemon`): it is per-project (run files under the
-   project's own `build/kotlin-daemon`), shuts itself down after an idle
-   timeout (default 300 s, configurable 60–3600 s), is stopped by
-   `ccb daemon stop` and best-effort by `ccb clean`, and a stale or
-   crashed daemon falls back to a plain kotlinc invocation instead of
-   failing the build. A build either works offline or fails loudly saying
-   exactly which tool is missing.
-5. **Be small and dependency-free.** One static binary, under 5 MB, linking
-   only libc. No runtime dependencies beyond the Android SDK toolchain it
-   drives.
-6. **Be deterministic.** Same inputs + same tool versions = byte-identical APK
-   (sorted zip entries, fixed timestamps via `SOURCE_DATE_EPOCH`).
-7. **Support the user's real stack.** Kotlin first, Java second, C/C++ native
-   libs via the NDK. This is the stack the user's projects (including melod's
-   C core) actually use.
-8. **Modular, memory-safe C.** A codebase an agent can navigate and a human
-   can trust: small modules with clear boundaries, explicit ownership, and
-   safety wrappers that make classic C bugs (leaks, overruns, use-after-free)
-   hard to write and easy to catch (see §9).
+   actionable errors, dry-run planning, cache explanations (§6).
+4. **Be hermetic by default.** No network access during a build. No
+   implicit downloads. A build either works offline or fails loudly
+   saying exactly which tool is missing. `ccb setup` is the only
+   command allowed network access.
+5. **Be small and dependency-free.** One static binary, under 5 MB,
+   linking only libc. No runtime dependencies beyond the Android SDK
+   toolchain it drives.
+6. **Be deterministic.** Same inputs + same tool versions = byte-identical
+   APK (sorted zip entries, fixed timestamps).
+7. **Support the user's real stack.** Kotlin first, Java second, C/C++
+   native libs via the NDK.
+8. **Modular, memory-safe C.** Small modules with clear boundaries,
+   explicit ownership, safety wrappers that make classic C bugs hard
+   to write and easy to catch (§9).
 9. **Preview without a device.** For projects that follow the CCB UI
    convention (CSS styling + Kotlin flow sources), CCB renders an
-   approximation of each screen in the terminal plus a logic tree of the
-   app flow, so an agent can judge whether layout and logic look right
-   without an emulator (see §10). This is an approximation tool, not a
-   simulator, and the document is explicit about that boundary.
+   approximation of each screen in the terminal plus a logic tree of
+   the app flow (§10). An approximation tool, not a simulator.
 
-## 3. Non-goals (v1)
+## 3. Non-goals
 
-- Not a Gradle replacement for large multi-module apps. One app
-  module; library modules are supported (see §4.3). Dynamic feature
-  modules remain out of scope.
-- No Gradle dependency resolution. Dependencies are local files or Maven
-  coordinates declared in TOML (see §5.4); Gradle itself (daemon, build
-  scripts, plugins) is out of scope.
-- No annotation processing (kapt/KSP). Apps using Dagger, Hilt, or Room
-  codegen are out of scope for v1; CCB must fail with a clear message if it
-  detects them, not a cryptic compiler error.
-- AAB output: `ccb build --aab` produces a base-module-only bundle (see
-  §5.10). Split APK generation, asset packs, and dynamic feature
-  modules remain out of scope.
-- No iOS, no Windows support in v1 (Linux first, macOS second).
-- No plugin ecosystem, no build scripting language. TOML is the whole
-  configuration surface.
+- Large multi-module Gradle-style builds. One app module; library
+  modules supported (§4.3). Dynamic feature modules out of scope.
+- AAB split APKs, asset packs, Play signing key upload. `ccb build
+  --aab` produces a base-module-only bundle (§5.11).
+- kapt/KSP annotation processing (see §1.1).
+- iOS, Windows.
+- A plugin ecosystem or a build scripting language (see §1.1).
+- Maven publishing of library projects. `ccb` builds an `.aar` file;
+  publishing it is out of scope.
+- Per-module deps/NDK/signing. Modules and library projects use the
+  project's jars/AARs on the classpath and have no native libs.
+- Compose code in preview. Compose apps build (§5.3); preview does not
+  understand Compose code.
 
-## 4. Project configuration: the `.toml` file
+## 4. Project configuration: `ccb.toml`
 
 One file per project, named `ccb.toml` by default, overridable with
-`--config`. It must be human-readable, commented, and complete: everything
-CCB needs to know lives here or in environment variables, never in hidden
-state.
+`--config`. Everything CCB needs lives here or in environment variables,
+never in hidden state.
 
 ### 4.1 Example (complete)
 
@@ -158,15 +178,31 @@ variant = "debug"   # or "release"
 minify = false      # true = run r8 instead of d8 (release only)
 shrink_resources = false
 jvm_target = "17"
+# kotlinc_daemon = false
+# kotlinc_daemon_idle_seconds = 300
+# kotlin_plugins = ["org.jetbrains.kotlin:kotlin-compose-compiler-plugin:2.4.21"]
+# kotlin_plugin_options = ["androidx.compose.compiler.plugins.kotlin:generateFunctionKeyMetaClasses=true"]
+# proguard_rules = "app/proguard-rules.pro"   # required when minify = true
 
 [deps]
 jars = []   # paths to .jar files, relative to the project root
 aars = []   # paths to .aar files, relative to the project root
+# maven = ["androidx.core:core-ktx:1.13.1"]
+# maven_central = true
+# maven_repos = ["https://repo.example.com/maven2"]
+# maven_profiles = []
+# maven_exclude = []
 
 [ndk]
 abis = ["arm64-v8a"]
 cpp_flags = ["-O2"]
 c_sources = ["app/src/main/cpp/native.c"]
+
+[preview]
+styles = "app/src/main/styles"
+flow = "app/src/main/flow"
+strict = false
+gate = false
 ```
 
 ### 4.2 Configuration rules
@@ -177,35 +213,40 @@ c_sources = ["app/src/main/cpp/native.c"]
   the current directory to the filesystem root for `ccb.toml` (like git
   searches for `.git`). `--config` with an explicit path overrides this.
 - `ccb_version` is mandatory. A missing version is a configuration
-  error (code 2); a version newer than the binary understands is also
-  an error, naming the supported range.
-- Unknown keys are a **hard error** with the key name and the list of valid
-  keys. Silent typos in config are the #1 agent time-waster; CCB must not
-  tolerate them.
-- Secrets (keystore passwords) are **never** written in TOML. They come from
-  environment variables named in TOML, or from an interactive prompt. CCB
-  must never print a password, even in `--verbose` or `--dry-run` output.
+  error (CCB-E1002); a version newer than the binary understands is
+  also an error (CCB-E1003), naming the supported range. Only version
+  1 is supported.
+- Unknown keys are a **hard error** (CCB-E1001) with the key name and
+  the list of valid keys. Silent typos in config are the #1 agent
+  time-waster; CCB must not tolerate them.
+- Secrets (keystore passwords) are **never** written in TOML. They come
+  from environment variables named in TOML, or from an interactive
+  prompt. CCB must never print a password, even in `--verbose` or
+  `--dry-run` output. Passwords never appear on a command line (which
+  leaks to process listings); release signing passes them to apksigner
+  as `env:VAR` references only.
 - `ccb.toml` must be validatable without building: `ccb check` parses,
-  resolves paths, and reports every problem at once (not one error per run).
+  resolves paths, and reports every problem at once (not one error per
+  run).
 - Tool overrides: `[sdk] aapt2` / `[sdk] zipalign` and the env vars
   `CCB_AAPT2` / `CCB_ZIPALIGN` select a different aapt2 or zipalign
   binary for every invocation (compile, link, badging, zipalign,
   doctor/check reporting, dry-run output). Precedence, highest first:
   `[sdk]` key, env var, default SDK build-tools path. An empty env
   value counts as unset. A relative override path is used exactly as
-  written — it is relative to the working directory at invocation
-  time, not to the project root or SDK home. A set override that does
-  not exist or is not executable fails Stage 0 with CCB-E2009 naming
-  the source and the path; there is no silent fallback to the default.
+  written — relative to the working directory at invocation time, not
+  to the project root or SDK home. A set override that does not exist
+  or is not executable fails Stage 0 with CCB-E2009 naming the source
+  and the path; there is no silent fallback to the default.
   `ccb doctor` and `ccb check` report the effective path and its
   source (`config`, `env`, or `default`) for both tools, and the
   effective paths participate in the cache fingerprints, so switching
   tools invalidates the affected stages.
 
-### 4.3 Library modules
+### 4.3 Library modules and standalone libraries
 
 A project may declare library modules as `[modules.<name>]` tables
-in the root `ccb.toml` (full rules in `docs/modules.md`):
+(full rules in `docs/modules.md`):
 
 ```toml
 [modules.base]
@@ -220,26 +261,29 @@ depends = ["base"]
   `src/main/AndroidManifest.xml` (required), `src/main/res`,
   `src/main/assets`, `src/main/kotlin`, `src/main/java` (each
   optional).
-- `depends` (optional): other module names. Modules build in
-  topological order, dependencies first; a cycle is a hard error
-  naming the cycle (`CCB-E1010`), an unknown dependency is a hard
-  error naming it (`CCB-E1011`).
+- `depends` (optional, default `[]`): other module names. Modules
+  build in topological order, dependencies first; a cycle is a hard
+  error naming the cycle (`CCB-E1010`), an unknown dependency is a
+  hard error naming it (`CCB-E1011`).
 - Each module builds into an intermediate AAR consumed through the
-  existing dependency machinery (§5.4, §5.2): manifest merges,
-  res merges at link, classes dex, assets package. The app module is
-  the only APK/AAB output.
+  existing dependency machinery (§5.2, §5.4): manifest merges, res
+  merges at link, classes dex, assets package. The app module is the
+  only APK/AAB output.
 - A module manifest must declare a package different from the app
-  package and from every other module's package.
+  package and from every other module's package (CCB-E1005).
+- A module name must not collide with a declared AAR's base name
+  (`CCB-E3022`, checked at build time after Maven resolution).
 - Library R fields are non-final (the module link generates R.java,
   CCB de-finalizes it, the app link assigns final IDs), so library
   code may reference its own and its dependencies' R classes.
 - Module outputs participate in app fingerprints: changing a library
-  rebuilds the app (see §5.11).
+  rebuilds the app (see §7).
 - A project can itself be a library: an empty `[library]` table makes
   `ccb build` produce `build/<name>-<version>.aar` (`classes.jar`,
   `AndroidManifest.xml`, `res/`, `assets/`, `R.txt`) instead of an
-  APK. A library project declares no modules, NDK, deps, or path
-  libraries of its own.
+  APK. Any key under `[library]` is a hard error (CCB-E1001). A
+  library project declares no modules, NDK, deps, or path libraries
+  of its own (CCB-E1005), and cannot build an AAB (CCB-E1005).
 - An app consumes a standalone library from a local path as
   `[deps.library.<name>]` with `path = "..."` (a library project
   dir, built first, or a built `.aar` file), or from Maven
@@ -248,11 +292,61 @@ depends = ["base"]
   (`--extra-packages`); resource conflicts are won by the app, with
   a warning naming the winner (see `docs/library.md`).
 
+### 4.4 Config key reference
+
+Every key CCB accepts. Unknown keys are CCB-E1001.
+
+| Table | Keys |
+|---|---|
+| (top level) | `ccb_version` |
+| `[project]` | `name`, `package`, `version`, `version_code`, `min_sdk`, `target_sdk`, `compile_sdk` |
+| `[paths]` | `manifest`, `res`, `assets`, `kotlin`, `java`, `libs` |
+| `[sdk]` | `home`, `build_tools`, `ndk`, `kotlin_home`, `aapt2`, `zipalign`, `r8_jar` |
+| `[signing.debug]`, `[signing.release]` | `store`, `alias`, `store_password_env`, `key_password_env` |
+| `[build]` | `variant`, `minify`, `shrink_resources`, `jvm_target`, `kotlinc_daemon`, `kotlinc_daemon_idle_seconds`, `kotlin_plugins`, `kotlin_plugin_options`, `proguard_rules` |
+| `[deps]` | `jars`, `aars`, `maven`, `maven_central`, `maven_repos`, `maven_profiles`, `maven_exclude` |
+| `[deps.library.<name>]` | `path` |
+| `[ndk]` | `abis`, `cpp_flags`, `c_sources` |
+| `[modules.<name>]` | `dir`, `depends` |
+| `[library]` | (empty table; any key is CCB-E1001) |
+| `[preview]` | `styles`, `flow`, `resources`, `layout`, `nav_graph`, `phone_width`, `phone_height`, `strict`, `gate` |
+| `[preview.bindings]` | `<identifier> = "<component label>"` (code identifier → component label) |
+
+Environment variables CCB reads: `ANDROID_HOME`, `ANDROID_SDK_ROOT`,
+`KOTLIN_HOME`, `CCB_AAPT2`, `CCB_ZIPALIGN`, `CCB_MAVEN_CACHE`,
+`XDG_CACHE_HOME`, `SOURCE_DATE_EPOCH`, `NO_COLOR`. Test/support
+overrides: `CCB_MAVEN_REPOS` (replaces configured repos entirely;
+tests only), `CCB_GOLDEN_DIR` (preview golden output dir), `CCB_R8_SHA256`
+(pinned r8 checksum override, see `docs/setup-tools.md`).
+
 ## 5. Build pipeline
 
 CCB executes a fixed, ordered pipeline. Each stage is independently
-skippable by the cache (see §7) and independently reportable in JSON output
-(see §6). The stages, in order:
+skippable by the cache (§7) and independently reportable in JSON output
+(§6). Stages, in order:
+
+| # | Stage | What it does |
+|---|---|---|
+| 0 | Load | Load + validate `ccb.toml`, report every problem at once. Resolve the toolchain. Release builds verify signing config before compiling anything. |
+| 1 | deps | Extract AARs (classes, resources, assets, JNI). Resolve Maven coordinates cache-only (§5.4). |
+| 2 | libraries | Build each `[deps.library.<name>]` path library into `build/intermediates/libraries/<name>/<name>.aar`. A built `.aar` path joins the declared AARs in stage 0 instead. Skipped with no path libraries. |
+| 3 | modules | Build each `[modules.<name>]` library module into `build/intermediates/modules/<name>/<name>.aar`, in topological order. Skipped with no modules. |
+| 4 | merge-manifest | Merge AAR manifests into the app manifest, in config order. Output: `build/intermediates/merged-manifest/`. Skipped with no AARs. |
+| 5 | compile-res | `aapt2 compile` each resource directory into a `.flat` zip. |
+| 6 | link | `aapt2 link` into `linked.ap_`, generating `R.java`. Uses the merged manifest when AARs are present, else the app manifest. The manifest's `package` must match `[project] package`. Library zips link as `-R` overlays with the app zip last, so the app wins resource conflicts; a resource defined by more than one source warns, naming the winner. |
+| 7 | compile-code | `kotlinc` (Kotlin + `R.java` + Java sources), then `javac` for Java sources and generated `R.java`. Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files. |
+| 8 | dex | `d8` (or `r8` for release + minify). See §5.6. |
+| 9 | dexcheck | Parse the dex files, verify every referenced class is defined in the dex. See §5.7. |
+| 10 | native | NDK clang per ABI (only with an `[ndk]` section). |
+| 11 | package | CCB's own ZIP writer: `linked.ap_` entries, dex files, assets (app assets win over AAR assets with the same name), `lib/<abi>/*.so` (duplicate `.so` names are an error, CCB-E3007). |
+| 12 | align | `zipalign -f 4`. |
+| 13 | sign | `apksigner`. Debug uses `~/.android/debug.keystore` (created with keytool when missing). Release uses `env:VAR` password references; passwords never appear in commands or logs. |
+| 14 | verify | `apksigner verify` and `aapt2 dump badging`. An APK counts as built only when both pass. |
+
+A library project (`[library]` in `ccb.toml`) runs only stages 0–2
+in the list above — deps, then its single module build into
+`build/<name>-<version>.aar` — and stops: no merge, link, dex, or
+package. See `docs/library.md`.
 
 ### 5.1 Stage 0 — Load and validate
 
@@ -267,16 +361,21 @@ directory itself exists — a missing build-tools directory (CCB-E2002)
 never masks a broken override, and a broken override never falls back
 to the default tool.
 
-Supported v1 ranges (pinned here; `ccb doctor` judges against them):
+Supported ranges (pinned here; `ccb doctor` judges against them):
 compileSdk 34–36, build-tools 35.x/36.x, kotlinc 2.x, JDK 17+. A tool
 outside its range is a Stage 0 error naming the range and the found
 version.
 
-### 5.2 Stage 1 — Compile resources (`aapt2 compile` + `aapt2 link`)
+Kotlin compiler location: `$KOTLIN_HOME`, then `PATH`, then TOML
+`[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error (CCB-E2004),
+not a Stage 7 surprise.
 
-- Compile `res/` into flat files.
-- Link with the manifest into a base APK, generating `R.java` (and `R.txt`)
-  for the Kotlin/Java compile.
+### 5.2 Stage 6 — Link (resources + manifest)
+
+- Compile `res/` into flat files (stage 5), then link with the manifest
+  into a base APK, generating `R.java` for the Kotlin/Java compile.
+  The app link emits `R.java` only — no `R.txt`. `R.txt` is emitted by
+  library/module links (§5.12), never by the app link.
 - Manifest merging: when the project declares AARs, each AAR's
   `AndroidManifest.xml` is merged into the app manifest, deterministically
   in the order the AARs are listed in config, and the merged manifest is
@@ -298,7 +397,7 @@ version.
   attributes, `<uses-sdk>`, `<permission>` declarations, `<meta-data>`,
   `<queries>`) is ignored: the app manifest owns it.
 
-### 5.3 Stage 2 — Compile code (`kotlinc` + `javac`)
+### 5.3 Stage 7 — Compile code (`kotlinc` + `javac`)
 
 - `kotlinc` over Kotlin sources with classpath = `android.jar` +
   `R.java` output + declared jars + extracted AAR `classes.jar`s.
@@ -307,23 +406,28 @@ version.
   R.class files, so javac must compile them).
 - `d8`/`r8` gets the kotlinc stdlib jar as a program input for Kotlin
   projects, unless the project already supplies it via `[deps]` or Maven.
-- Kotlin compiler location: `$KOTLIN_HOME`, then `PATH`, then TOML
-  `[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error, not a Stage 2
-  surprise.
 - Compiler plugins: when `[build] kotlin_plugins` is set, kotlinc gets
   `-Xplugin=<jar>` per resolved plugin jar plus
   `-P plugin:<id>:<key>=<value>` per `[build] kotlin_plugin_options`
-  entry; plugin jars and options join the compile fingerprint. The
-  Compose compiler plugin path is
+  entry (each option is `plugin-id:key=value`); plugin jars and options
+  join the compile fingerprint. Plugin coordinates must be exact
+  versions (ranges, `LATEST`, `RELEASE`, `-SNAPSHOT` rejected at config
+  load with `CCB-E1005`). Plugin jars resolve via Maven the same way
+  (§5.4) but without a transitive walk: a plugin jar must be
+  self-contained. `pom` or `aar` packaging fails with `CCB-E3019`.
+  Plugin jars are not in `ccb.lock`: the exact coordinate in `ccb.toml`
+  pins them.
+- The Compose compiler plugin path is
   `org.jetbrains.kotlin:kotlin-compose-compiler-plugin:<kotlin-version>`
   (the plain artifact, not the `-embeddable` variant, which is built
-  for Gradle's embedded compiler — see §5.4).
+  for Gradle's embedded compiler — see `docs/maven.md`). A minimal
+  Compose sample builds with `ccb build`.
 
-### 5.4 Stage 3 — Dependencies (local files + remote Maven)
+### 5.4 Stage 1 — Dependencies (local files + remote Maven)
 
 - JARs go straight onto the compile classpath and into the dex input.
 - AARs are unzipped into the build dir: `classes.jar` to the classpath,
-  `res/` merged into Stage 1 input, `assets/` merged into Stage 4,
+  `res/` merged into stage 5 input, `assets/` merged into stage 11,
   `jni/<abi>/` copied to the APK's `lib/` dir, and `AndroidManifest.xml`
   merged into the app manifest (see §5.2).
 - Duplicate classes across dependencies are a hard error naming both
@@ -347,17 +451,22 @@ version.
   listed. `[deps] maven_exclude` suppresses
   artifacts (`group:artifact` for every version, or
   `group:artifact:version` for one version), checked before
-  nearest-wins; excluding a direct dependency is a config error.
-  Compiler plugins declared in `[build] kotlin_plugins` resolve via
-  Maven the same way (exact versions only, no transitive walk, not in
-  the lockfile) and are wired into kotlinc in §5.3. `ccb setup`
-  prefetches the cache and writes the resolved tree to
-  `ccb.lock` in the project root; builds and `ccb check` resolve
-  cache-only, fail with `CCB-E3021` on a miss, and fail with
-  `CCB-E3023` on any deviation from a present lockfile. Full rules
-  in `docs/maven.md`.
+  nearest-wins; excluding a direct dependency is a config error
+  (CCB-E1005). `ccb setup` prefetches the cache and writes the
+  resolved tree to `ccb.lock` in the project root; builds and
+  `ccb check` resolve cache-only, fail with `CCB-E3021` on a miss,
+  and fail with `CCB-E3023` on any deviation from a present lockfile.
+  Full rules in `docs/maven.md`.
 
-### 5.5 Stage 4 — Dex (`d8`, or `r8` for release)
+### 5.5 Stage 10 — Native libs (NDK, optional)
+
+- If `[ndk]` is present, compile C/C++ sources with the NDK Clang
+  toolchain once per ABI into `.so` files.
+- `.so` files land in the APK at `lib/<abi>/`.
+- NDK version is pinned in TOML; a mismatched installed NDK is a Stage 0
+  error (CCB-E2008).
+
+### 5.6 Stage 8 — Dex (`d8`, or `r8` for release)
 
 - `d8` converts compiled classes to `.dex` files.
 - On a Kotlin `d8` build the stdlib jar is dexed once into the global
@@ -378,49 +487,52 @@ version.
   file. The stdlib dex cache is bypassed on this path by design:
   R8 takes the stdlib as a program-input JAR, not dex, so it can
   strip the stdlib classes the kept code never reaches.
-- Immediately after dex, a dexcheck step parses the produced dex
-  files and verifies every referenced class is defined in the dex.
-  A missing program class fails the build with `CCB-E3025`, naming
-  the missing classes (first 10, then "+ N more"), before packaging
-  — so a missing stdlib or library R class is a build failure, not
-  a launch crash. Platform classes (`java.*`, `android.*`, …) are
-  `--lib` inputs and are allowlisted; annotation- and
-  signature-only references still count. Reflection-only
-  references (`Class.forName` strings) cannot be caught: only
-  types the dex references are checked. The step runs even when
-  dex was cache-skipped, and for AAB builds too.
+- `d8` heap: CCB passes `-JXmx<N>m` to d8, N = 256 + 16 per MiB of dex
+  program inputs, capped at 1024 MB. Heap never changes dex output, so
+  it is not in the dex fingerprint. R8 is untouched: its 1G cap already
+  equals the cap here.
+- `.class` files pass to d8 individually, not as a directory: kotlinc
+  also writes `META-INF/*.kotlin_module` files, and d8 rejects
+  non-class files in directory inputs.
 
-### 5.6 Stage 5 — Native libs (NDK, optional)
+### 5.7 Stage 9 — Dexcheck
 
-- If `[ndk]` is present, compile C/C++ sources with the NDK Clang
-  toolchain once per ABI into `.so` files.
-- `.so` files land in the APK at `lib/<abi>/`.
-- NDK version is pinned in TOML; a mismatched installed NDK is a Stage 0
-  error.
+Immediately after dex, a dexcheck step parses the produced dex
+files and verifies every referenced class is defined in the dex.
+A missing program class fails the build with `CCB-E3025`, naming
+the missing classes (first 10, then "+ N more"), before packaging
+— so a missing stdlib or library R class is a build failure, not
+a launch crash. Platform classes (`java.*`, `android.*`, …) are
+`--lib` inputs and are allowlisted; annotation- and
+signature-only references still count. Reflection-only
+references (`Class.forName` strings) cannot be caught: only
+types the dex references are checked. The step runs even when
+dex was cache-skipped, and for AAB builds too.
 
-### 5.7 Stage 6 — Package
+### 5.8 Stages 11–14 — Package, align, sign, verify
 
-- CCB assembles the final APK itself: it takes the `aapt2 link` output
-  and appends dex files, assets, and native libs using its own ZIP
-  reader/writer (no external `zip` binary dependency).
-- APK entries are written in sorted order for determinism.
-
-### 5.8 Stage 7 — Align and sign (`zipalign` + `apksigner`)
-
-- `zipalign` (4-byte alignment) then `apksigner` (v2 signature minimum;
-  v1+v2+v3 for release when configured).
-- Debug builds: the debug keystore defaults to
-  `~/.android/debug.keystore` (the Android standard location, so it
-  survives `ccb clean`), overridable via `[signing.debug] store`. If it
-  is missing, CCB generates it (standard Android debug credentials)
-  and records that it did so.
-- Release builds: missing keystore, missing alias, or missing password
+- Package (stage 11): CCB assembles the final APK itself: it takes the
+  `aapt2 link` output and appends dex files, assets, and native libs
+  using its own ZIP reader/writer (no external `zip` binary
+  dependency). APK entries are written in sorted order for
+  determinism. ZIP writer uses fixed 1980-01-01 timestamps and
+  deterministic entry order, so two clean builds of the same inputs
+  produce byte-identical APKs.
+- Align (stage 12): `zipalign -f 4`.
+- Sign (stage 13): `zipalign` then `apksigner` (v2 signature minimum;
+  v1+v2+v3 for release when configured). Debug builds: the debug
+  keystore defaults to `~/.android/debug.keystore` (the Android
+  standard location, so it survives `ccb clean`), overridable via
+  `[signing.debug] store`. If it is missing, CCB generates it
+  (standard Android debug credentials) and records that it did so.
+  Release builds: missing keystore, missing alias, or missing password
   env var is a hard error before any compilation starts (fail fast, not
-  after a 30-second build).
-- After signing, CCB verifies with `apksigner verify` and reports the
-  result. An APK is not "built" until it verifies.
+  after a 30-second build; CCB-E3001, exit 4).
+- Verify (stage 14): after signing, CCB verifies with `apksigner
+  verify` and `aapt2 dump badging` and reports the result. An APK is
+  not "built" until both pass.
 
-### 5.9 Stage 8 — Report
+### 5.9 Report
 
 Print the result: output path, size, variant, package, version, signing
 status, per-stage timings, and cache hits/misses. In `--json` mode this is
@@ -470,7 +582,7 @@ pipeline; APK stays the default. The bundle reuses every stage it can:
   asset packs, dynamic feature modules, Play signing key upload.
   `ccb install` / `ccb run` remain APK-only.
 
-### 5.11 Library modules
+### 5.11 Library modules (stages 2–3)
 
 Between the deps step and the manifest merge, CCB builds each
 declared library module (§4.3) in topological order into an
@@ -483,7 +595,7 @@ machinery. The module AARs join the
 declared AARs in the merge list (declared first, then modules in
 topological order), so every later stage treats them as local AARs:
 manifest merge (§5.2), res compile/link (§5.2), compile classpath
-(§5.3), dex inputs (§5.5), assets (§5.7).
+(§5.3), dex inputs (§5.6), assets (§5.8).
 
 - Module resources compile (`aapt2 compile`) and link (`aapt2 link`
   against the module manifest) to generate R.java for the module
@@ -518,26 +630,58 @@ manifest merge (§5.2), res compile/link (§5.2), compile classpath
   modules, Maven publishing, transitive path libraries (a library
   project cannot consume path libraries).
 
-## 6. Agent-oriented interface (the distinctive part)
+### 5.12 Library projects
+
+A library project (`[library]`, §4.3) runs stages 0–2 only: deps,
+then its single module build (resources, code, AAR), and stops. The
+AAR (`build/<name>-<version>.aar`) contains `classes.jar` (compiled
+Kotlin/Java except generated R classes), `AndroidManifest.xml` (copy
+of the library manifest), raw `res/` and `assets/` trees, and `R.txt`
+(the library link's symbol table; empty when the library has no
+resources). Library R fields are non-final: the library link
+generates R.java, CCB de-finalizes it, and the app link assigns final
+IDs. See `docs/library.md`.
+
+### 5.13 Kotlinc daemon (opt-in)
+
+Default: plain `kotlinc` subprocess. Opt in with `[build]
+kotlinc_daemon = true` or `ccb build --kotlinc-daemon`;
+`ccb build --no-kotlinc-daemon` opts out for one build. Combining
+both flags is an error. `ccb daemon stop` asks the project's daemon
+to shut down; `ccb clean` stops it best-effort (only when daemon
+mode is enabled in config) before removing `build/`.
+
+- Per-project: run files under `build/kotlin-daemon`. Two projects
+  never share one.
+- Idle shutdown: default 300 s, configurable 60–3600 s via
+  `kotlinc_daemon_idle_seconds`.
+- A stale or crashed daemon falls back to a plain kotlinc invocation
+  instead of failing the build.
+- Toggling the daemon does not invalidate outputs: same compiler,
+  same arguments, compile-code fingerprint unchanged.
+- Full rules and measured times: `docs/build-daemon.md`.
+
+## 6. Agent-oriented interface
 
 This section is normative. A build system that is merely "scriptable" is
-not agent-oriented. CCB must satisfy all of the following:
+not agent-oriented. CCB must satisfy all of the following.
 
 ### 6.1 Commands
 
 | Command | Purpose |
 |---|---|
-| `ccb init [dir]` | Scaffold a minimal project: `ccb.toml`, manifest, one Kotlin Activity, `res/`, `.gitignore`. Must work offline. |
-| `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), the official kotlinc 2.4.21 compiler into the SDK home when missing, the NDK revision for `[ndk]` projects, r8 9.5.28 into the SDK home for minify projects without an explicit jar, and missing host tools from the platform package manager (Termux: aapt2/android-tools from the official repos, zipalign from the rendiix repo only when the official repos have no candidate; Linux: adb from the distro manager). In a project with `[deps] maven`, also prefetches every direct + transitive artifact into the local Maven cache (see §5.4). Ends with a final verification pass (toolchain resolve + adb) reported as warnings. `--upgrade` reinstalls setup-managed kotlinc/r8 to pinned versions and implies `--yes`; `--print-env` prints shell exports instead of the ready line. Pinned downloads are cached under `~/.cache/ccb/downloads` with resume. This is the only command allowed network access; builds stay hermetic. |
-| `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. Reports consumed libraries (name, version, path/coordinates, AAR contents summary); for a library project, the library itself and its AAR. |
-| `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`, `--aab` (build `app.aab` instead of `app.apk`, see §5.10). |
+| `ccb init [dir]` | Scaffold a minimal project: `ccb.toml`, manifest, one Kotlin Activity, `res/`, `.gitignore`. Must work offline. Flags: `--package`, `--name`. Without them, name `hello` and package `com.example.hello` regardless of the directory name. |
+| `ccb setup` | Provision the toolchain: install a JDK 17+ (via the platform package manager, interactively or `--yes`), SDK command-line tools, platform, and build-tools (checksum-verified downloads), the official kotlinc 2.4.21 compiler into the SDK home when missing, the NDK revision for `[ndk]` projects, r8 9.5.28 into the SDK home for minify projects without an explicit jar, and missing host tools from the platform package manager (Termux: aapt2/android-tools from the official repos, zipalign from the rendiix repo only when the official repos have no candidate; Linux: adb from the distro manager). In a project with `[deps] maven`, also prefetches every direct + transitive artifact into the local Maven cache (see §5.4) and writes `ccb.lock`; in a project with `[build] kotlin_plugins`, also prefetches the plugin jars. Ends with a final verification pass (toolchain resolve + adb) reported as warnings. `--upgrade` reinstalls setup-managed kotlinc/r8 to pinned versions and implies `--yes`; `--print-env` prints shell exports instead of the ready line. Pinned downloads are cached under `~/.cache/ccb/downloads` with resume. This is the only command allowed network access; builds stay hermetic. |
+| `ccb check` | Validate config + toolchain only. No build output. Exit non-zero with all problems listed. Reports consumed libraries (name, version, path/coordinates, AAR contents summary); for a library project, the library itself and its AAR. Flags: `--json`, `--preview-gate`, `--no-preview-gate`. |
+| `ccb build` | Full pipeline (§5). Flags: `--variant`, `--config`, `--json`, `--dry-run`, `--verbose`, `--explain`, `--aab`, `--kotlinc-daemon`, `--no-kotlinc-daemon`, `--preview-gate`, `--no-preview-gate`. |
 | `ccb clean` | Remove the build directory only. Never touches sources. |
-| `ccb doctor` | Check every tool CCB needs (SDK, build-tools, platform, kotlinc, d8, apksigner, zipalign, adb, NDK if configured). For each missing item print what it is, where CCB looked, and the exact install command. |
+| `ccb doctor` | Check every tool CCB needs (SDK, build-tools, platform, kotlinc, d8, apksigner, zipalign, adb, NDK if configured). For each missing item print what it is, where CCB looked, and the exact install command. Flag: `--json`. |
 | `ccb install` | `adb install` the built APK (device selection via `--device`, error if 0 or 2+ devices and no selection). |
 | `ccb run` | Install + launch the app's main activity via `adb shell am start`. |
 | `ccb logcat` | Stream `adb logcat` filtered to the app's package (convenience for agents reading crash logs). |
-| `ccb preview` | Render the app's screens in the terminal from CSS + Kotlin flow sources, and print the logic tree (see §10). No device or emulator needed. |
-| `ccb version` | Print CCB version, supported compileSdk range, and embedded tool expectations. |
+| `ccb preview` | Render the app's screens in the terminal from CSS + Kotlin flow sources, and print the logic tree (see §10). No device or emulator needed. Flags: §10.5. |
+| `ccb daemon stop` | Ask the project's kotlinc daemon to shut down (§5.13). |
+| `ccb version` | Print CCB version, supported compileSdk range, and embedded tool expectations. Flag: `--json`. |
 
 ### 6.2 Structured output (`--json`)
 
@@ -550,10 +694,11 @@ not agent-oriented. CCB must satisfy all of the following:
   `workdir`, and `suggestion` (one concrete next action, e.g.
   "install platform android-35 with: sdkmanager \"platforms;android-35\"").
 - Every `error` event also carries a stable diagnostic `code`
-  (e.g. `CCB-E1001`) from the diagnostics catalog in
-  `docs/diagnostics.md`. Agents branch on codes, not on prose.
+  (e.g. `CCB-E1001`) from the diagnostics catalog in §12. Agents branch
+  on codes, not on prose.
 - An agent must be able to reconstruct the full build state from the
   JSON stream alone, without reading any other output.
+- Full event shapes: `docs/json-protocol.md`.
 
 ### 6.3 Dry run and explain
 
@@ -563,6 +708,9 @@ not agent-oriented. CCB must satisfy all of the following:
 - `ccb build --explain` runs the build and, for every stage, prints WHY
   it ran or was skipped (which input hash changed, which tool version
   changed, or "cache hit").
+- `--explain` is conservative downstream of link: when link will run,
+  later steps report "will change" even if their inputs turn out
+  identical. Explain never over-promises a skip; it may over-predict runs.
 - Both modes must never print secrets.
 
 ### 6.4 Exit codes (stable, documented, never reused for other meanings)
@@ -576,6 +724,9 @@ not agent-oriented. CCB must satisfy all of the following:
 | 4 | Signing error (keystore/alias/password problem). |
 | 5 | Device error (`install`/`run`/`logcat` with no device or adb failure). |
 
+Preview reuses these codes: 2 for preview config errors, 1 for preview
+failures such as an unresolvable navigation target (§10.5).
+
 ### 6.5 Logging rules
 
 - Default output is quiet: one line per stage (started/finished), plus
@@ -586,6 +737,10 @@ not agent-oriented. CCB must satisfy all of the following:
   error event, never dumped raw to the terminal.
 - No timestamps in default output (breaks diffing); timestamps exist
   only in `--json` events.
+- Human-mode diagnostics all print with an `error[...]` prefix,
+  regardless of severity: a warning such as CCB-P1017 prints as
+  `error[CCB-P1017] ...` on stderr. Judge pass/fail by the diagnostic's
+  severity in §12 and by the exit code, not by the prefix.
 
 ### 6.6 Hermeticity and safety
 
@@ -616,6 +771,19 @@ not agent-oriented. CCB must satisfy all of the following:
 - Cache corruption (unparseable manifest) is not fatal: CCB logs a
   warning, discards the cache, and does a full rebuild.
 - `ccb build --explain` is the debugging surface for "why did it rebuild".
+- Fingerprint rules that matter:
+  - Compile-code fingerprint hashes classpath jar contents, not just
+    paths; dex fingerprint hashes classes jars.
+  - Tool probes (`kotlinc -version` / `java -version`) are cached in
+    `build/intermediates/tool-probes.json`, keyed by tool path + mtime +
+    size. Mismatch, missing entry, or corrupt file re-probes; `ccb clean`
+    removes it with `build/`. Probes never change build outputs: they
+    only feed the tool fingerprint.
+  - Comment-only Kotlin change re-runs kotlinc (source hash changed) but
+    skips dex and downstream: `.class` files — and every downstream
+    fingerprint — are identical.
+  - A comment-only library change rebuilds only that module: identical
+    class bytes mean an identical AAR hash, so dependents skip.
 
 ## 8. Performance targets (acceptance criteria)
 
@@ -631,16 +799,18 @@ not agent-oriented. CCB must satisfy all of the following:
 Targets are measured on a mid-range Linux laptop. If a target is missed,
 the miss is a bug, not a footnote.
 
-Measured 2026-10-24 on this VM: warm no-op rebuild ~0.2 s (probe cache;
-was ~3.4 s before caching), cold hello-world ~19 s (still above the
-<10 s target — JVM startup in kotlinc/d8/apksigner dominates).
+Measured status: warm no-op rebuild ~0.2 s. Cold hello-world ~19–23 s
+and one-file Kotlin rebuild ~14 s — both still above target; JVM
+startup in kotlinc/d8/apksigner dominates. The opt-in kotlinc daemon
+(§5.13) removes kotlinc JVM startup from warm rebuilds only (1-file
+rebuild 13.6 s → 5.2 s on hello, 2026-11-25). The <10 s cold target is
+not met and stays open work.
 
 ## 9. Implementation requirements (C)
 
 - Language: C17, single codebase, no C++.
-- Style (matches the user's established C conventions): 2-space indent,
-  K&R braces, `//` comments, strict warnings (`-Wall -Wextra -Werror`
-  in CI).
+- Style: 2-space indent, K&R braces, `//` comments, strict warnings
+  (`-Wall -Wextra -Werror -Wpedantic` in CI).
 - Dependencies: libc only. The TOML parser, SHA-256, ZIP reader/writer,
   and JSON writer are implemented in-tree (small, single-file style
   modules are acceptable; vendored third-party code must be licensed
@@ -648,7 +818,7 @@ was ~3.4 s before caching), cold hello-world ~19 s (still above the
 - Process management: `posix_spawn` (or `fork`/`exec` with careful fd
   hygiene). No `system()` calls. Every spawned tool's argv, cwd, and
   environment must be constructible in `--dry-run` output.
-- No threads in v1. The pipeline is sequential; parallelism is a v2
+- No threads. The pipeline is sequential; parallelism is a v2
   optimization, not a v1 requirement.
 - Test strategy:
   - Unit tests for the TOML parser, path resolution, hashing, ZIP
@@ -659,15 +829,22 @@ was ~3.4 s before caching), cold hello-world ~19 s (still above the
     badging` and `apksigner verify`.
   - A `ccb check`-style self-test in CI: `ccb doctor` against a
     container with a known SDK.
-- Repository layout (proposed):
+  - Test suite: 52 tests total (44 fast + 8 slow). Every test has two
+    labels: speed (`fast` / `slow`) and area. Fast means no real Android
+    build, seconds each. Slow means a real `ccb build` or a timeout
+    wait. Run suites sequentially, never concurrently
+    (`ctest --test-dir build -L fast` for the quick gate,
+    `ctest --test-dir build` for the full suite; see
+    `docs/build-tests.md`).
+- Repository layout:
   - `src/` — CCB sources (`main.c`, `toml.c`, `build.c`, `zip.c`,
     `hash.c`, `json.c`, `doctor.c`, `cmd_*.c`).
   - `tests/` — unit + integration tests.
   - `examples/hello/` — minimal sample project built by CI.
   - `docs/` — user guide, TOML reference, JSON protocol reference.
-  - `CMakeLists.txt` — CMake-only build, matching the user's convention.
+  - `CMakeLists.txt` — CMake-only build.
 
-### 9.1 Module map (highly modular)
+### 9.1 Module map
 
 The codebase is split into small modules with one responsibility each.
 A module is one `.c` file plus one `.h` file, and its header documents
@@ -779,23 +956,30 @@ phone_height = 844
 strict = false
 ```
 
-The full convention — screen and component declarations, the one-CSS-
+Full convention — screen and component declarations, the one-CSS-
 file-per-screen rule plus `common.css`, the selector set, the layout
 model in terminal columns, and the exit codes — is frozen in
 `docs/preview.md`. The terminal frame is `--width` columns (default
-40, minimum 24; smaller values clamp with a warning). `strict = true`
-(or `--strict`) turns subset warnings into errors. Phase 2 needs no
-new `[preview]` keys: when `flow` is absent, preview derives
-screens, edges, and the wireframe from the app's own Kotlin
-Activities and layout XML instead (see `docs/preview.md`, "Real code
-(Phase 2)").
+40, minimum 24; smaller values clamp with a warning, CCB-P1013).
+`strict = true` (or `--strict`) turns subset warnings into errors.
+When `flow` is absent, preview derives screens, edges, and the
+wireframe from the app's own Kotlin Activities and layout XML instead
+(see `docs/preview.md`, "Real code").
 
 Projects that do not follow the convention get a clear
 "preview not applicable to this project" message, not a crash and not
-a hallucinated render. Android XML layouts are understood by preview
-(Phase 2: layout buttons and `android:onClick`, and the
-layout-derived wireframe when there is no flow sketch); Compose
-code is NOT understood (see open question 8).
+a hallucinated render. Android XML layouts are understood by preview;
+Compose code is NOT understood.
+
+`[preview]` keys: `styles`, `flow`, `resources`, `layout`, `nav_graph`,
+`phone_width`, `phone_height`, `strict`, `gate`. `resources` is an
+optional directory of `strings.xml` / `colors.xml`; whole-label
+`@string/name` and `color` / `background-color` `@color/name` values
+resolve at load time. Unresolved references warn (CCB-P1016) and keep
+the literal. `layout` / `nav_graph` are overrides; without the key,
+preview tries `<paths res>/layout` and `<paths res>/navigation`, then
+`<resources>/layout` and `<resources>/navigation`. A configured path
+that does not exist is a config error (CCB-E1006).
 
 ### 10.3 CSS: a subset, parsed properly
 
@@ -816,12 +1000,12 @@ Preview parses real CSS, but only a documented subset:
   property and its location, and rendering continues with a fallback.
   Unknown properties never fail a preview; silently ignoring them
   would be worse than warning.
-- `--strict` turns subset warnings into errors.
+- `--strict` turns subset warnings into errors (CCB-P1001, CCB-P1014).
 
 ### 10.4 Kotlin: structure analysis, not interpretation
 
-This is the key scoping decision: preview does **not** interpret or
-execute Kotlin. It statically parses structure:
+Preview does **not** interpret or execute Kotlin. It statically parses
+structure:
 
 - Screen and component declarations, component trees per screen.
 - Navigation calls (`nav("Home")`, `navigateTo(...)`) → edges in the
@@ -829,91 +1013,80 @@ execute Kotlin. It statically parses structure:
   (string literals literally, `name = value` pairs as written,
   anything else as `unknown`) and shown in the tree, walk mode's
   edge list, and JSON (`"args"` array; JSON `"version":2`).
-- Slice 1 click handlers (implemented 2026-10-24): `setOnClickListener`
-  lambdas (trailing and parenthesized), `onClick = { ... }`
-  assignments, and direct `::handler` references inside screen fun
-  bodies also yield edges — derived, not declared. Binding is an
-  explicit `[preview.bindings]` table (code identifier → component
-  label); an unbound handler warns (CCB-P1019) and yields no edge.
-  `startActivity(Intent(this, X::class.java))` yields the class
-  simple name as the target. A nav nested in any non-branch brace
-  block inside a handler yields no edge (branch bodies are Slice 2,
-  below); a computed destination
-  yields an unknown edge; a declared edge for the same button always
-  wins, with a CCB-P1020 warning on disagreement. See
-  `docs/preview.md` (click handlers) for the exact outcome table
-  and scope limits. Slice 2 (conditional nav → branch edges,
-  implemented 2026-10-24: `if`/`when` branch bodies in handlers,
-  braced or braceless, yield edges annotated with the branch label,
-  e.g. `if ready: then`; literal arguments on handler nav calls
-  yield edges with args) and Slice 3 (XML onClick, NavController,
-  implemented 2026-10-24: layout `android:onClick` buttons resolve
-  via `[preview.bindings]` view-id keys to handler funs, whose
-  edges attach to screens containing the bound label — unbound is
-  CCB-P1019, label in no screen is CCB-P1021; `navigate(R.id.x)`
-  resolves through a nav-graph file — unlisted id or no graph file
-  is an unknown edge; layout/graph locations: explicit `[preview]`
-  `layout`/`nav_graph` keys, else `<resources>/layout` /
-  `<resources>/navigation`, else `<paths res>/layout` /
-  `<paths res>/navigation`) are implemented; see `docs/preview.md`
-  for the exact shapes, locations, and outcome tables.
+- Click handlers (Slice 1): `setOnClickListener` lambdas (trailing and
+  parenthesized), `onClick = { ... }` assignments, and direct
+  `::handler` references inside screen fun bodies yield edges —
+  derived, not declared. Binding is an explicit `[preview.bindings]`
+  table (code identifier → component label); an unbound handler warns
+  (CCB-P1019) and yields no edge. `startActivity(Intent(this,
+  X::class.java))` yields the class simple name as the target. A
+  declared edge for the same button always wins, with a CCB-P1020
+  warning on disagreement. Slice 2 (conditional nav → branch edges:
+  `if`/`when` branch bodies in handlers, braced or braceless, yield
+  edges annotated with the branch label, e.g. `if ready: then`) and
+  Slice 3 (XML onClick, NavController: layout `android:onClick`
+  buttons resolve via `[preview.bindings]` view-id keys to handler
+  funs, whose edges attach to screens containing the bound label —
+  unbound is CCB-P1019, label in no screen is CCB-P1021;
+  `navigate(R.id.x)` resolves through a nav-graph file — unlisted id
+  or no graph file is an unknown edge) are implemented; see
+  `docs/preview.md` for the exact shapes, locations, and outcome
+  tables.
 - `when`/`if` branches over state variables → branches in the logic
   tree, labeled with their conditions, **not evaluated**. A branch is
   shown, not resolved.
 - Dynamic data (network, database, sensors) becomes a placeholder node.
 
 Diagnostics from this analysis: navigation to a screen that does not
-exist is an error; a screen nothing navigates to is a warning; a
-screen with no components is a warning.
+exist is an error (CCB-P1005); a screen nothing navigates to is a
+warning (CCB-P1006); a screen with no components is a warning
+(CCB-P1007).
+
+Derived handler edges render exactly like declared edges in every
+output mode (tree, walk, storyboard, diff, JSON — no `derived` marker
+in output), and the post-load reconciliation (declared beats derived,
+CCB-P1020 on disagreement, CCB-P1019 for unbound handlers, CCB-P1021
+for an onClick label in no screen) runs before layout and diagnosis,
+so every consumer sees the reconciled edges. CCB-P1019/CCB-P1020/
+CCB-P1021 are warnings always, never gate failures. Branch edges add
+the tree/walk suffix ` [branch]` and the JSON per-edge `"branch"` field
+(string, or `null` when unconditional); JSON stays `"version":2`.
 
 ### 10.5 Output
 
 - Terminal render per screen (default): phone frame, boxes, colors,
   clipped text, then the logic tree, then diagnostics.
 - `--json`: the box tree, logic tree, and diagnostics as structured
-  data for agents (JSON `"version":2`; edge `"args"` arrays; every
-  box carries `"w_dp"`/`"h_dp"` alongside its cell size).
-- `--screen NAME`: render one screen only.
+  data for agents (JSON `"version":2`; edge `"args"` arrays and
+  `"branch"` fields; every box carries `"w_dp"`/`"h_dp"` alongside
+  its cell size). One JSON object, no trailing newline, deterministic.
+- `--screen NAME`: render one screen only. `ccb preview <screen>` is
+  the same.
 - `--storyboard "A,B,C"`: render a journey of screens in order
   (repeats allowed), each frame preceded by a `Journey N/M: <Name>`
   header; `--json` keeps only the journey screens, in order.
   Conflicts with `--screen`, `--walk`, `--watch`, `--diff`,
   `--update-goldens` (exit 2).
 - `[preview] resources = "res"`: optional directory of `strings.xml`
-  / `colors.xml`; whole-label `@string/name` and `color` /
-  `background-color` `@color/name` values resolve at load time.
-  Unresolved references warn (CCB-P1016) and keep the literal.
+  / `colors.xml` (see §10.2).
 - Lint warnings (always warnings, even under `--strict`, never
   build-gate failures): CCB-P1017 tap target too small (`button` /
   `textfield` under 8 columns or 2 rows, wireframe cells),
   CCB-P1018 text contrast below 4.5:1 (3.0:1 at `font-size` ≥ 24px)
   by WCAG relative luminance.
-- Derived handler edges (Slices 1–3, implemented 2026-10-24) render
-  exactly like declared edges in every output mode (tree, walk,
-  storyboard, diff, JSON — no `derived` marker in output), and the
-  post-load reconciliation (declared beats derived, CCB-P1020 on
-  disagreement, CCB-P1019 for unbound handlers, CCB-P1021 for an
-  onClick label in no screen) runs before layout
-  and diagnosis, so every consumer sees the reconciled edges.
-  CCB-P1019/CCB-P1020/CCB-P1021 are warnings always, never gate failures.
-  Branch edges (Slice 2) add the tree/walk suffix ` [branch]` and
-  the JSON per-edge `"branch"` field (string, or `null` when
-  unconditional); JSON stays `"version":2` (both edge fields are
-  additive).
 - `--walk [screen]`: interactive static exploration of the logic
-  tree (arrow keys/`j`/`k`, Enter, `b`, `t` branch mode, `q`); see
-  `docs/preview.md` Walk mode. Still static only — never execution
-  or evaluation.
+  tree (arrow keys/`j`/`k`, Enter, `b`, `t` branch mode, `q`). Static
+  only — never execution or evaluation.
 - `--watch [screen]`: render once, then re-render on every change to
   the styles/flow files or `ccb.toml` (~200ms debounce; TTY clear,
   piped delimiter, `--json` JSONL, `--output` rewrite); Ctrl-C /
   SIGTERM exits 0; a broken save prints diagnostics and keeps
-  watching. See `docs/preview.md` Watch mode. Conflicts with
-  `--update-goldens` and `--walk` (exit 2).
+  watching. Conflicts with `--update-goldens` and `--walk` (exit 2).
 - `--output FILE`, `--device phone|tablet`, `--update-goldens`:
-  write the render to a file, frame-width presets, regenerate the
-  checked-in goldens. `--json` carries an additive `"version":2`
-  field.
+  write the render to a file, frame-width presets (phone = 40
+  columns, tablet = 80; an explicit `--width` always wins), regenerate
+  the checked-in goldens.
+- `--ascii`: ASCII frame characters instead of Unicode.
 - `--diff DIR`: compare the current renders against a snapshot
   directory in the golden-file format; exit 0 identical, 1 with a
   unified diff per differing file, 2 for usage/config errors
@@ -921,14 +1094,20 @@ screen with no components is a warning.
   --screen). `--screen` scopes to one screen; `--json` emits a
   machine-readable diff object. Conflicts with --watch, --walk,
   --update-goldens (exit 2).
+- `--scenario FILE`, `--trace FILE`, `--record`, `--tree-live`: scenario
+  and trace modes and the LSP tree-live mode (see
+  `docs/preview-scenarios.md`, `docs/preview-traces.md`,
+  `docs/preview-lsp.md`). Scenario entries and trace steps that do not
+  match the project warn (CCB-P1022, CCB-P1023) and never fail the
+  build gate.
 - Build gate (opt-in, off by default): `[preview] gate = true` or
   `check`/`build --preview-gate` (`--no-preview-gate` forces off;
-  explicit flag beats config) runs preview diagnostics as part of
-  `check` (after toolchain validation) and `build` (before any
-  pipeline stage). Any preview ERROR fails the gate (exit 1, one
-  concise line per failing diagnostic on stderr); warnings alone
-  pass; preview-not-applicable projects pass silently. See
-  `docs/preview.md` Build gate.
+  explicit flag beats config; passing both flags is a usage error,
+  exit 2) runs preview diagnostics as part of `check` (after toolchain
+  validation) and `build` (before any pipeline stage). Any preview
+  ERROR fails the gate (exit 1, one concise line per failing diagnostic
+  on stderr); warnings alone pass; preview-not-applicable projects pass
+  silently. See `docs/preview.md` Build gate.
 - Exit codes reuse §6.4 (2 for preview config errors, 1 for preview
   failures such as an unresolvable navigation target).
 
@@ -937,10 +1116,7 @@ screen with no components is a warning.
 Preview is NOT: an emulator, a pixel-perfect render, an animation
 player, an interaction simulator, a Kotlin interpreter, or a source
 of real data. Fonts are the terminal's fonts. System UI, themes, and
-Android framework behavior are not modeled. An interactive walk mode
-(arrow keys through the logic tree) was a v2 candidate; it is
-implemented (see `docs/preview.md` Walk mode) — still static
-exploration only, never execution or evaluation.
+Android framework behavior are not modeled.
 
 ### 10.7 Feasibility: yes, scoped this way
 
@@ -949,16 +1125,10 @@ interpreter plus the Android framework — would be reimplementing a
 browser and a runtime, and is NOT feasible or in scope. The scoped
 version above is feasible because it is three tractable pieces: a CSS
 subset parser, a box layout pass, and a Kotlin structure parser, plus
-a terminal renderer. That is the same size class as a linter, and
-existing tools prove each piece separately (CSS parsers, static
-analyzers, terminal UI libraries all exist).
-
-Effort is real, not two minutes: roughly CSS + layout 40%, Kotlin
-structure parsing 30%, renderer + tree + diagnostics 30%. Phase it:
-P0 CSS subset + static boxes; P1 Kotlin structure → logic tree;
-P2 diagnostics; P3 (v2) interactive walk mode. Edge cases are handled
-by the subset + warnings + placeholder/unknown nodes: preview never
-crashes on input it does not understand, and never silently guesses.
+a terminal renderer. That is the same size class as a linter. Edge
+cases are handled by the subset + warnings + placeholder/unknown
+nodes: preview never crashes on input it does not understand, and
+never silently guesses.
 
 ## 11. Security considerations
 
@@ -968,108 +1138,170 @@ crashes on input it does not understand, and never silently guesses.
 - The auto-generated debug keystore uses the standard Android debug
   credentials and is gitignored by `ccb init`.
 - CCB never executes anything from the project directory (no hooks, no
-  scripts, no "prebuild" commands) in v1. A project that needs custom
+  scripts, no "prebuild" commands). A project that needs custom
   steps is out of scope rather than a code-execution vector.
-- Downloaded-tool integrity: CCB does not download tools. If a future
-  version adds `ccb doctor --install`, it must verify checksums against
-  a pinned list.
+- Downloaded-tool integrity: `ccb setup` verifies checksums of pinned
+  downloads against a pinned list. Maven artifacts verify against
+  published `.sha256` / `.sha1`, else a recorded sidecar hash (§5.4).
+  No PGP signature verification: checksums only.
 
-## 12. Milestones and acceptance criteria
+## 12. Diagnostic codes
 
-### M0 — Skeleton (the walking frame)
+Every failure carries a stable code. Agents branch on codes, not on
+prose. Exit codes: 0 success, 1 build failure, 2 config error,
+3 toolchain missing/wrong version, 4 signing error, 5 device error.
+Tool failures include the exact command that failed and the tail of its
+stderr. Keystore passwords never appear.
 
-- `ccb init`, `ccb setup`, `ccb check`, `ccb doctor`, `ccb version` work.
-- TOML parser complete with unknown-key errors and full error listing.
-- Acceptance: `ccb doctor` on a machine with a real SDK prints a clean
-  bill of health; on a machine without one, every missing item has an
-  install command.
+### 12.1 Config (exit 2)
 
-### M1 — First real APK
+`ccb check` reports every config problem at once, not just the first.
 
-- Full pipeline for a Kotlin hello-world app (manifest + res + one
-  Activity), debug-signed, zipaligned, `apksigner verify` clean.
-- `ccb build`, `ccb clean`, `--json`, `--dry-run` work.
-- Acceptance: the APK installs and launches on a device/emulator via
-  `ccb install` + `ccb run`.
+| Code | Meaning |
+| ---- | ------- |
+| CCB-E1001 | Unknown key in `ccb.toml` (hard error; key and table named) |
+| CCB-E1002 | Missing required `ccb_version` |
+| CCB-E1003 | Unsupported `ccb_version` (only 1 is supported) |
+| CCB-E1004 | Missing required key |
+| CCB-E1005 | Invalid value (bad variant, SDK range, min > target, manifest package mismatch, minify on debug, …) |
+| CCB-E1006 | Declared path does not exist |
+| CCB-E1007 | Wrong value type for a key |
+| CCB-E1008 | TOML parse error (with line number) |
+| CCB-E1009 | Config file not found |
+| CCB-E1010 | Module dependency cycle (names the cycle path, e.g. `a -> b -> a`) |
+| CCB-E1011 | Module depends on an unknown module (names the module and the dependency) |
 
-### M2 — Incremental builds
+### 12.2 Toolchain (exit 3)
 
-- Cache manifest, per-stage skip, `--explain`, cache invalidation on
-  tool upgrade.
-- Acceptance: the performance targets in §8 hold for the sample app.
+| Code | Meaning |
+| ---- | ------- |
+| CCB-E2001 | Android SDK not found (set `[sdk] home` or `ANDROID_HOME`) |
+| CCB-E2002 | Requested build-tools version not installed |
+| CCB-E2003 | Requested platform `android.jar` not found |
+| CCB-E2004 | kotlinc not found (set `[sdk] kotlin_home` or `KOTLIN_HOME`) |
+| CCB-E2005 | java missing or older than 17 |
+| CCB-E2006 | kotlinc is not 2.x |
+| CCB-E2007 | NDK not installed for the requested version |
+| CCB-E2008 | NDK revision mismatch |
+| CCB-E2009 | Required tool binary missing or not executable. Also a broken explicit tool override: `[sdk] aapt2` / `[sdk] zipalign` key or `CCB_AAPT2` / `CCB_ZIPALIGN` env var pointing at a missing or non-executable path fails with this code, message names the override source and the path. No silent fallback to the default tool. |
 
-### M3 — Native libs and AARs
+### 12.3 Build (exit 1 unless noted)
 
-- NDK compilation per ABI, AAR unpacking (classes/res/assets/jni),
-  duplicate-class errors.
-- Acceptance: a sample app with one native method and one AAR builds,
-  installs, and calls the native method correctly.
+| Code | Meaning |
+| ---- | ------- |
+| CCB-E3001 | Release signing pre-check failed (exit 4) |
+| CCB-E3002 | aapt2 compile failed |
+| CCB-E3003 | aapt2 link failed |
+| CCB-E3004 | kotlinc failed |
+| CCB-E3005 | javac failed |
+| CCB-E3006 | d8 failed |
+| CCB-E3007 | APK packaging failed (includes duplicate native libraries) |
+| CCB-E3008 | zipalign failed |
+| CCB-E3009 | Signing failed (exit 4) |
+| CCB-E3010 | apksigner verify failed |
+| CCB-E3011 | aapt2 dump badging failed |
+| CCB-E3012 | NDK compile failed |
+| CCB-E3013 | NDK link failed |
+| CCB-E3014 | r8 requested but no `[sdk] r8_jar` set (release + minify) |
+| CCB-E3015 | AAR extraction failed |
+| CCB-E3016 | Cannot create or write a build directory or file |
+| CCB-E3017 | r8 failed |
+| CCB-E3018 | Malformed manifest during merge (names the AAR or the app manifest) |
+| CCB-E3019 | Maven resolution failed: unresolvable coordinate, malformed or unsupported POM, or artifact not found in any configured repository |
+| CCB-E3020 | Maven checksum mismatch: downloaded or cached file does not match its published or recorded checksum |
+| CCB-E3021 | Maven artifact not in the local cache; run `ccb setup` to prefetch it (builds never download) |
+| CCB-E3022 | Library module or path-library name collides with a declared AAR's base name (their extraction paths would overwrite each other) |
+| CCB-E3023 | Maven lockfile mismatch: resolved tree deviates from `ccb.lock` (version, packaging, hash, missing, or stale entry), or the lockfile is malformed; run `ccb setup` to regenerate it |
+| CCB-E3024 | Maven parent POM chain error: a cycle in the chain, or more than 10 ancestors, naming the chain |
+| CCB-E3025 | Dex check failed: the dex references one or more classes it does not define (first 10 named, then "+ N more"), or a dex file is malformed/truncated; the build stops before packaging |
 
-### M4 — Release readiness and agent polish
+### 12.4 Preview (exit 1 unless noted)
 
-- Release signing (fail-fast on missing credentials), r8 minification
-  path, `ccb logcat`, full JSON protocol documentation, reproducible
-  build verification (two builds, identical bytes).
-- Acceptance: a release APK built twice from the same inputs is
-  byte-identical; the JSON protocol doc is complete enough for an agent
-  to drive CCB without reading its source.
+Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under `--strict`)
+CCB-P1001/CCB-P1014 exit 1. CCB-P1016–P1025 are warnings even under
+`--strict`, so they never fail the build gate. A project with no usable
+`[preview]` section is not a diagnostic at all: `ccb preview` prints
+"preview not applicable to this project" and exits 0.
 
-### M5 — Preview
+| Code | Meaning |
+| ---- | ------- |
+| CCB-P1001 | Unknown CSS property (warning; error under `--strict` / `[preview] strict`) |
+| CCB-P1002 | CSS parse error, partial parse kept (warning) |
+| CCB-P1003 | Overlapping boxes (warning) |
+| CCB-P1004 | Box extends past the interior bounds (warning) |
+| CCB-P1005 | Navigation to a target matching nothing: no screen, no nav-graph destination, and no manifest activity (error) |
+| CCB-P1006 | Unreachable screen, nothing navigates to it (warning) |
+| CCB-P1007 | Empty screen, no components (warning) |
+| CCB-P1008 | Duplicate screen name, 2nd and later occurrences (error) |
+| CCB-P1009 | Text clipped to its box (warning) |
+| CCB-P1010 | Flow parse error, partial parse kept (warning) |
+| CCB-P1011 | No screens found (warning) |
+| CCB-P1012 | Unknown Kotlin construct, kept as a generic box (warning) |
+| CCB-P1013 | Frame width clamped to the minimum of 24 columns (warning) |
+| CCB-P1014 | CSS value outside the subset, e.g. unsupported unit or display value (warning; error under `--strict` / `[preview] strict`) |
+| CCB-P1015 | CSS file ignored: neither `common.css` nor a `<Screen>.css` file for a screen in the project (warning) |
+| CCB-P1016 | Unresolved `@string/` or `@color/` reference, or a malformed values entry / non-hex color value skipped (warning; literal kept) |
+| CCB-P1017 | Tap target too small: `button` / `textfield` under 8 columns or 2 rows (warning, always) |
+| CCB-P1018 | Text contrast below threshold: WCAG ratio under 4.5:1, or 3.0:1 at `font-size` ≥ 24px (warning, always) |
+| CCB-P1019 | Handler found, button not bound: a click handler whose receiver has no `[preview.bindings]` entry (warning, always; no edge recorded) |
+| CCB-P1020 | Declared navigation disagrees with a derived edge for the same button; the declared edge stands, the derived edge is dropped (warning, always) |
+| CCB-P1021 | XML `android:onClick` button not found in any screen: the bound component label appears in no screen's component tree, so its derived edges have nowhere to attach (warning, always; no edge recorded) |
+| CCB-P1022 | Scenario entry does not match the project (warning, always; a scenario never fails the build gate) |
+| CCB-P1023 | Trace step does not match the project (warning, always; a trace never fails the build gate) |
+| CCB-P1024 | Ambiguous function reference: a click-handler method reference or a helper call names a top-level fun defined in more than one flow file, so no edge is recorded for it — the reference is never guessed. Warns once per (file, name) (warning, always; never fails the build gate) |
+| CCB-P1025 | Unattributed navigation: a nav call in a flow file that no parse recorded as an edge — inside a nested block, a skipped statement, or a helper never scanned from a button. Reported with file:line so it is never silently dropped; never invents an edge. Navs already reported by CCB-P1019 (unbound handler) or CCB-P1024 (ambiguous reference) are not repeated here (warning, always; never fails the build gate) |
 
-- CSS subset parser + box layout + terminal render for a sample
-  project; logic tree from Kotlin flow sources; diagnostics for missing
-  navigation targets and off-screen boxes.
-- Acceptance: the sample project renders recognizably in a terminal;
-  the logic tree matches the hand-written expectation; an unresolvable
-  navigation target is reported as an error; an unsupported CSS
-  property warns and renders with a fallback instead of crashing.
+### 12.5 Device (exit 5)
 
-## 13. Open questions (for the user to decide)
+| Code | Meaning |
+| ---- | ------- |
+| CCB-E5001 | adb command failed or no device connected |
+| CCB-E5002 | No APK to install (run `ccb build` first) |
 
-1. **AAB support?** Implemented: `ccb build --aab` produces a
-   base-module-only `.aab` (see §5.10); bundletool-based split APK
-   generation stays out of scope.
-2. **Remote dependencies?** Implemented: a minimal Maven resolver
-   (Google Maven + opt-in Central, exact versions, POM packaging,
-   transitive nearest-wins, checksum-verified cache, setup-time
-   prefetch, cache-only builds) — see §5.4 and `docs/maven.md`.
-   Follow-ups implemented: dependency exclusions (`maven_exclude`)
-   and a `ccb.lock` lockfile (setup writes, check/build enforce);
-   kotlinc compiler plugins (`[build] kotlin_plugins`, exact versions,
-   no transitive walk); version ranges, `LATEST`/`RELEASE`, and
-   `-SNAPSHOT` handling; parent-POM `<dependencies>` and profile
-   inheritance; profile support (by id or `<activeByDefault>`);
-   authenticated/private repositories (`[deps] maven_repos`).
-3. **Compose?** Implemented: the Compose compiler plugin path —
-   `[build] kotlin_plugins` with
-   `org.jetbrains.kotlin:kotlin-compose-compiler-plugin:<kotlin-version>`;
-   a minimal Compose sample builds with `ccb build` — see §5.3 and
-   `docs/maven.md`.
-4. **Manifest merging?** Implemented: the AAR manifest merge subset
-   (components, permissions, features; app-wins conflicts) — see §5.2.
-5. **Windows?** v2 platform, or Linux/macOS only by design?
-6. **Multi-module?** Implemented: library modules via
-   `[modules.<name>]` tables (standard `src/main` layout,
-   topological build into intermediate AARs consumed through the
-   existing deps + manifest-merge machinery) — see §4.3, §5.11, and
-   `docs/modules.md`; standalone library projects via an empty
-   `[library]` table (build `build/<name>-<version>.aar` with
-   `classes.jar`, manifest, res, assets, `R.txt`), consumed from a
-   local path (`[deps.library.<name>] path = "..."`) or Maven
-   coordinates, with app-wins resource merging and package-namespaced
-   R symbols — see `docs/library.md`. Dynamic feature modules stay
-   out of scope.
-7. **Name expansion.** "Custom C Builder" is a placeholder. Keep CCB as
+## 13. Status and acceptance criteria
+
+Shipped and verified: `ccb init`, `ccb setup`, `ccb check`,
+`ccb doctor`, `ccb version`, full pipeline for a Kotlin hello-world app
+(debug-signed, zipaligned, `apksigner verify` clean), incremental builds
+with per-stage cache and `--explain`, NDK per-ABI compilation, AAR
+unpacking with duplicate-class errors, release signing with fail-fast
+credential checks, r8 minification path, `ccb logcat`, JSON protocol,
+reproducible builds (two clean builds byte-identical), preview
+(CSS subset + box layout + terminal render + logic tree + diagnostics +
+walk/watch/diff/scenario/trace modes + build gate), AAB output
+(base-module-only, `bundletool validate` passes), Maven remote
+dependencies (ranges, snapshots, `LATEST`/`RELEASE`, parent-POM
+deps/profiles, private repos, exclusions, `ccb.lock`), kotlinc compiler
+plugins including the Compose compiler plugin path, library modules,
+standalone library projects (`.aar` build + path/Maven consumption),
+dexcheck gate, opt-in kotlinc daemon.
+
+Acceptance: the APK installs and launches on a device via `ccb install` +
+`ccb run`; a release APK built twice from the same inputs is
+byte-identical; the JSON protocol doc is complete enough for an agent to
+drive CCB without reading its source; the sample project renders
+recognizably in a terminal; an unresolvable navigation target is
+reported as an error; an unsupported CSS property warns and renders
+with a fallback instead of crashing.
+
+Open performance work: cold hello-world <10 s and one-file Kotlin
+rebuild <2 s are not met (§8).
+
+## 14. Open questions (for the user to decide)
+
+1. **Windows?** v2 platform, or Linux/macOS only by design?
+2. **Name expansion.** "Custom C Builder" is a placeholder. Keep CCB as
    a bare name, or pick a real expansion?
-8. **Preview scope.** Implemented (Phase 2): preview derives
-   screens, edges, and the wireframe from Android XML layouts and
-   the app's own Kotlin Activities, so a project needs no flow
-   sketch. Compose code in v2, or keep it CSS-convention-only?
-   Interactive walk mode through the logic tree in v2?
-9. **CCB's own license.** Pick before publishing: permissive, copyleft,
-   or source-available (as with melod)?
+3. **Preview scope.** Compose code is NOT understood. Compose in
+   preview, or keep it CSS-convention-only?
+4. **CCB's own license.** Pick before publishing: permissive, copyleft,
+   or source-available? No license is chosen on the user's behalf
+   until they pick one.
+5. **Cold-build speed.** The <10 s cold target is missed (§8). Daemon
+   helps warm rebuilds only. What closes the cold gap: d8/apksigner
+   JVM startup, or a different approach?
 
-## 14. Glossary
+## 15. Glossary
 
 - **aapt2** — Android Asset Packaging Tool: compiles and links resources
   and the manifest.
@@ -1094,19 +1326,3 @@ crashes on input it does not understand, and never silently guesses.
   but not evaluated.
 - **CSS subset** — The documented portion of CSS that preview parses.
   Properties outside it warn and fall back; they never crash a preview.
-
-## 15. Pre-start decisions (approved by the user 2026-10-24)
-
-Items 1–6 below were approved and folded into the normative sections
-above (config schema, commands, JSON protocol, build layout, Stage 0,
-signing). Item 7 remains open: the user has not yet picked a license.
-
-1. Schema version + config discovery → §4.
-2. Stable diagnostic codes → §6.2.
-3. Debug keystore location → §5.8.
-4. Build directory layout → §6.6.
-5. Compatibility matrix → §5.1.
-6. `ccb setup` command → §6.1, M0.
-7. CCB's own license → OPEN (see open question 9). No license file is
-   added and no license is chosen on the user's behalf until they pick
-   one.
