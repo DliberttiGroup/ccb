@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // Unique per-process scratch dir, so parallel ctest runs (-j) and two
@@ -40,14 +41,22 @@ static inline char *ccb_test_path(const char *base, const char *rel) {
 }
 
 // Read a whole file, or NULL when it cannot be read. Shared by the
-// preview tests; was twelve copies (two spellings: an fseek/ftell one
-// and an fread-loop one). This is the stricter spelling: a short read
-// or a seek failure is NULL, never partial content, and an empty file
-// reads as "" rather than NULL.
+// preview tests; was twelve copies in three spellings (an fseek/ftell
+// one, an fread-loop one, and this stat-guarded one). This is the
+// stat-guarded spelling: only regular files are read. ftell on a
+// directory stream returns LONG_MAX on some filesystems, and
+// malloc(size + 1) then wraps and aborts, so a directory must fail
+// cleanly here instead of trusting ftell. (The plain fseek spelling
+// passed locally and aborted in CI on exactly this.)
 static inline char *ccb_test_try_read(const char *path) {
-  FILE *f = fopen(path, "rb");
+  struct stat st;
+  FILE *f = NULL;
   long size = 0;
   char *buf = NULL;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+    return NULL;
+  }
+  f = fopen(path, "rb");
   if (f == NULL) {
     return NULL;
   }
