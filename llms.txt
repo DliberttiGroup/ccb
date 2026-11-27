@@ -14,6 +14,7 @@
 - [Installing tools](docs/llm/setup-tools.md): Installing a missing JDK, kotlinc, NDK, r8, host tools, third-party Termux repos, custom tool paths, download cache.
 - [Remote Maven dependencies](docs/llm/maven.md): Declaring Maven coordinates, transitive resolution, cache and checksums, lockfile, limitations, troubleshooting.
 - [Library modules](docs/llm/modules.md): Declaring library modules, graph rules, build flow, R semantics, incremental builds, limitations.
+- [Library projects](docs/llm/library.md): Standalone library projects: [library], path/Maven consumption, resource namespacing, check report.
 - [Preview](docs/llm/preview.md): The ccb preview UI convention — config, flow files, build gate, output and exit codes, JSON shape, worked example.
 - [Preview: click handlers](docs/llm/preview-handlers.md): Derived edges, conditional nav, XML android:onClick, NavController + nav graph, bindings, precedence, unknown cases, scope limits.
 - [Preview: real code](docs/llm/preview-real-code.md): Screens and edges from real Kotlin Activities, merge with a sketch, layout-derived wireframe, limits.

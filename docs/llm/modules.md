@@ -2,6 +2,8 @@
 
 # 库模块
 
+[文档索引](index.md)
+
 项目可以在根 `ccb.toml` 中声明库模块。每个模块会被构建为中间 AAR，并通过现有的 AAR 机制消费：manifest 合并、res 在链接时合并、类被 dex、assets 被打包。app 模块是唯一的 APK/AAB 输出；库模块不产生 APK/AAB。
 
 ## 配置
@@ -29,22 +31,24 @@ depends = ["base"]
 
 ## 构建流程
 
-流水线顺序：deps（已声明的 AAR）→ modules → merge-manifest → compile-res → link → code → dex → …。manifest 合并先看到已声明的 AAR，然后按拓扑顺序看到模块 AAR。合并规则见 [docs/build.md](build.md)（第 3 步）。
+流水线顺序：deps（已声明的 AAR）→ modules → merge-manifest → compile-res → link → code → dex → …。manifest 合并先看到已声明的 AAR，然后按拓扑顺序看到模块 AAR。合并规则见 [build.md](build.md)（第 4 阶段）。
 
 每个模块按拓扑顺序执行：
 
 1. 指纹：工具版本、模块 manifest、res、assets、Kotlin 和 Java 源码、已声明的 jar、已声明的 AAR 类，以及上游模块输出（AAR + 生成的 R.java）。输入不变则跳过该模块。
-2. 资源（仅当模块既有代码又有资源时）：`aapt2 compile` 编译模块 res，然后 `aapt2 link` 对照模块 manifest 生成该模块 package 的 R.java。链接输出（一次性的 `.ap_`）会被丢弃；只保留 R.java。
+2. 资源：`aapt2 compile` 编译模块 res，然后 `aapt2 link` 对照模块 manifest 生成该模块 package 的 R.java（以及 R.txt，`--output-text-symbols`）。链接输出（一次性的 `.ap_`）会被丢弃；只保留 R.java 和 R.txt。只要模块有资源，即使没有代码，链接也会运行，因此纯资源模块仍会交付一个真实的 R.txt。
 3. 代码：`kotlinc` 处理模块 Kotlin 源码、Java 源码、生成的 R.java 和上游模块的 R.java（模块可以引用依赖的 R 类），classpath = `android.jar` + 已声明的 jar + 已声明和已构建的模块类。随后 `javac` 按 app 的规范方式编译 Java 源码。没有 Kotlin/Java 源码的模块跳过此步。
 4. `classes.jar`：除生成的 R 类（`R.class`、`R$*.class`）之外的每个已编译文件。app 链接会为该模块 package 生成真正的 R 类，同时交付两者会使 d8 因重复而拒绝。纯资源模块不贡献任何类。
-5. 中间 AAR（`build/intermediates/modules/<name>/<name>.aar`）：`classes.jar`（如果存在）、`AndroidManifest.xml`（模块 manifest 的副本）、原始 `res/` 和 `assets/` 树。aapt2 在 app 链接时编译 res，与已声明的 AAR 完全相同。
+5. 中间 AAR（`build/intermediates/modules/<name>/<name>.aar`）：`classes.jar`（如果存在）、`AndroidManifest.xml`（模块 manifest 的副本）、原始 `res/` 和 `assets/` 树、`R.txt`（模块没有资源时为空）。aapt2 在 app 链接时编译 res，与已声明的 AAR 完全相同。
 
-## R 语义
+## R 语义与命名空间
 
 库 R 字段是**非 final**的。模块链接生成 R.java，CCB 将其字段从 `public static final int` 改写为 `public static int`，app 链接再赋予最终的资源 ID。库代码以符号方式引用 R 字段，因此在运行时对照 app 的 R 类解析。
 
 - 库代码可以引用自身的 R 类及其依赖的 R 类。
 - 不要在有资源的模块中把自己的类命名为 `R`：它会与生成的 R 类冲突。
+- R 符号按 package 命名空间区分：app 链接会把每个模块 package 作为 `--extra-packages` 传入，因此每个模块都有自己的 R 类，不会与应用的 R 类冲突。
+- 资源合并是应用获胜：app 链接会把库 zip 作为 aapt2 `-R` 覆盖层传入，应用 zip 最后（见 [library.md](library.md)）。一个资源由多个来源定义时，会在链接时发出警告，注明获胜者和被遮蔽的来源。
 
 ## 增量构建
 
@@ -61,5 +65,4 @@ depends = ["base"]
 - 没有按模块的 `[deps]`、`[ndk]` 或签名小节：模块在 classpath 上使用项目的 jar/AAR，没有原生库。
 - 没有动态功能模块。
 - 不支持将库模块发布到 Maven 仓库。
-- 除了 aapt2 已有的功能（`--extra-packages` + `--auto-add-overlay`）之外，没有跨模块资源命名空间。
 - app 模块不能按模块配置：所有声明的模块都会在每次构建中被构建和消费。

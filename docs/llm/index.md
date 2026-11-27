@@ -22,6 +22,7 @@
 | [diagnostics.md](diagnostics.md) | 每个 `CCB-E` / `CCB-P` 代码与退出码 |
 | [json-protocol.md](json-protocol.md) | `--json` 输出、`--explain`、`--dry-run` |
 | [modules.md](modules.md) | `ccb.toml` 中的库模块 |
+| [library.md](library.md) | 独立库项目：`[library]`、路径/Maven 消费、资源命名空间、`check` 报告 |
 | [maven.md](maven.md) | 远程 Maven 依赖、缓存、锁文件 |
 | [preview.md](preview.md) | 终端 UI preview：配置、flow 文件、门禁、输出、JSON |
 | [preview-handlers.md](preview-handlers.md) | 点击处理函数：派生边、绑定、优先级、结果 |
@@ -125,6 +126,12 @@
 | `*ccb-modules-r*` | modules.md | R 语义 |
 | `*ccb-modules-incremental*` | modules.md | 增量构建 |
 | `*ccb-modules-limits*` | modules.md | 限制 |
+| `*ccb-library*` | library.md | 独立库项目 |
+| `*ccb-library-config*` | library.md | 声明库项目 |
+| `*ccb-library-aar*` | library.md | AAR 内容 |
+| `*ccb-library-consume*` | library.md | 通过路径消费库 |
+| `*ccb-library-r*` | library.md | 资源合并与命名空间 |
+| `*ccb-library-check*` | library.md | `ccb check` 报告库 |
 | `*ccb-device*` | device-setup.md | 连接设备 |
 | `*ccb-device-wireless*` | device-setup.md | 通过 Tailscale 无线调试 |
 | `*ccb-device-no-device*` | device-setup.md | 无设备连接时 |

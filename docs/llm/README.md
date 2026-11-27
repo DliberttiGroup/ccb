@@ -18,6 +18,7 @@
 | `docs/llm/setup-tools.md` | `docs/setup-tools.md` | 安装缺失的 JDK、kotlinc、NDK、r8、主机工具、第三方 Termux 仓库、自定义工具路径、下载缓存 |
 | `docs/llm/maven.md` | `docs/maven.md` | 声明 Maven 坐标、传递依赖解析、缓存与校验和、锁文件、限制、故障排查 |
 | `docs/llm/modules.md` | `docs/modules.md` | 声明库模块、图规则、构建流程、R 语义、增量构建、限制 |
+| `docs/llm/library.md` | `docs/library.md` | 独立库项目、路径/Maven 消费、资源合并与命名空间、`check` 报告 |
 | `docs/llm/preview.md` | `docs/preview.md` | `ccb preview` 界面约定：配置、flow 文件、构建门禁、输出与退出码、JSON 形态、实际示例 |
 | `docs/llm/preview-handlers.md` | `docs/preview-handlers.md` | 点击处理函数：派生边、条件导航、XML android:onClick、NavController 与导航图、绑定、优先级、未知情况、作用域限制 |
 | `docs/llm/preview-real-code.md` | `docs/preview-real-code.md` | 从真实 Kotlin Activity 得到屏幕和边、与草图合并、无草图时的线框图、限制 |

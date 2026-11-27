@@ -12,21 +12,25 @@
 | - | ----- | ------------ |
 | 0 | Load | 加载并验证 `ccb.toml`，一次报告所有问题。解析工具链。Release 构建在编译任何内容之前验证签名配置。 |
 | 1 | deps | 解压 AAR（类、资源、assets、JNI）。 |
-| 2 | merge-manifest | 按配置顺序把 AAR 的 manifest 合并到应用 manifest 中。输出：`build/intermediates/merged-manifest/`。没有 AAR 时跳过。 |
-| 3 | compile-res | 对每个资源目录运行 `aapt2 compile`，生成 `.flat` zip。 |
-| 4 | link | 运行 `aapt2 link` 生成 `linked.ap_` 并生成 `R.java`。有 AAR 时使用合并后的 manifest，否则使用应用 manifest。manifest 的 `package` 必须与 `[project] package` 一致。 |
-| 5 | compile-code | 先运行 `kotlinc`（Kotlin + `R.java` + Java 源码），再运行 `javac` 编译 Java 源码和生成的 `R.java`。kotlinc 能解析 R 符号但不生成 R.class 文件，因此必须由 javac 编译它们——否则运行时 dex 中会缺少库的 R 类。Classpath：`android.jar` + `deps.jars` + AAR 的 `classes.jar` 文件。 |
-| 6 | dex | 运行 `d8`（release + minify 时运行 `r8`）。见下文。 |
-| 7 | dexcheck | 解析 dex 文件，验证 dex 引用的每个类都在 dex 中定义。被引用但未定义的程序类会在打包之前使构建失败，错误为 `CCB-E3025`，注明缺失的类。平台类（`java.*`、`android.*`，……）来自 `--lib` 输入，永远不在 dex 中：会被列入白名单，永不报告。仅出现在注解和签名中的引用仍然计入。即使 dex 因缓存而跳过，以及 AAB 构建时，它都会运行。只需几毫秒，没有自己的缓存，也不计入 `steps_run`，因此无操作重建仍会报告 "up to date"。`--explain` 会打印它的计划行；`--dry-run` 不运行它。 |
-| 8 | native | 每个 ABI 运行 NDK clang（仅当存在 `[ndk]` 小节时）。 |
-| 9 | package | CCB 自有的 ZIP 写入器：`linked.ap_` 条目、dex 文件、assets（同名时应用 assets 优先于 AAR assets）、`lib/<abi>/*.so`（重复的 `.so` 名称是错误）。 |
-| 10 | align | `zipalign -f 4`。 |
-| 11 | sign | `apksigner`。Debug 使用 `~/.android/debug.keystore`（缺失时用 keytool 创建）。Release 使用 `env:VAR` 密码引用；密码绝不会出现在命令或日志中。 |
-| 12 | verify | `apksigner verify` 和 `aapt2 dump badging`。只有两者都通过，APK 才算构建成功。 |
+| 2 | libraries | 把每个路径库（`[deps.library.<name>]`）构建为 `build/intermediates/libraries/<name>/<name>.aar`（构建好的 `.aar` 路径会在第 0 阶段加入已声明的 AAR）。没有路径库时跳过。见 [library.md](library.md)。 |
+| 3 | modules | 把每个 `[modules.<name>]` 库模块构建为 `build/intermediates/modules/<name>/<name>.aar`，按拓扑顺序。没有模块时跳过。见 [modules.md](modules.md)。 |
+| 4 | merge-manifest | 按配置顺序把 AAR 的 manifest 合并到应用 manifest 中。输出：`build/intermediates/merged-manifest/`。没有 AAR 时跳过。 |
+| 5 | compile-res | 对每个资源目录运行 `aapt2 compile`，生成 `.flat` zip。 |
+| 6 | link | 运行 `aapt2 link` 生成 `linked.ap_` 并生成 `R.java`。有 AAR 时使用合并后的 manifest，否则使用应用 manifest。manifest 的 `package` 必须与 `[project] package` 一致。库 zip 以 `-R` 覆盖层的形式链接，应用 zip 最后，因此应用会在资源冲突中获胜（见 [library.md](library.md)）；一个资源由多个来源定义时会发出警告，注明获胜者。 |
+| 7 | compile-code | 先运行 `kotlinc`（Kotlin + `R.java` + Java 源码），再运行 `javac` 编译 Java 源码和生成的 `R.java`。kotlinc 能解析 R 符号但不生成 R.class 文件，因此必须由 javac 编译它们——否则运行时 dex 中会缺少库的 R 类。Classpath：`android.jar` + `deps.jars` + AAR 的 `classes.jar` 文件。设置了 `[build] kotlin_plugins` 时，kotlinc 还会为每个已解析的插件 jar 得到 `-Xplugin=<jar>`，并为每个 `kotlin_plugin_options` 条目得到 `-P plugin:<id>:<key>=<value>`；插件 jar 和选项会加入编译指纹，因此改动其中任何一个都会重新编译（见 [maven](maven.md)）。 |
+| 8 | dex | 运行 `d8`（release + minify 时运行 `r8`）。见下文。 |
+| 9 | dexcheck | 解析 dex 文件，验证 dex 引用的每个类都在 dex 中定义。被引用但未定义的程序类会在打包之前使构建失败，错误为 `CCB-E3025`，注明缺失的类。平台类（`java.*`、`android.*`，……）来自 `--lib` 输入，永远不在 dex 中：会被列入白名单，永不报告。仅出现在注解和签名中的引用仍然计入。即使 dex 因缓存而跳过，以及 AAB 构建时，它都会运行。只需几毫秒，没有自己的缓存，也不计入 `steps_run`，因此无操作重建仍会报告 "up to date"。`--explain` 会打印它的计划行；`--dry-run` 不运行它。 |
+| 10 | native | 每个 ABI 运行 NDK clang（仅当存在 `[ndk]` 小节时）。 |
+| 11 | package | CCB 自有的 ZIP 写入器：`linked.ap_` 条目、dex 文件、assets（同名时应用 assets 优先于 AAR assets）、`lib/<abi>/*.so`（重复的 `.so` 名称是错误）。 |
+| 12 | align | `zipalign -f 4`。 |
+| 13 | sign | `apksigner`。Debug 使用 `~/.android/debug.keystore`（缺失时用 keytool 创建）。Release 使用 `env:VAR` 密码引用；密码绝不会出现在命令或日志中。 |
+| 14 | verify | `apksigner verify` 和 `aapt2 dump badging`。只有两者都通过，APK 才算构建成功。 |
 
-合并规则（第 2 阶段）：名称冲突时应用条目获胜（警告会注明 AAR 和该条目）；两个 AAR 中相同的条目会静默去重；同名但属性不同的条目保留第一个 AAR 的版本（警告会注明两个 AAR）。合并的内容：应用组件（`activity`、`service`、`receiver`、`provider`、`activity-alias`）、`uses-permission`、`uses-feature`。库 manifest 中的其他所有内容都会被忽略。相对组件名会根据所属 manifest 的 package 解析，并改写为完全限定名。格式错误的 AAR manifest 会以 `CCB-E3018` 使构建失败，且在打包之前；没有 manifest 的 AAR 合并后相当于什么都没有。根据输入生成指纹，因此任何 manifest 变化都会使 `link` 重新运行。
+库项目（`ccb.toml` 中的 `[library]`）只运行上面列表中的第 0–2 阶段——deps，然后把它的单个模块构建为 `build/<name>-<version>.aar`——然后停止：不做合并、链接、dex 或打包。见 [library.md](library.md)。
 
-### Dex（第 6 阶段）
+合并规则（第 4 阶段）：名称冲突时应用条目获胜（警告会注明 AAR 和该条目）；两个 AAR 中相同的条目会静默去重；同名但属性不同的条目保留第一个 AAR 的版本（警告会注明两个 AAR）。合并的内容：应用组件（`activity`、`service`、`receiver`、`provider`、`activity-alias`）、`uses-permission`、`uses-feature`。库 manifest 中的其他所有内容都会被忽略。相对组件名会根据所属 manifest 的 package 解析，并改写为完全限定名。格式错误的 AAR manifest 会以 `CCB-E3018` 使构建失败，且在打包之前；没有 manifest 的 AAR 合并后相当于什么都没有。根据输入生成指纹，因此任何 manifest 变化都会使 `link` 重新运行。
+
+### Dex（第 8 阶段）
 
 `.class` 文件逐个传入，而非传入目录：kotlinc 还会写入 `META-INF/*.kotlin_module` 文件，而 d8 会拒绝目录输入中的非类文件。对于 Kotlin 项目，kotlinc stdlib jar 会自动作为程序输入加入（项目已通过 `[deps]` 或 Maven 提供时跳过）；release + minify 时它是 R8 的程序输入，而非 `--lib`。
 
