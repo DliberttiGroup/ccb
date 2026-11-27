@@ -300,13 +300,14 @@ Every key CCB accepts. Unknown keys are CCB-E1001.
 |---|---|
 | (top level) | `ccb_version` |
 | `[project]` | `name`, `package`, `version`, `version_code`, `min_sdk`, `target_sdk`, `compile_sdk` |
-| `[paths]` | `manifest`, `res`, `assets`, `kotlin`, `java`, `libs` |
+| `[paths]` | `manifest`, `res`, `assets`, `kotlin`, `java`, `java_extra`, `libs` |
 | `[sdk]` | `home`, `build_tools`, `ndk`, `kotlin_home`, `aapt2`, `zipalign`, `r8_jar` |
 | `[signing.debug]`, `[signing.release]` | `store`, `alias`, `store_password_env`, `key_password_env` |
 | `[build]` | `variant`, `minify`, `shrink_resources`, `jvm_target`, `kotlinc_daemon`, `kotlinc_daemon_idle_seconds`, `kotlin_plugins`, `kotlin_plugin_options`, `proguard_rules` |
 | `[deps]` | `jars`, `aars`, `maven`, `maven_central`, `maven_repos`, `maven_profiles`, `maven_exclude` |
 | `[deps.library.<name>]` | `path` |
 | `[ndk]` | `abis`, `cpp_flags`, `c_sources` |
+| `[cmake]` | `lists`, `args` |
 | `[modules.<name>]` | `dir`, `depends` |
 | `[library]` | (empty table; any key is CCB-E1001) |
 | `[preview]` | `styles`, `flow`, `resources`, `layout`, `nav_graph`, `phone_width`, `phone_height`, `strict`, `gate` |
@@ -334,10 +335,10 @@ skippable by the cache (§7) and independently reportable in JSON output
 | 4 | merge-manifest | Merge AAR manifests into the app manifest, in config order. Output: `build/intermediates/merged-manifest/`. Skipped with no AARs. |
 | 5 | compile-res | `aapt2 compile` each resource directory into a `.flat` zip. |
 | 6 | link | `aapt2 link` into `linked.ap_`, generating `R.java`. Uses the merged manifest when AARs are present, else the app manifest. The manifest's `package` must match `[project] package`. Library zips link as `-R` overlays with the app zip last, so the app wins resource conflicts; a resource defined by more than one source warns, naming the winner. |
-| 7 | compile-code | `kotlinc` (Kotlin + `R.java` + Java sources), then `javac` for Java sources and generated `R.java`. Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files. |
+| 7 | compile-code | `kotlinc` (Kotlin + `R.java` + Java sources), then `javac` for Java sources and generated `R.java`. Classpath: `android.jar` + `deps.jars` + AAR `classes.jar` files. Java-only projects skip kotlinc entirely (no kotlinc install needed); `[paths] java_extra` roots compile alongside `java_dir`; `javac` runs with `-encoding UTF-8`. |
 | 8 | dex | `d8` (or `r8` for release + minify). See §5.6. |
 | 9 | dexcheck | Parse the dex files, verify every referenced class is defined in the dex. See §5.7. |
-| 10 | native | NDK clang per ABI (only with an `[ndk]` section). |
+| 10 | native | NDK clang per ABI (only with an `[ndk]` section). Each compile writes a depfile; the next build hashes the listed headers into the fingerprint, so a header change rebuilds the lib. arm64-v8a links with `-Wl,-z,max-page-size=16384` (16 KB page size, Android 15+). With a `[cmake]` table, CMake builds the project's own `CMakeLists.txt` per ABI instead. |
 | 11 | package | CCB's own ZIP writer: `linked.ap_` entries, dex files, assets (app assets win over AAR assets with the same name), `lib/<abi>/*.so` (duplicate `.so` names are an error, CCB-E3007). |
 | 12 | align | `zipalign -f 4`. |
 | 13 | sign | `apksigner`. Debug uses `~/.android/debug.keystore` (created with keytool when missing). Release uses `env:VAR` password references; passwords never appear in commands or logs. |
@@ -367,8 +368,9 @@ outside its range is a Stage 0 error naming the range and the found
 version.
 
 Kotlin compiler location: `$KOTLIN_HOME`, then `PATH`, then TOML
-`[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error (CCB-E2004),
-not a Stage 7 surprise.
+`[sdk].kotlin_home`. Missing kotlinc is a Stage 0 error (CCB-E2004)
+only when the project (or a library module) actually has Kotlin
+sources; Java-only projects build without kotlinc installed.
 
 ### 5.2 Stage 6 — Link (resources + manifest)
 
@@ -401,9 +403,14 @@ not a Stage 7 surprise.
 
 - `kotlinc` over Kotlin sources with classpath = `android.jar` +
   `R.java` output + declared jars + extracted AAR `classes.jar`s.
+  Skipped entirely for Java-only projects (no `.kt` sources and no
+  kotlinc installed: `ccb check` reports `kotlinc: none`).
 - `javac` over Java sources with the same classpath (if any Java exists),
   plus the generated `R.java` (kotlinc resolves R symbols but emits no
-  R.class files, so javac must compile them).
+  R.class files, so javac must compile them). Java sources come from
+  `[paths] java` plus every `[paths] java_extra` root (vendored Java
+  outside the project tree); `javac` runs with `-encoding UTF-8`
+  regardless of the host locale.
 - `d8`/`r8` gets the kotlinc stdlib jar as a program input for Kotlin
   projects, unless the project already supplies it via `[deps]` or Maven.
 - Compiler plugins: when `[build] kotlin_plugins` is set, kotlinc gets
@@ -465,6 +472,24 @@ not a Stage 7 surprise.
 - `.so` files land in the APK at `lib/<abi>/`.
 - NDK version is pinned in TOML; a mismatched installed NDK is a Stage 0
   error (CCB-E2008).
+- Each compile writes a depfile (`-MMD`) next to the object; the next
+  build hashes every listed header into the step fingerprint, so a
+  header change rebuilds the lib instead of silently shipping the old
+  `.so`. The fingerprint recorded after a build is recomputed from the
+  fresh depfiles, so a no-change rebuild still skips.
+- arm64-v8a links with `-Wl,-z,max-page-size=16384`: Android 15+
+  16 KB-page devices refuse `.so` files linked with the 4 KB default.
+- With a `[cmake]` table, CMake builds the project's own
+  `CMakeLists.txt` per ABI instead of the clang-per-source step
+  (`[ndk] abis` still declares the ABIs; `ndk.c_sources` must be
+  empty; `[cmake]` without `[ndk]` is a config error). `cmake` comes
+  from the SDK-bundled 3.22.1 or `PATH`, `make` from `PATH`; the
+  toolchain file is the NDK's `android.toolchain.cmake`, the platform
+  is `android-<min_sdk>`, and the build type follows the variant
+  (debug → Debug, release → Release). Project `[cmake] args` are
+  passed through after CCB's own `-D` flags. The built `.so` files
+  are copied into `intermediates/jni/<abi>/` and packaged exactly
+  like clang-built libs.
 
 ### 5.6 Stage 8 — Dex (`d8`, or `r8` for release)
 

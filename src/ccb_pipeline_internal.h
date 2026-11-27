@@ -227,6 +227,7 @@ char *ccb_stdlib_dex_input(ccb_pipe *p, const char *stdlib);
 ccb_status ccb_step_dex(ccb_pipe *p);
 ccb_status ccb_step_dexcheck(ccb_pipe *p);
 ccb_status ccb_step_native(ccb_pipe *p);
+ccb_status ccb_step_cmake(ccb_pipe *p, const char *abi);
 ccb_status ccb_step_package(ccb_pipe *p);
 ccb_status ccb_step_package_aab(ccb_pipe *p);
 ccb_status ccb_step_align(ccb_pipe *p);

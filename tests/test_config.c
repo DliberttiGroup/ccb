@@ -292,6 +292,137 @@ int main(void) {
     }
   }
 
+  // [cmake] + [paths] java_extra: valid forms load, invalid forms
+  // fail with the matching diagnostic.
+  {
+    const char *base_toml =
+      "ccb_version = 1\n"
+      "[project]\n"
+      "name = \"x\"\n"
+      "package = \"com.x\"\n"
+      "version = \"1.0\"\n"
+      "min_sdk = 26\n"
+      "target_sdk = 35\n"
+      "compile_sdk = 35\n"
+      "[paths]\n"
+      "manifest = \"src/main/AndroidManifest.xml\"\n";
+    CHECK(ccb_mkdir_p(B("cmk/src/main")) == CCB_OK);
+    CHECK(ccb_mkdir_p(B("cmk/vendor")) == CCB_OK);
+    CHECK(ccb_mkdir_p(B("cmk/cpp")) == CCB_OK);
+    CHECK(ccb_write_file(B("cmk/src/main/AndroidManifest.xml"), "<manifest/>", 11) == CCB_OK);
+    CHECK(ccb_write_file(B("cmk/cpp/CMakeLists.txt"), "cmake_minimum_required(VERSION 3.22)\n", 36) == CCB_OK);
+    // [cmake] without lists -> CCB-E1004.
+    {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t, base_toml);
+      ccb_str_append(&t, "[ndk]\nabis = [\"arm64-v8a\"]\n[cmake]\nargs = []\n");
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("cmk/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list diags;
+      ccb_diag_list_init(&diags);
+      ccb_config *c = NULL;
+      CHECK(ccb_config_load(B("cmk/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+      CHECK(c == NULL);
+      CHECK(has_code(&diags, "CCB-E1004"));
+      ccb_diag_list_free(&diags);
+    }
+    // [cmake] without [ndk] -> CCB-E1005.
+    {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t, base_toml);
+      ccb_str_append(&t, "[cmake]\nlists = \"cpp/CMakeLists.txt\"\n");
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("cmk/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list diags;
+      ccb_diag_list_init(&diags);
+      ccb_config *c = NULL;
+      CHECK(ccb_config_load(B("cmk/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+      CHECK(c == NULL);
+      CHECK(has_code(&diags, "CCB-E1005"));
+      ccb_diag_list_free(&diags);
+    }
+    // [cmake] + non-empty ndk.c_sources -> CCB-E1005.
+    {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t, base_toml);
+      ccb_str_append(&t, "[ndk]\nabis = [\"arm64-v8a\"]\nc_sources = [\"a.c\"]\n[cmake]\nlists = \"cpp/CMakeLists.txt\"\n");
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("cmk/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list diags;
+      ccb_diag_list_init(&diags);
+      ccb_config *c = NULL;
+      CHECK(ccb_config_load(B("cmk/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+      CHECK(c == NULL);
+      CHECK(has_code(&diags, "CCB-E1005"));
+      ccb_diag_list_free(&diags);
+    }
+    // [cmake] unknown key -> CCB-E1001.
+    {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t, base_toml);
+      ccb_str_append(&t, "[ndk]\nabis = [\"arm64-v8a\"]\n[cmake]\nlists = \"cpp/CMakeLists.txt\"\npreamble = \"x\"\n");
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("cmk/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list diags;
+      ccb_diag_list_init(&diags);
+      ccb_config *c = NULL;
+      CHECK(ccb_config_load(B("cmk/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+      CHECK(c == NULL);
+      CHECK(has_code(&diags, "CCB-E1001"));
+      ccb_diag_list_free(&diags);
+    }
+    // [paths] java_extra with a missing dir -> CCB-E1006.
+    {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t, base_toml);
+      ccb_str_append(&t, "java_extra = [\"nope\"]\n");
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("cmk/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list diags;
+      ccb_diag_list_init(&diags);
+      ccb_config *c = NULL;
+      CHECK(ccb_config_load(B("cmk/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+      CHECK(c == NULL);
+      CHECK(has_code(&diags, "CCB-E1006"));
+      ccb_diag_list_free(&diags);
+    }
+    // Valid [cmake] + [paths] java_extra loads with resolved paths.
+    {
+      ccb_str t;
+      ccb_str_init(&t);
+      ccb_str_append(&t, base_toml);
+      ccb_str_append(&t, "java_extra = [\"vendor\"]\n");
+      ccb_str_append(&t, "[ndk]\nabis = [\"arm64-v8a\"]\n[cmake]\nlists = \"cpp/CMakeLists.txt\"\nargs = [\"-DFOO=1\"]\n");
+      char *toml = ccb_str_steal(&t);
+      CHECK(ccb_write_file(B("cmk/ccb.toml"), toml, strlen(toml)) == CCB_OK);
+      free(toml);
+      ccb_diag_list diags;
+      ccb_diag_list_init(&diags);
+      ccb_config *c = NULL;
+      CHECK(ccb_config_load(B("cmk/ccb.toml"), NULL, &c, &diags) == CCB_OK);
+      CHECK(diags.count == 0);
+      CHECK(c != NULL);
+      CHECK(c->has_cmake == 1);
+      CHECK_STR_EQ(c->cmake_lists, B("cmk/cpp/CMakeLists.txt"));
+      CHECK(c->cmake_args_count == 1);
+      CHECK_STR_EQ(c->cmake_args[0], "-DFOO=1");
+      CHECK(c->java_extra_dirs_count == 1);
+      CHECK_STR_EQ(c->java_extra_dirs[0], B("cmk/vendor"));
+      ccb_config_free(c);
+      ccb_diag_list_free(&diags);
+    }
+  }
+
   ccb_remove_recursive(base);
   TEST_MAIN_END();
 }

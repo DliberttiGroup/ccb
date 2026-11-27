@@ -84,6 +84,10 @@ typedef struct {
   char *assets;
   char *kotlin_dir;
   char *java_dir;
+  // Extra Java source roots (e.g. SDLActivity from a vendored SDL2
+  // tree): [paths] java_extra = [...]. Collected alongside java_dir.
+  char **java_extra_dirs;
+  size_t java_extra_dirs_count;
   char *libs_dir;
   // [sdk]
   char *sdk_home;
@@ -172,6 +176,15 @@ typedef struct {
   size_t ndk_sources_count;
   char **ndk_cflags;
   size_t ndk_cflags_count;
+  // [cmake] external native build: drive an existing CMakeLists.txt
+  // instead of CCB's own clang-per-source step. The built .so files
+  // are copied into intermediates/jni/<abi>/ and packaged exactly
+  // like [ndk]-built libs. [ndk] abis must still be declared so
+  // packaging knows which ABIs to include.
+  int has_cmake;
+  char *cmake_lists;
+  char **cmake_args;
+  size_t cmake_args_count;
   // [preview] (parsed now, used by M5)
   int has_preview;
   char *preview_styles;

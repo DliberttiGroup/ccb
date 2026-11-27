@@ -484,6 +484,7 @@ void ccb_config_free(ccb_config *c) {
   free(c->assets);
   free(c->kotlin_dir);
   free(c->java_dir);
+  ccb_free_str_array(c->java_extra_dirs, c->java_extra_dirs_count);
   free(c->libs_dir);
   free(c->sdk_home);
   free(c->build_tools);
@@ -527,6 +528,8 @@ void ccb_config_free(ccb_config *c) {
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
   ccb_free_str_array(c->ndk_sources, c->ndk_sources_count);
   ccb_free_str_array(c->ndk_cflags, c->ndk_cflags_count);
+  free(c->cmake_lists);
+  ccb_free_str_array(c->cmake_args, c->cmake_args_count);
   for (size_t i = 0; i < c->modules_count; i++) {
     ccb_module *m = &c->modules[i];
     free(m->name);
@@ -800,23 +803,25 @@ static void ccb_load_required_str(ccb_validator *v, const ccb_toml_doc *doc,
 static void ccb_load_unknown_keys(ccb_validator *v) {
   static const char *root_keys[] = { "ccb_version" };
   static const char *project_keys[] = { "name", "package", "version", "version_code", "min_sdk", "target_sdk", "compile_sdk" };
-  static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "libs" };
+  static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "java_extra", "libs" };
   static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign", "adb" };
   static const char *debug_keys[] = { "store", "alias" };
   static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
   static const char *build_keys[] = { "variant", "minify", "shrink_resources", "jvm_target", "proguard_rules", "kotlinc_daemon", "kotlinc_daemon_idle_seconds", "kotlin_plugins", "kotlin_plugin_options" };
   static const char *deps_keys[] = { "jars", "aars", "maven", "maven_central", "maven_exclude", "maven_repos", "maven_profiles" };
   static const char *ndk_keys[] = { "abis", "c_sources", "cflags" };
+  static const char *cmake_keys[] = { "lists", "args" };
   static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
   ccb_check_unknown_keys(v, "", root_keys, 1);
   ccb_check_unknown_keys(v, "project", project_keys, 7);
-  ccb_check_unknown_keys(v, "paths", paths_keys, 6);
+  ccb_check_unknown_keys(v, "paths", paths_keys, 7);
   ccb_check_unknown_keys(v, "sdk", sdk_keys, 7);
   ccb_check_unknown_keys(v, "signing.debug", debug_keys, 2);
   ccb_check_unknown_keys(v, "signing.release", release_keys, 4);
   ccb_check_unknown_keys(v, "build", build_keys, 9);
   ccb_check_unknown_keys(v, "deps", deps_keys, 7);
   ccb_check_unknown_keys(v, "ndk", ndk_keys, 3);
+  ccb_check_unknown_keys(v, "cmake", cmake_keys, 2);
   ccb_check_unknown_keys(v, "preview", preview_keys, 9);
   ccb_check_unknown_keys(v, "library", NULL, 0);
 }
@@ -907,6 +912,14 @@ static void ccb_load_paths(ccb_validator *v, const ccb_toml_doc *doc,
   ccb_load_resolved_str(v, c->project_root, "paths", "assets", &c->assets);
   ccb_load_resolved_str(v, c->project_root, "paths", "kotlin", &c->kotlin_dir);
   ccb_load_resolved_str(v, c->project_root, "paths", "java", &c->java_dir);
+  if (ccb_get_str_array(v, "paths", "java_extra", &c->java_extra_dirs,
+      &c->java_extra_dirs_count)) {
+    for (size_t i = 0; i < c->java_extra_dirs_count; i++) {
+      char *resolved = ccb_resolve(c->project_root, c->java_extra_dirs[i]);
+      free(c->java_extra_dirs[i]);
+      c->java_extra_dirs[i] = resolved;
+    }
+  }
   ccb_load_resolved_str(v, c->project_root, "paths", "libs", &c->libs_dir);
 }
 
@@ -1154,6 +1167,29 @@ static void ccb_load_ndk(ccb_validator *v, const ccb_toml_doc *doc,
     char *resolved = ccb_resolve(c->project_root, c->ndk_sources[i]);
     free(c->ndk_sources[i]);
     c->ndk_sources[i] = resolved;
+  }
+}
+
+// [cmake]
+static void ccb_load_cmake(ccb_validator *v, const ccb_toml_doc *doc,
+    ccb_config *c) {
+  if (ccb_toml_find_table(doc, "cmake") == NULL) {
+    return;
+  }
+  c->has_cmake = 1;
+  char *l = NULL;
+  if (ccb_get_str(v, "cmake", "lists", &l)) {
+    c->cmake_lists = ccb_resolve(c->project_root, l);
+    free(l);
+  } else if (!ccb_key_present(doc, "cmake", "lists")) {
+    ccb_vdiag(v, "CCB-E1004", "missing required key 'cmake.lists'");
+  }
+  ccb_get_str_array(v, "cmake", "args", &c->cmake_args, &c->cmake_args_count);
+  if (!c->has_ndk) {
+    ccb_vdiag(v, "CCB-E1005", "[cmake] requires [ndk] abis");
+  } else if (c->ndk_sources_count > 0) {
+    ccb_vdiag(v, "CCB-E1005",
+      "[cmake] replaces the [ndk] clang step: remove ndk.c_sources");
   }
 }
 
@@ -1978,6 +2014,12 @@ static void ccb_check_paths(ccb_validator *v, ccb_config *c) {
   if (c->java_dir != NULL) {
     ccb_require_dir(v, c->java_dir, "java directory");
   }
+  for (size_t i = 0; i < c->java_extra_dirs_count; i++) {
+    ccb_require_dir(v, c->java_extra_dirs[i], "java_extra directory");
+  }
+  if (c->cmake_lists != NULL) {
+    ccb_require_file(v, c->cmake_lists, "cmake lists file");
+  }
   if (c->libs_dir != NULL) {
     ccb_require_dir(v, c->libs_dir, "libs directory");
   }
@@ -2076,6 +2118,7 @@ ccb_status ccb_config_load(const char *path, const char *variant_override, ccb_c
   ccb_load_build(&v, c, variant_override);
   ccb_load_deps(&v, c);
   ccb_load_ndk(&v, doc, c);
+  ccb_load_cmake(&v, doc, c);
   ccb_load_preview(&v, doc, c);
   ccb_load_scenarios(&v, doc, c);
   ccb_load_modules(&v, doc, c);

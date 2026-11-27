@@ -219,8 +219,12 @@ int ccb_cmd_doctor(ccb_args *a) {
       ccb_json_escape(&s, sdk->zipalign);
       ccb_str_append(&s, ",\"zipalign_source\":");
       ccb_json_escape(&s, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
-      ccb_str_append(&s, ",\"kotlin\":");
-      ccb_json_escape(&s, sdk->kotlin_version);
+      if (sdk->kotlin_version[0] == '\0') {
+        ccb_str_append(&s, ",\"kotlin\":null");
+      } else {
+        ccb_str_append(&s, ",\"kotlin\":");
+        ccb_json_escape(&s, sdk->kotlin_version);
+      }
       ccb_str_appendf(&s, ",\"java\":%d", sdk->java_major);
       if (cfg->has_ndk) {
         ccb_str_append(&s, ",\"ndk\":");
@@ -239,7 +243,9 @@ int ccb_cmd_doctor(ccb_args *a) {
       printf("aapt2: %s (%s)\n", sdk->aapt2, sdk->aapt2_source == NULL ? "default" : sdk->aapt2_source);
       printf("zipalign: %s (%s)\n", sdk->zipalign, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
       printf("platform: android-%ld\n", cfg->compile_sdk);
-      printf("kotlinc: %s (%s)\n", sdk->kotlin_version, sdk->kotlinc);
+      printf("kotlinc: %s (%s)\n",
+        sdk->kotlin_version[0] == '\0' ? "none" : sdk->kotlin_version,
+        sdk->kotlinc == NULL ? "none" : sdk->kotlinc);
       printf("java: %d (%s)\n", sdk->java_major, sdk->java);
       if (cfg->has_ndk) {
         printf("ndk: %s\n", sdk->ndk_home);

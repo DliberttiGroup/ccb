@@ -305,8 +305,12 @@ int ccb_cmd_check(ccb_args *a) {
     ccb_json_escape(&s, sdk->zipalign);
     ccb_str_append(&s, ",\"zipalign_source\":");
     ccb_json_escape(&s, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source);
-    ccb_str_append(&s, ",\"kotlin\":");
-    ccb_json_escape(&s, sdk->kotlin_version);
+    if (sdk->kotlin_version[0] == '\0') {
+      ccb_str_append(&s, ",\"kotlin\":null");
+    } else {
+      ccb_str_append(&s, ",\"kotlin\":");
+      ccb_json_escape(&s, sdk->kotlin_version);
+    }
     ccb_str_appendf(&s, ",\"java\":%d", sdk->java_major);
     if (cfg->is_library) {
       char *aar_path = ccb_check_library_aar_path(cfg);
@@ -387,7 +391,8 @@ int ccb_cmd_check(ccb_args *a) {
       sdk->sdk_home, sdk->build_tools_version,
       sdk->aapt2, sdk->aapt2_source == NULL ? "default" : sdk->aapt2_source,
       sdk->zipalign, sdk->zipalign_source == NULL ? "default" : sdk->zipalign_source,
-      sdk->kotlin_version, sdk->java_major);
+      sdk->kotlin_version[0] == '\0' ? "none" : sdk->kotlin_version,
+      sdk->java_major);
     if (cfg->has_ndk) {
       printf("  ndk: %s\n", sdk->ndk_home);
     }

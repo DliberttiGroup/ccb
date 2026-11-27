@@ -345,34 +345,38 @@ static ccb_status ccb_mod_run_kotlinc(ccb_mod_ctx *c, char *cp_str,
     rc = CCB_ERR_BUILD;
     goto done;
   }
-  memset(&av, 0, sizeof(av));
-  av.ar = ar;
-  ccb_argv_push(&av, p->sdk->kotlinc);
-  ccb_argv_push(&av, "-jvm-target");
-  ccb_argv_push(&av, p->cfg->jvm_target);
-  ccb_argv_push(&av, "-d");
-  ccb_argv_push(&av, c->classes_dir);
-  ccb_argv_push(&av, "-cp");
-  ccb_argv_push(&av, cp_str);
-  ccb_push_plugin_args(p, &av);
-  for (size_t i = 0; i < s->nkt; i++) {
-    ccb_argv_push(&av, s->kt[i]);
-  }
-  for (size_t i = 0; i < s->nrjava; i++) {
-    ccb_argv_push(&av, s->rjava[i]);
-  }
-  for (size_t i = 0; i < s->nup; i++) {
-    ccb_argv_push(&av, s->up[i]);
-  }
-  for (size_t i = 0; i < s->njava; i++) {
-    ccb_argv_push(&av, s->java[i]);
-  }
   env = ccb_jvm_env(p, ar);
-  rc = ccb_run_kotlinc(p, av.v, env,
-    "check the module Kotlin/Java sources for errors");
-  free(av.v);
-  if (rc != CCB_OK) {
-    goto done;
+  // kotlinc: skipped for Java-only modules (same rule as the app
+  // compile step): javac below compiles the Java sources alone.
+  if (s->nkt > 0 && p->sdk->kotlinc != NULL) {
+    memset(&av, 0, sizeof(av));
+    av.ar = ar;
+    ccb_argv_push(&av, p->sdk->kotlinc);
+    ccb_argv_push(&av, "-jvm-target");
+    ccb_argv_push(&av, p->cfg->jvm_target);
+    ccb_argv_push(&av, "-d");
+    ccb_argv_push(&av, c->classes_dir);
+    ccb_argv_push(&av, "-cp");
+    ccb_argv_push(&av, cp_str);
+    ccb_push_plugin_args(p, &av);
+    for (size_t i = 0; i < s->nkt; i++) {
+      ccb_argv_push(&av, s->kt[i]);
+    }
+    for (size_t i = 0; i < s->nrjava; i++) {
+      ccb_argv_push(&av, s->rjava[i]);
+    }
+    for (size_t i = 0; i < s->nup; i++) {
+      ccb_argv_push(&av, s->up[i]);
+    }
+    for (size_t i = 0; i < s->njava; i++) {
+      ccb_argv_push(&av, s->java[i]);
+    }
+    rc = ccb_run_kotlinc(p, av.v, env,
+      "check the module Kotlin/Java sources for errors");
+    free(av.v);
+    if (rc != CCB_OK) {
+      goto done;
+    }
   }
   if (s->njava > 0) {
     ccb_str_init(&jcp);
@@ -383,6 +387,8 @@ static ccb_status ccb_mod_run_kotlinc(ccb_mod_ctx *c, char *cp_str,
     memset(&jav, 0, sizeof(jav));
     jav.ar = ar;
     ccb_argv_push(&jav, p->sdk->javac);
+    ccb_argv_push(&jav, "-encoding");
+    ccb_argv_push(&jav, "UTF-8");
     ccb_argv_push(&jav, "-source");
     ccb_argv_push(&jav, p->cfg->jvm_target);
     ccb_argv_push(&jav, "-target");

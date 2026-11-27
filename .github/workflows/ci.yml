@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   plain:
-    name: plain (52 tests)
+    name: plain (53 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -61,7 +61,7 @@ jobs:
       - name: Install SDK components
         run: |
           yes | sdkmanager --licenses
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" "ndk;27.0.12077973"
 
       - name: Install kotlinc 2.4.21
         run: |
@@ -79,7 +79,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   sanitizer:
-    name: sanitizer (52 tests)
+    name: sanitizer (53 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -107,7 +107,7 @@ jobs:
       - name: Install SDK components
         run: |
           yes | sdkmanager --licenses
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" "ndk;27.0.12077973"
 
       - name: Install kotlinc 2.4.21
         run: |

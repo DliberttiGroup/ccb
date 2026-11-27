@@ -113,6 +113,22 @@ ccb_status ccb_step_code(ccb_pipe *p) {
   if (p->cfg->java_dir != NULL) {
     ccb_collect_files(p->cfg->java_dir, ".java", &java_files, &njava);
   }
+  // Vendored Java roots outside the project tree ([paths] java_extra):
+  // compiled alongside java_dir, by kotlinc (mixed sources) and javac.
+  for (size_t d = 0; d < p->cfg->java_extra_dirs_count; d++) {
+    char **found = NULL;
+    size_t nfound = 0;
+    if (ccb_collect_files(p->cfg->java_extra_dirs[d], ".java", &found,
+        &nfound) != CCB_OK) {
+      continue;
+    }
+    java_files = ccb_xrealloc(java_files,
+      (njava + nfound) * sizeof(*java_files));
+    for (size_t i = 0; i < nfound; i++) {
+      java_files[njava++] = found[i];
+    }
+    free(found);
+  }
   if (ccb_path_is_dir(p->gen_dir)) {
     ccb_collect_files(p->gen_dir, ".java", &rjava_files, &nrjava);
   }
@@ -226,8 +242,11 @@ ccb_status ccb_step_code(ccb_pipe *p) {
       }
     }
     // kotlinc: Kotlin + R.java + Java sources (kotlinc resolves Java
-    // symbols from sources passed on the command line).
-    {
+    // symbols from sources passed on the command line). Skipped for
+    // Java-only projects: the SDK resolve leaves kotlinc NULL there
+    // instead of failing, and kotlinc must never run with no .kt
+    // sources (javac compiles the Java sources alone).
+    if (nkt > 0 && p->sdk->kotlinc != NULL) {
       ccb_argv av;
       memset(&av, 0, sizeof(av));
       av.ar = ar;
@@ -274,6 +293,11 @@ ccb_status ccb_step_code(ccb_pipe *p) {
       memset(&av, 0, sizeof(av));
       av.ar = ar;
       ccb_argv_push(&av, p->sdk->javac);
+      // UTF-8 source encoding regardless of the host locale: Java
+      // files are written in UTF-8 (a non-ASCII comment must not
+      // fail the build on a non-UTF-8 machine).
+      ccb_argv_push(&av, "-encoding");
+      ccb_argv_push(&av, "UTF-8");
       ccb_argv_push(&av, "-source");
       ccb_argv_push(&av, p->cfg->jvm_target);
       ccb_argv_push(&av, "-target");

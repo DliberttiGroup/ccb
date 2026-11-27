@@ -733,8 +733,27 @@ static void resolve_kotlin_version(const ccb_config *cfg, ccb_sdk *s, ccb_diag_l
 }
 
 // kotlinc: [sdk] kotlin_home / KOTLIN_HOME, then PATH, then the
-// setup-installed compiler under <sdk-home>/kotlinc.
+// setup-installed compiler under <sdk-home>/kotlinc. Only required
+// when the project (or a library module) actually has Kotlin
+// sources: Java-only projects must build without kotlinc installed.
+// Without Kotlin, kotlin_version is "" (never NULL: the compile
+// fingerprint and `ccb check` both read it unconditionally).
 static void resolve_kotlin(const ccb_config *cfg, ccb_sdk *s, ccb_diag_list *diags) {
+  int has_kotlin = cfg->kotlin_dir != NULL;
+  for (size_t i = 0; i < cfg->modules_count && !has_kotlin; i++) {
+    if (cfg->modules[i].kotlin_dir != NULL) {
+      has_kotlin = 1;
+    }
+  }
+  for (size_t i = 0; i < cfg->libraries_count && !has_kotlin; i++) {
+    if (cfg->libraries[i].kotlin_dir != NULL) {
+      has_kotlin = 1;
+    }
+  }
+  if (!has_kotlin) {
+    s->kotlin_version = ccb_xstrdup("");
+    return;
+  }
   const char *kh = cfg->kotlin_home;
   if (kh == NULL) {
     kh = getenv("KOTLIN_HOME");

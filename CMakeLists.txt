@@ -82,6 +82,12 @@ foreach(test_src ${CCB_TEST_SOURCES})
     # built .aar file, Maven coordinates) plus kotlinc/d8 subprocesses.
     add_test(NAME ${test_name} COMMAND ${test_name} $<TARGET_FILE:ccb>)
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 900)
+  elseif(test_name STREQUAL "test_native")
+    # Runs five real `ccb build`s (native, native rebuild after a
+    # header change, cmake, java-only, java-only control) plus
+    # kotlinc/d8 subprocesses.
+    add_test(NAME ${test_name} COMMAND ${test_name} $<TARGET_FILE:ccb>)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 900)
   else()
     add_test(NAME ${test_name} COMMAND ${test_name})
   endif()
@@ -110,7 +116,7 @@ add_test(NAME fuzz_preview_flow
 # `ctest -L <area>` runs one area; plain `ctest` runs the full suite.
 # fast counts: config 2, setup 2, pipeline 6, preview 29, misc 5 (= 44).
 # slow counts: pipeline 3, dexcheck 1, daemon 1, maven 1, modules 1,
-# library 1 (= 8).
+# library 1, native 1 (= 9).
 set_tests_properties(test_config test_toml
   PROPERTIES LABELS "fast;config")
 set_tests_properties(test_sdk_tools test_setup
@@ -137,3 +143,4 @@ set_tests_properties(test_kotlinc_daemon PROPERTIES LABELS "slow;daemon")
 set_tests_properties(test_maven PROPERTIES LABELS "slow;maven")
 set_tests_properties(test_modules PROPERTIES LABELS "slow;modules")
 set_tests_properties(test_library PROPERTIES LABELS "slow;library")
+set_tests_properties(test_native PROPERTIES LABELS "slow;native")
