@@ -1,0 +1,45 @@
+CCB build benchmark baseline
+date: 2026-11-27T17:59:05Z
+machine: shared VM, 4 CPUs, 7935 MiB RAM
+ccb: ccb 0.1.0 (/home/hatch/workspace/ccb/build/ccb)
+java: openjdk version "17.0.20.1" 2026-08-18
+kotlinc: info: kotlinc-jvm 2.4.21 (JRE 17.0.20.1+1)
+dex-stdlib cache dir: /home/hatch/.cache/ccb/dex-stdlib
+
+project: hello (/home/hatch/workspace/ccb/examples/hello)
+  cold run 1: 98564 ms
+  cold run 2: 109895 ms
+  cold run 3: 177204 ms
+  cold median: 109895 ms (run=1 skip=13)
+  warm run 1: 135701 ms
+  warm run 2: 113012 ms
+  warm run 3: 102969 ms
+  warm median: 113012 ms (run=1 skip=13)
+  noop run 1: 4962 ms
+  noop run 2: 5518 ms
+  noop run 3: 7268 ms
+  noop median: 5518 ms (run=1 skip=13)
+  incremental run 1: 78191 ms
+  incremental run 2: 81505 ms
+  incremental run 3: 79293 ms
+  incremental median: 79293 ms (run=7 skip=7)
+
+project: showcase (/home/hatch/workspace/ccb-showcase)
+  cold run 1: 242179 ms
+  cold run 2: 268326 ms
+  cold run 3: 150174 ms
+  cold median: 242179 ms (run=1 skip=13)
+  warm run 1: 69415 ms
+  warm run 2: 58726 ms
+  warm run 3: 56496 ms
+  warm median: 58726 ms (run=1 skip=13)
+  noop run 1: 2888 ms
+  noop run 2: 2875 ms
+  noop run 3: 2836 ms
+  noop median: 2875 ms (run=1 skip=13)
+  incremental run 1: 34427 ms
+  incremental run 2: 36674 ms
+  incremental run 3: 44947 ms
+  incremental median: 36674 ms (run=7 skip=7)
+
+done.

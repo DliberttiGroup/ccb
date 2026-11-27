@@ -12,6 +12,7 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [setup.md](setup.md) | Toolchain: JDK, SDK, kotlinc, NDK, r8, host tools |
 | [setup-tools.md](setup-tools.md) | Installing tools: JDK, kotlinc, NDK, r8, host tools, custom paths |
 | [build.md](build.md) | Pipeline stages, dex, AAB, caching, reproducible builds, limits |
+| [architecture-audit.md](architecture-audit.md) | Phase 0 audit: layer map, coupling, correctness risks, migration plan per phase, scope freeze, benchmark baseline |
 | [build-daemon.md](build-daemon.md) | Opt-in kotlinc daemon |
 | [build-release.md](build-release.md) | Static + stripped release binary |
 | [build-tests.md](build-tests.md) | Running the test suite |
@@ -47,6 +48,8 @@ Pipeline → [build.md](build.md). Daemon → [build-daemon.md](build-daemon.md)
 Release binary → [build-release.md](build-release.md). Test counts →
 [build-tests.md](build-tests.md). Terminal UI library → [tui.md](tui.md). Error-code meanings and exit codes →
 [diagnostics.md](diagnostics.md). Measured numbers → [build.md](build.md).
+Architecture audit, scope freeze, migration plan, benchmark baseline →
+[architecture-audit.md](architecture-audit.md).
 Maven resolution → [maven-resolve.md](maven-resolve.md). Maven cache and
 lockfile → [maven-cache.md](maven-cache.md). Maven troubleshooting →
 [maven-troubleshooting.md](maven-troubleshooting.md).
@@ -91,6 +94,15 @@ Every section carries a `*ccb-<slug>*` tag. Find a section by tag here.
 | `*ccb-preview-lsp*` | preview-lsp.md | LSP server |
 | `*ccb-preview-tree-live*` | preview-lsp.md | Tree-live mode |
 | `*ccb-build*` | build.md | Build pipeline |
+| `*ccb-architecture-audit*` | architecture-audit.md | Architecture audit and migration plan |
+| `*ccb-architecture-map*` | architecture-audit.md | Layer map: what exists today |
+| `*ccb-architecture-coupling*` | architecture-audit.md | Coupling findings |
+| `*ccb-architecture-duplicates*` | architecture-audit.md | Duplicate responsibilities |
+| `*ccb-architecture-risks*` | architecture-audit.md | Correctness risks |
+| `*ccb-architecture-phases*` | architecture-audit.md | FINAL DIRECTIVE answers, per phase |
+| `*ccb-architecture-scope*` | architecture-audit.md | Scope freeze list |
+| `*ccb-architecture-benchmarks*` | architecture-audit.md | Benchmark baseline |
+| `*ccb-architecture-next*` | architecture-audit.md | What Phase 1 should start with |
 | `*ccb-build-stages*` | build.md | Stages |
 | `*ccb-build-dex*` | build.md | Dex |
 | `*ccb-build-aab*` | build.md | AAB output |
