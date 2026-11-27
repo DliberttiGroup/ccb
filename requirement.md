@@ -31,7 +31,8 @@ CCB **is**:
 
 - A build system for Android apps: Kotlin first, Java second, C/C++
   native libs via the NDK.
-- A fixed, ordered pipeline (stages 0–14, §5) with per-stage caching.
+- A task-graph build engine (stages 0–14, §5) with per-stage caching:
+  one task per stage, run in topological order (§5, docs/graph.md).
 - A Maven resolver for remote AAR/JAR dependencies (§5.4).
 - A library builder: in-tree library modules and standalone library
   projects (§4.3, §5.12).
@@ -322,7 +323,7 @@ tests only), `CCB_GOLDEN_DIR` (preview golden output dir), `CCB_R8_SHA256`
 
 ## 5. Build pipeline
 
-CCB executes a fixed, ordered pipeline. Each stage is independently
+CCB executes its stages as tasks in a DAG (one task per stage, chained in the order below, run in topological order by the graph engine; see docs/graph.md). The order is the fixed order below. Each stage is independently
 skippable by the cache (§7) and independently reportable in JSON output
 (§6). Stages, in order:
 
@@ -854,7 +855,7 @@ not met and stays open work.
     badging` and `apksigner verify`.
   - A `ccb check`-style self-test in CI: `ccb doctor` against a
     container with a known SDK.
-  - Test suite: 52 tests total (44 fast + 8 slow). Every test has two
+  - Test suite: 55 tests total (46 fast + 9 slow). Every test has two
     labels: speed (`fast` / `slow`) and area. Fast means no real Android
     build, seconds each. Slow means a real `ccb build` or a timeout
     wait. Run suites sequentially, never concurrently
@@ -888,7 +889,9 @@ every pointer it returns: who owns it, who frees it, and when.
 | `ccb_diag` | The error type: phase, file/line/col, command, suggestion. |
 | `ccb_json` | JSONL event writer for `--json` output. |
 | `ccb_cache` | Cache manifest and invalidation rules. |
-| `ccb_pipeline` | Stage orchestration. Each stage is a function with explicit inputs and outputs. |
+| `ccb_pipeline` | Stage orchestration via the task graph: stage 0 bootstraps, then the graph executes one task per stage. |
+| `ccb_graph` | Task graph engine: task abstraction, validation, cycle detection, build plan, sequential executor. |
+| `ccb_pipeline_graph` | Pipeline graph builder: one task per stage, declared inputs/outputs, linear dependency chain. |
 | `ccb_manifest` | Android manifest subset parser + AAR manifest merger (§5.2). |
 | `ccb_preview` | CSS parser, box layout, Kotlin structure parser, terminal renderer, logic tree (see §10). |
 | `ccb_cli` | Argument parsing and command dispatch. |

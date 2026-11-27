@@ -36,6 +36,10 @@ severity in the tables below and by the exit code, not by the prefix.
 | CCB-E1009 | Config file not found |
 | CCB-E1010 | Module dependency cycle (names the cycle path, e.g. `a -> b -> a`) |
 | CCB-E1011 | Module depends on an unknown module (names the module and the dependency) |
+| CCB-E1012 | Duplicate task ID in the build graph (names the ID) |
+| CCB-E1013 | Invalid task-graph reference: unknown dependency, GENERATED input produced by no task, or two tasks claiming the same output (names the task and the reference) |
+| CCB-E1014 | Task dependency cycle (names the cycle path, e.g. `a -> c -> b -> a`) |
+| CCB-E1015 | Task has a missing SOURCE input file (names the task and the input) |
 
 ## Toolchain (exit 3)
 

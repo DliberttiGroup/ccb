@@ -16,6 +16,8 @@
 #include "ccb_dexcheck.h"
 #include "ccb_daemon.h"
 #include "ccb_pipeline.h"
+#include "ccb_graph.h"
+#include "ccb_pipeline_graph.h"
 #include <sys/stat.h>
 #include <unistd.h>
 #include "ccb_pipeline_internal.h"
@@ -575,8 +577,15 @@ static void ccb_pipe_free(ccb_pipe *p) {
 void ccb_build_result_free(ccb_build_result *r) {
   free(r->apk_path);
   r->apk_path = NULL;
+  free(r->task_summary);
+  r->task_summary = NULL;
 }
 
+// The driver: stage 0 loads the project (bootstrap), then the task
+// graph (one task per stage, docs/build.md stages 0–14, in the same
+// order the old hardcoded driver ran them) executes the rest.
+// Stage bodies are untouched; the graph only decides the order and
+// carries the per-task state, diagnostics, and timings.
 ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *result, ccb_diag_list *diags) {
   memset(result, 0, sizeof(*result));
   ccb_pipe p;
@@ -585,83 +594,59 @@ ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *resu
   p.diags = diags;
   ccb_log_init(&p.log, opts->json, opts->verbose);
   p.log.explain = opts->explain;
+  long t0 = ccb_graph_now_ms();
   ccb_status rc = ccb_stage0(&p);
   if (rc != CCB_OK) {
     ccb_pipe_free(&p);
     return rc;
   }
-  int deps_ran = 0;
-  rc = ccb_step_deps(&p, &deps_ran);
-  if (rc == CCB_OK && p.cfg->is_library) {
-    // A library project stops after deps: its single module builds
-    // the AAR, and there is no merge/link/dex/package.
-    rc = ccb_step_library(&p);
-    if (rc == CCB_OK) {
-      ccb_save_cache(&p);
-      result->steps_run = p.steps_run;
-      result->steps_skipped = p.steps_skipped;
-      result->up_to_date = (p.steps_run == 0 && !opts->dry_run && !opts->explain) ? 1 : 0;
-      result->is_library = 1;
-      result->apk_path = ccb_library_aar_path(p.cfg);
+  ccb_graph *g = ccb_pipeline_graph_build(p.cfg, opts->aab, diags);
+  if (g == NULL) {
+    ccb_pipe_free(&p);
+    return CCB_ERR_CONFIG;
+  }
+  ccb_pipeline_graph_config_done(g, ccb_graph_now_ms() - t0);
+  if (opts->explain) {
+    if (opts->json) {
+      ccb_graph_emit_plan_json(g, stdout);
     } else {
-      ccb_save_cache(&p);
+      ccb_graph_emit_plan_human(g, stdout);
     }
+  }
+  rc = ccb_graph_execute(g, &p, &p.log, diags);
+  {
+    ccb_str sum;
+    ccb_str_init(&sum);
+    ccb_graph_summary_json(g, &sum);
+    result->task_summary = ccb_str_steal(&sum);
+  }
+  if (rc != CCB_OK) {
+    // Save progress: completed steps stay cached so a retry resumes.
+    ccb_save_cache(&p);
+    ccb_graph_free(g);
     ccb_pipe_free(&p);
     return rc;
   }
-  if (rc == CCB_OK) {
-    rc = ccb_step_libraries(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_modules(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_merge_manifest(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_compile_res(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_link(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_code(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_dex(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_dexcheck(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_native(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = p.opts->aab ? ccb_step_package_aab(&p) : ccb_step_package(&p);
-  }
-  // Bundles are not zipaligned: alignment is an APK-install concern,
-  // and Play rejects aligned bundles. Sign consumes the unaligned
-  // bundle directly.
-  if (rc == CCB_OK && !p.opts->aab) {
-    rc = ccb_step_align(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_sign(&p);
-  }
-  if (rc == CCB_OK) {
-    rc = ccb_step_verify(&p);
-  }
-  if (rc == CCB_OK) {
+  if (p.cfg->is_library) {
+    // A library project stops after deps: its single module builds
+    // the AAR, and there is no merge/link/dex/package.
     ccb_save_cache(&p);
     result->steps_run = p.steps_run;
     result->steps_skipped = p.steps_skipped;
     result->up_to_date = (p.steps_run == 0 && !opts->dry_run && !opts->explain) ? 1 : 0;
-    result->aab = p.opts->aab;
-    result->apk_path = ccb_path_join(p.out_dir, p.opts->aab ? "app.aab" : "app.apk");
-  } else {
-    // Save progress: completed steps stay cached so a retry resumes.
-    ccb_save_cache(&p);
+    result->is_library = 1;
+    result->apk_path = ccb_library_aar_path(p.cfg);
+    ccb_graph_free(g);
+    ccb_pipe_free(&p);
+    return CCB_OK;
   }
+  ccb_save_cache(&p);
+  result->steps_run = p.steps_run;
+  result->steps_skipped = p.steps_skipped;
+  result->up_to_date = (p.steps_run == 0 && !opts->dry_run && !opts->explain) ? 1 : 0;
+  result->aab = p.opts->aab;
+  result->apk_path = ccb_path_join(p.out_dir, p.opts->aab ? "app.aab" : "app.apk");
+  ccb_graph_free(g);
   ccb_pipe_free(&p);
-  return rc;
+  return CCB_OK;
 }

@@ -13,6 +13,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
+      - 'benchmarks/**'
       - 'llms.txt'
       - 'LICENSE'
       - '.github/workflows/release.yml'
@@ -20,6 +21,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
+      - 'benchmarks/**'
       - 'llms.txt'
       - 'LICENSE'
       - '.github/workflows/release.yml'
@@ -29,7 +31,7 @@ permissions:
 
 jobs:
   plain:
-    name: plain (54 tests)
+    name: plain (55 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -79,7 +81,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   sanitizer:
-    name: sanitizer (54 tests)
+    name: sanitizer (55 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:

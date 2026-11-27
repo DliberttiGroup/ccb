@@ -32,6 +32,10 @@ typedef struct {
   int aab;
   int is_library; // the build produced an .aar, not an APK/AAB
   char *apk_path; // APK/AAB path, or the .aar path for a library build
+  // Machine-readable build summary (JSON array, one object per task:
+  // {id, state, duration_ms, skipped}), in plan order. Owned; NULL
+  // when the build never reached the graph (stage 0 failed).
+  char *task_summary;
 } ccb_build_result;
 
 // d8 heap sizing (see ccb_d8_heap_mb in ccb_pipeline.c).

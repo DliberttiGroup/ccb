@@ -543,7 +543,14 @@ int ccb_cmd_build(ccb_args *a) {
   ccb_build_result result;
   ccb_status rc = ccb_pipeline_build(&opts, &result, &diags);
   if (rc != CCB_OK) {
+    // In JSON mode the machine-readable build summary goes out even
+    // on failure: it names the failed task and the cancelled ones.
+    if (a->json && result.task_summary != NULL) {
+      printf("{\"event\":\"build_summary\",\"tasks\":%s}\n",
+        result.task_summary);
+    }
     ccb_print_diags(a, &diags);
+    ccb_build_result_free(&result);
     ccb_diag_list_free(&diags);
     return ccb_exit_code(rc);
   }
@@ -555,8 +562,15 @@ int ccb_cmd_build(ccb_args *a) {
       ccb_str_append(&s, result.is_library ? "aar" : result.aab ? "aab" : "apk");
       ccb_str_append(&s, "\":");
       ccb_json_escape(&s, result.apk_path);
-      ccb_str_appendf(&s, ",\"steps_run\":%d,\"steps_skipped\":%d,\"up_to_date\":%s}",
+      ccb_str_appendf(&s, ",\"steps_run\":%d,\"steps_skipped\":%d,\"up_to_date\":%s",
         result.steps_run, result.steps_skipped, result.up_to_date ? "true" : "false");
+      // Machine-readable build summary (Phase 1): per-task state,
+      // duration, and skip flag, in plan order.
+      if (result.task_summary != NULL) {
+        ccb_str_append(&s, ",\"tasks\":");
+        ccb_str_append(&s, result.task_summary);
+      }
+      ccb_str_append(&s, "}");
       printf("%s\n", s.buf);
       ccb_str_free(&s);
     } else if (result.up_to_date) {
@@ -568,4 +582,38 @@ int ccb_cmd_build(ccb_args *a) {
   ccb_build_result_free(&result);
   ccb_diag_list_free(&diags);
   return 0;
+}
+
+// `ccb graph`: print the build plan — the task graph in execution
+// order with each task's dependencies, inputs, and outputs — without
+// building anything. Human table by default, one build_plan JSON
+// object with --json. --aab shows the AAB plan (package-aab, no
+// align). The config is loaded read-only; no SDK resolution happens,
+// so this works without a toolchain installed.
+int ccb_cmd_graph(ccb_args *a) {
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  ccb_config *cfg = ccb_load_config_or_die(a, &diags);
+  if (cfg == NULL) {
+    ccb_print_diags(a, &diags);
+    ccb_diag_list_free(&diags);
+    return 2;
+  }
+  ccb_graph *g = ccb_pipeline_graph_build(cfg, a->aab, &diags);
+  if (g == NULL) {
+    ccb_print_diags(a, &diags);
+    ccb_config_free(cfg);
+    ccb_diag_list_free(&diags);
+    return 2;
+  }
+  ccb_status rc;
+  if (a->json) {
+    rc = ccb_graph_emit_plan_json(g, stdout);
+  } else {
+    rc = ccb_graph_emit_plan_human(g, stdout);
+  }
+  ccb_graph_free(g);
+  ccb_config_free(cfg);
+  ccb_diag_list_free(&diags);
+  return rc == CCB_OK ? 0 : 2;
 }

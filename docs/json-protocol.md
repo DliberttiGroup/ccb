@@ -15,8 +15,22 @@ the final result is one JSON object.
 ```json
 {"event":"phase","phase":"kotlinc","status":"started"}
 {"event":"cache","stage":"compile-code","hit":true,"reason":"source inputs unchanged"}
-{"event":"build_done","apk":"build/outputs/debug/app.apk","steps_run":2,"steps_skipped":8,"up_to_date":false}
+{"event":"task","task":"compile-code","status":"started"}
+{"event":"task","task":"compile-code","status":"finished","duration_ms":5211,"result":"done"}
+{"event":"build_done","apk":"build/outputs/debug/app.apk","steps_run":2,"steps_skipped":8,"up_to_date":false,"tasks":[{"id":"config","state":"done","duration_ms":41,"skipped":false}]}
 ```
+
+Task events (Phase 1) carry the task ID and per-task timing;
+`result` is `done`, `skipped`, or `failed`. `build_done` gains a
+`tasks` array with one `{id, state, duration_ms, skipped}` object
+per task in plan order (see [graph engine](graph.md)). On a failed
+build the same array goes out as a standalone
+`{"event":"build_summary","tasks":[...]}` object, before the
+diagnostics, so the failed and cancelled tasks are machine-readable
+too. In explain
+mode the plan is one `build_plan` object listing every task with its
+dependencies, inputs, and outputs. Diagnostics from a failed task
+carry its ID as `"task"`.
 
 Verbose mode streams tool output as events:
 

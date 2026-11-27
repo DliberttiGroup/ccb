@@ -12,6 +12,7 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [setup.md](setup.md) | Toolchain: JDK, SDK, kotlinc, NDK, r8, host tools |
 | [setup-tools.md](setup-tools.md) | Installing tools: JDK, kotlinc, NDK, r8, host tools, custom paths |
 | [build.md](build.md) | Pipeline stages, dex, AAB, caching, reproducible builds, limits |
+| [graph.md](graph.md) | Task graph engine: task model, validation, plan, build summary |
 | [architecture-audit.md](architecture-audit.md) | Phase 0 audit: layer map, coupling, correctness risks, migration plan per phase, scope freeze, benchmark baseline |
 | [build-daemon.md](build-daemon.md) | Opt-in kotlinc daemon |
 | [build-release.md](build-release.md) | Static + stripped release binary |

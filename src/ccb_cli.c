@@ -44,6 +44,8 @@ const char *CCB_USAGE =
   "  build [--preview-gate] [--no-preview-gate] [--aab]\n"
   "        [--kotlinc-daemon] [--no-kotlinc-daemon]\n"
   "                                            build the APK (or .aab with --aab)\n"
+  "  graph [--aab]                             print the build plan (task graph\n"
+  "                                            in execution order) without building\n"
   "  clean                                     remove the build directory\n"
   "                                            (and stop the kotlinc daemon)\n"
   "  daemon stop                               stop the kotlinc daemon\n"
@@ -62,7 +64,11 @@ const char *CCB_USAGE =
 void ccb_print_diags_human(ccb_diag_list *diags) {
   for (size_t i = 0; i < diags->count; i++) {
     ccb_diag *d = &diags->items[i];
-    fprintf(stderr, "error %s [%s]: %s\n", d->code, d->phase, d->message);
+    fprintf(stderr, "error %s [%s]", d->code, d->phase);
+    if (d->task_id != NULL) {
+      fprintf(stderr, " [task %s]", d->task_id);
+    }
+    fprintf(stderr, ": %s\n", d->message);
     if (d->file != NULL) {
       fprintf(stderr, "  at %s", d->file);
       if (d->line > 0) {
@@ -102,6 +108,10 @@ static void ccb_print_diags_json(ccb_diag_list *diags) {
     if (d->suggestion != NULL) {
       ccb_str_append(&s, ",\"suggestion\":");
       ccb_json_escape(&s, d->suggestion);
+    }
+    if (d->task_id != NULL) {
+      ccb_str_append(&s, ",\"task\":");
+      ccb_json_escape(&s, d->task_id);
     }
     ccb_str_append(&s, "}\n");
     fputs(s.buf, stdout);
@@ -564,6 +574,9 @@ int ccb_cli_main(int argc, char **argv) {
   }
   if (strcmp(a.command, "build") == 0) {
     return ccb_cmd_build(&a);
+  }
+  if (strcmp(a.command, "graph") == 0) {
+    return ccb_cmd_graph(&a);
   }
   if (strcmp(a.command, "clean") == 0) {
     return ccb_cmd_clean(&a);

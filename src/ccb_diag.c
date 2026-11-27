@@ -19,6 +19,7 @@ void ccb_diag_clear(ccb_diag *d) {
   free(d->command);
   free(d->workdir);
   free(d->suggestion);
+  free(d->task_id);
   ccb_diag_init(d);
 }
 
@@ -56,10 +57,12 @@ void ccb_diag_set_full(ccb_diag *d, const char *code, const char *phase,
 }
 
 void ccb_diag_emit_human(const ccb_diag *d, FILE *f) {
-  fprintf(f, "error[%s] (%s): %s\n",
-    d->code != NULL ? d->code : "CCB-E0000",
-    d->phase != NULL ? d->phase : "?",
-    d->message != NULL ? d->message : "unknown error");
+  fprintf(f, "error[%s] (%s)", d->code != NULL ? d->code : "CCB-E0000",
+    d->phase != NULL ? d->phase : "?");
+  if (d->task_id != NULL) {
+    fprintf(f, " [task %s]", d->task_id);
+  }
+  fprintf(f, ": %s\n", d->message != NULL ? d->message : "unknown error");
   if (d->file != NULL) {
     fprintf(f, "  at %s:%ld:%ld\n", d->file, d->line, d->col);
   }
@@ -99,6 +102,10 @@ void ccb_diag_emit_json(const ccb_diag *d, FILE *f) {
   if (d->suggestion != NULL) {
     ccb_str_append(&out, ",\"suggestion\":");
     ccb_json_escape(&out, d->suggestion);
+  }
+  if (d->task_id != NULL) {
+    ccb_str_append(&out, ",\"task\":");
+    ccb_json_escape(&out, d->task_id);
   }
   ccb_str_append(&out, "}\n");
   fputs(out.buf != NULL ? out.buf : "", f);

@@ -11,6 +11,11 @@ Sub-pages: [kotlinc daemon](build-daemon.md) · [release binary](build-release.m
 
 *ccb-build-stages*
 
+The stages run as tasks in a DAG ([graph engine](graph.md)): one
+task per stage, chained in the order below, executed in topological
+order by the graph engine. The order is exactly the legacy fixed
+pipeline order; only the driver changed, not the stages.
+
 | # | Stage | What it does |
 | - | ----- | ------------ |
 | 0 | Load | Load + validate `ccb.toml`, report every problem at once. Resolve the toolchain. Release builds verify signing config before compiling anything. |
@@ -120,7 +125,9 @@ values + tool versions). Unchanged step is skipped, previous outputs reused.
 - String-*value* change re-runs compile, link, package, align, sign,
   verify, but skips kotlinc and dex (`R.java` unchanged).
 - Tool upgrade changes the tool fingerprint, invalidates all steps.
-- `--explain` prints the run/skip plan without executing. Conservative
+- `--explain` prints the run/skip plan without executing. It prints
+  the task-graph plan first (see [graph engine](graph.md)), then the
+  per-step lines. Conservative
   downstream of `link` — see [json-protocol.md](json-protocol.md).
 - `--dry-run` prints the exact commands, executes nothing.
 

@@ -19,6 +19,8 @@
 #include "ccb_daemon.h"
 #include "ccb_sdk.h"
 #include "ccb_pipeline.h"
+#include "ccb_graph.h"
+#include "ccb_pipeline_graph.h"
 #include "ccb_zip.h"
 #include "ccb_preview.h"
 #include "ccb_preview_lsp.h"
@@ -189,6 +191,7 @@ int ccb_setup_install_system_tool(const ccb_jdkinst_info *inst, const char *pkg_
 int ccb_cmd_setup(ccb_args *a);
 int ccb_cmd_check(ccb_args *a);
 int ccb_cmd_build(ccb_args *a);
+int ccb_cmd_graph(ccb_args *a);
 int ccb_cmd_daemon(ccb_args *a);
 int ccb_cmd_clean(ccb_args *a);
 int ccb_cmd_doctor(ccb_args *a);

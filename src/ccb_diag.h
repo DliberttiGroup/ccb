@@ -19,6 +19,10 @@ typedef struct {
   char *command;
   char *workdir;
   char *suggestion;
+  // Task that produced this diagnostic, when known (Phase 1 graph
+  // execution stamps it on diags a failed task adds). NULL when the
+  // diagnostic is not tied to a task.
+  char *task_id;
 } ccb_diag;
 
 void ccb_diag_init(ccb_diag *d);

@@ -93,6 +93,49 @@ void ccb_log_cache(ccb_log *log, const char *stage, int hit, const char *reason)
   }
 }
 
+void ccb_log_task_start(ccb_log *log, const char *task_id) {
+  if (!log->json) {
+    return;
+  }
+  ccb_str out;
+  ccb_str_init(&out);
+  ccb_str_append(&out, "{\"event\":\"task\",\"task\":");
+  ccb_json_escape(&out, task_id);
+  ccb_str_append(&out, ",\"status\":\"started\"}\n");
+  fputs(out.buf != NULL ? out.buf : "", stdout);
+  ccb_str_free(&out);
+}
+
+void ccb_log_task_done(ccb_log *log, const char *task_id,
+    long duration_ms, int skipped) {
+  if (!log->json) {
+    return;
+  }
+  ccb_str out;
+  ccb_str_init(&out);
+  ccb_str_append(&out, "{\"event\":\"task\",\"task\":");
+  ccb_json_escape(&out, task_id);
+  ccb_str_appendf(&out, ",\"status\":\"finished\",\"duration_ms\":%ld,\"result\":\"%s\"}\n",
+    duration_ms, skipped ? "skipped" : "done");
+  fputs(out.buf != NULL ? out.buf : "", stdout);
+  ccb_str_free(&out);
+}
+
+void ccb_log_task_failed(ccb_log *log, const char *task_id,
+    long duration_ms) {
+  if (!log->json) {
+    return;
+  }
+  ccb_str out;
+  ccb_str_init(&out);
+  ccb_str_append(&out, "{\"event\":\"task\",\"task\":");
+  ccb_json_escape(&out, task_id);
+  ccb_str_appendf(&out, ",\"status\":\"finished\",\"duration_ms\":%ld,\"result\":\"failed\"}\n",
+    duration_ms);
+  fputs(out.buf != NULL ? out.buf : "", stdout);
+  ccb_str_free(&out);
+}
+
 void ccb_log_tool_output(ccb_log *log, const char *phase, const char *out, const char *err) {
   if (!log->verbose) {
     return;
