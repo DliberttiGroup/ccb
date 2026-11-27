@@ -7,8 +7,9 @@
 A derived edge renders exactly like a flow-declared edge in the logic
 tree, walk mode, storyboard, diff, and JSON (no `derived` marker
 anywhere), and the build gate treats it like any other edge — except a
-declared edge for the same button always wins (see precedence). A branch
-edge adds one annotation: the tree and walk edge lists show
+declared edge for the same button always wins (see precedence).
+
+A branch edge adds one annotation: the tree and walk edge lists show
 `-> Detail via "Open note" [if ready: then]`, JSON carries it as the
 edge's `"branch"` field (string, or `null` for an unconditional edge).
 
@@ -44,8 +45,7 @@ nav("Detail")`, `else nav("Form")`); a braceless body that is itself a
 conditional is skipped whole, so its nav can never leak out as an
 unconditional edge. Nested conditionals compound with `", "` (`if x:
 then, if y: then`); an `else if` link stands alone (`else if b: then`,
-`else if b: else`) — its else branch means "not the outer condition
-either", so compounding it with the outer `then` label would be wrong. Nav
+`else if b: else`). Nav
 inside any other nested block (nested lambda/callback, coroutine, any
 inner block) is still no edge at all. A nav call inside a flow-declared
 branch (a `when`/`if` node in the component tree, not in a handler body)
@@ -105,8 +105,8 @@ package` prefix and any leading dot, then takes the simple name, so
 `.DetailActivity`, `com.example.DetailActivity`, and `DetailActivity`
 are the same destination. A destination with no matching flow screen
 becomes a node in its own right, marked `[graph]` in the logic tree and
-`"graph_only":true` in JSON: a node with unknown layout, not an error,
-never triggers the empty-screen warning. Destination matching is
+`"graph_only":true` in JSON: a node with unknown layout, never triggers
+the empty-screen warning. Destination matching is
 suffix-aware in both directions: `DetailActivity` matches a `Detail`
 screen and vice versa, but `DetailActivity` does not match
 `DetailFragment`. First entry wins for a duplicate id. `<action>`

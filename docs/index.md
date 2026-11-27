@@ -24,7 +24,10 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [json-protocol.md](json-protocol.md) | `--json` output, `--explain`, `--dry-run` |
 | [modules.md](modules.md) | Library modules in `ccb.toml` |
 | [library.md](library.md) | Standalone library projects: `[library]`, path/Maven consumption, resource namespacing, `check` report |
-| [maven.md](maven.md) | Remote Maven dependencies, cache, lockfile |
+| [maven.md](maven.md) | Remote Maven dependencies: declare, plugins, repos, packaging |
+| [maven-resolve.md](maven-resolve.md) | Maven resolution: transitive dependencies, profiles |
+| [maven-cache.md](maven-cache.md) | Maven cache, hermeticity, lockfile |
+| [maven-troubleshooting.md](maven-troubleshooting.md) | Maven troubleshooting by diagnostic code |
 | [preview.md](preview.md) | Terminal UI preview: config, flow files, gate, output, JSON |
 | [preview-handlers.md](preview-handlers.md) | Click handlers: derived edges, bindings, precedence, outcomes |
 | [preview-real-code.md](preview-real-code.md) | Screens and edges from real Kotlin Activities |
@@ -43,6 +46,9 @@ Pipeline → [build.md](build.md). Daemon → [build-daemon.md](build-daemon.md)
 Release binary → [build-release.md](build-release.md). Test counts →
 [build-tests.md](build-tests.md). Error-code meanings and exit codes →
 [diagnostics.md](diagnostics.md). Measured numbers → [build.md](build.md).
+Maven resolution → [maven-resolve.md](maven-resolve.md). Maven cache and
+lockfile → [maven-cache.md](maven-cache.md). Maven troubleshooting →
+[maven-troubleshooting.md](maven-troubleshooting.md).
 
 ## Tags
 
@@ -111,14 +117,16 @@ Every section carries a `*ccb-<slug>*` tag. Find a section by tag here.
 | `*ccb-setup-download-cache*` | setup-tools.md | Download cache |
 | `*ccb-maven*` | maven.md | Remote Maven dependencies |
 | `*ccb-maven-declare*` | maven.md | Declaring dependencies |
+| `*ccb-maven-plugins*` | maven.md | Compiler plugins |
 | `*ccb-maven-repos*` | maven.md | Repositories |
 | `*ccb-maven-packaging*` | maven.md | Packaging |
-| `*ccb-maven-transitive*` | maven.md | Transitive dependencies |
-| `*ccb-maven-cache*` | maven.md | Cache and checksums |
-| `*ccb-maven-hermetic*` | maven.md | Hermeticity |
-| `*ccb-maven-lockfile*` | maven.md | Lockfile |
+| `*ccb-maven-transitive*` | maven-resolve.md | Transitive dependencies |
+| `*ccb-maven-profiles*` | maven-resolve.md | Profiles |
+| `*ccb-maven-cache*` | maven-cache.md | Cache and checksums |
+| `*ccb-maven-hermetic*` | maven-cache.md | Hermeticity |
+| `*ccb-maven-lockfile*` | maven-cache.md | Lockfile |
 | `*ccb-maven-limits*` | maven.md | Limitations |
-| `*ccb-maven-troubleshooting*` | maven.md | Troubleshooting |
+| `*ccb-maven-troubleshooting*` | maven-troubleshooting.md | Troubleshooting |
 | `*ccb-diagnostics*` | diagnostics.md | Diagnostic codes |
 | `*ccb-diagnostics-config*` | diagnostics.md | Config |
 | `*ccb-diagnostics-toolchain*` | diagnostics.md | Toolchain |

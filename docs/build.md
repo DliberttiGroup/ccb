@@ -149,8 +149,7 @@ bytes are what's compared.
 *ccb-build-limits*
 
 - **JVM startup dominates wall time.** kotlinc, d8, apksigner each boot a
-  JVM (seconds on a slow VM). CCB's own work — hashing, decisions,
-  packaging — is well under a second. Spec §8 targets (<10 s cold, <2 s
+  JVM (seconds on a slow VM). Spec §8 targets (<10 s cold, <2 s
   incremental Kotlin) are not met: cold hello-world ~23 s, one-file Kotlin
   rebuild ~14 s. The opt-in kotlinc daemon ([build-daemon.md](build-daemon.md))
   removes kotlinc JVM startup from warm rebuilds only.

@@ -5,9 +5,9 @@
 *ccb-preview*
 
 `ccb preview` renders a terminal wireframe for projects that follow this
-convention. A linter with a picture, not an emulator: it never executes
-Kotlin, evaluates conditions, fetches data, or animates. Anything outside
-the convention warns and falls back; it never crashes and never guesses.
+convention. It never executes Kotlin, evaluates conditions, fetches data,
+or animates. Anything outside the convention warns and falls back; it
+never crashes and never guesses.
 
 Sub-pages: [handlers](preview-handlers.md) · [real code](preview-real-code.md) ·
 [scenarios](preview-scenarios.md) · [traces](preview-traces.md) ·

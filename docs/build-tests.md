@@ -4,7 +4,7 @@
 
 *ccb-build-tests*
 
-Build CCB first ([README](../README.md#install-from-source)). Then:
+Build CCB first ([README](../README.md#build-from-source)). Then:
 
 ```
 ctest --test-dir build -L fast     # quick gate: 44 tests, ~16s quiet
@@ -34,5 +34,4 @@ runs): run them sequentially. Each test binary uses a per-process `mkdtemp`
 dir (`/tmp/ccb_test_<name>_XXXXXX`), so parallel tests within one `ctest
 --jN` run can't collide — but two concurrent `ctest` runs still share CPU
 and memory. On this VM `-j4` plain measured 1037s vs 739s sequential, `-j2`
-1082s (2026-11-25, 47 tests): CPU-bound JVM work (kotlinc + d8), not
-serialization. 52 tests total.
+1082s (2026-11-25, 47 tests). 52 tests total.

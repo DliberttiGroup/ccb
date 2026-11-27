@@ -31,9 +31,9 @@ Back = ["42"]             # button label -> fill unknown arguments
 ```
 
 Render with `ccb preview --scenario NAME` (human render, `--json`, and the
-logic tree all accept it; `--walk` takes it in a later chunk, and
-`--watch`, `--diff`, `--storyboard`, and `--update-goldens` reject it
-rather than silently rendering without it). An unknown scenario name is a
+logic tree all accept it). `--walk`, `--watch`, `--diff`, `--storyboard`,
+and `--update-goldens` reject it (exit 2) rather than silently rendering
+without it. An unknown scenario name is a
 usage error (exit 2) listing the available scenarios.
 
 ## Merge rules
@@ -47,9 +47,8 @@ usage error (exit 2) listing the available scenarios.
 - Lists: rows replace the 4 placeholder rows of a childless list only. A
   list that already has static children keeps them. Rows render as ordinary
   rows in the wireframe and carry `"provenance": "scenario"` in JSON.
-  Because rows are ordinary rows, a row wider than its box clips and
-  warns CCB-P1009, one per row — on a full scenario the clip warnings
-  can bury real diagnostics, so keep row strings short or widen the
+  A row wider than its box clips and
+  warns CCB-P1009, one per row — keep row strings short or widen the
   list.
 - Fields: content is additional, never a replacement — the static label
   stays and the wireframe shows `[Title: Milk]`. JSON carries `"value"`

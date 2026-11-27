@@ -87,6 +87,8 @@ severity in the tables below and by the exit code, not by the prefix.
 
 ## Preview (exit 1 unless noted)
 
+<a id="preview-exit-1-unless-noted"></a>
+
 *ccb-diagnostics-preview*
 
 Preview warnings exit 0; only CCB-P1005, CCB-P1008, and (under `--strict`)

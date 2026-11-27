@@ -4,9 +4,9 @@
 
 *ccb-build-daemon*
 
-Default: plain `kotlinc` subprocess. One binary, one command, one result,
-no background process. Opt in to reuse a kotlinc compile daemon across
-builds of the same project — warm rebuilds skip the kotlinc JVM startup.
+Default: plain `kotlinc` subprocess. Opt in to reuse a kotlinc compile
+daemon across builds of the same project — warm rebuilds skip the
+kotlinc JVM startup.
 
 ```toml
 [build]
@@ -56,8 +56,7 @@ best-effort (only when daemon mode is enabled in config) before removing
 - Toggling the daemon doesn't invalidate outputs: same compiler, same
   arguments, compile-code fingerprint unchanged.
 
-Measured (2026-11-25, kotlinc 2.4.21, single runs, shared VM, ~1.5 CPUs
-— noisy, treat cold numbers as a range, not a promise):
+Measured (2026-11-25, kotlinc 2.4.21, single runs, shared VM, ~1.5 CPUs):
 
 | Project | Cold, daemon off | Cold, daemon on | 1-file rebuild, off | 1-file rebuild, on |
 |---|---|---|---|---|

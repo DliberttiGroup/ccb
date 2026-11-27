@@ -96,7 +96,7 @@ passed to r8 as well, for keeps CCB can't infer — reflection-only
 references (`Class.forName` strings) — so it's still required when
 `minify = true`, but may hold only a comment when the app needs no extra
 keeps. Keep rules CCB generates for entry points r8 can't see: see
-[build.md](build.md#dex-stage-6).
+[build.md](build.md#dex-stage-8).
 
 ## Host tools (Termux and Linux)
 

@@ -5,9 +5,8 @@
 *ccb-build-release*
 
 The shippable binary is the release build: `ccb` linked with `-static`,
-stripped. Dev and sanitizer builds stay dynamic and unstripped — ASan
-doesn't work with a static binary, so the two options are mutually
-exclusive in CMake (configuring both fails).
+stripped. Dev and sanitizer builds stay dynamic and unstripped; the two
+options are mutually exclusive in CMake (configuring both fails).
 
 ```
 cmake --preset release && cmake --build --preset release
@@ -33,8 +32,8 @@ Measured sizes (2026-11-25):
 | Static Release, stripped (`build-release/ccb`) | 1,268,272 |
 
 The ~605 KB figure sometimes quoted is the stripped *dynamic* binary; the
-static binary is ~1.27 MB because glibc is linked in. Either way well
-under the 5 MB limit in requirement.md §8. Verify with:
+static binary is ~1.27 MB. Both are under the 5 MB limit in
+requirement.md §8. Verify with:
 
 ```
 file build-release/ccb   # statically linked, stripped
