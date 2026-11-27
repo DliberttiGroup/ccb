@@ -14,6 +14,7 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [build.md](build.md) | Pipeline stages, dex, AAB, caching, reproducible builds, limits |
 | [graph.md](graph.md) | Task graph engine: task model, validation, plan, build summary |
 | [architecture-audit.md](architecture-audit.md) | Phase 0 audit: layer map, coupling, correctness risks, migration plan per phase, scope freeze, benchmark baseline |
+| [remediation-baseline.md](remediation-baseline.md) | Step 1 remediation baseline: branch/commit, fast-suite result, benchmark status, verified findings, work queue for Steps 2–12 |
 | [build-daemon.md](build-daemon.md) | Opt-in kotlinc daemon |
 | [build-release.md](build-release.md) | Static + stripped release binary |
 | [build-tests.md](build-tests.md) | Running the test suite |
