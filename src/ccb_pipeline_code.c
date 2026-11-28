@@ -212,19 +212,9 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     ccb_log_cache(&p->log, "compile-code", 1, "no sources to compile");
     goto code_done;
   }
-  // Classpath: android.jar + jars + AAR classes.jars.
-  ccb_str cp;
-  ccb_str_init(&cp);
-  ccb_str_append(&cp, p->sdk->android_jar);
-  for (size_t i = 0; i < p->cfg->jars_count; i++) {
-    ccb_str_append_c(&cp, ':');
-    ccb_str_append(&cp, p->cfg->jars[i]);
-  }
-  for (size_t i = 0; i < p->aar_class_jars_count; i++) {
-    ccb_str_append_c(&cp, ':');
-    ccb_str_append(&cp, p->aar_class_jars[i]);
-  }
-  char *cp_str = ccb_str_steal(&cp);
+  // Classpath: android.jar + jars + AAR classes.jars (shared with
+  // the module builder: ccb_build_classpath).
+  char *cp_str = ccb_build_classpath(p);
   {
     ccb_fp_builder b;
     memset(&b, 0, sizeof(b));
@@ -327,30 +317,11 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     // instead of failing, and kotlinc must never run with no .kt
     // sources (javac compiles the Java sources alone).
     if (nkt > 0 && p->sdk->kotlinc != NULL) {
-      ccb_argv av;
-      memset(&av, 0, sizeof(av));
-      av.ar = ar;
-      ccb_argv_push(&av, p->sdk->kotlinc);
-      ccb_argv_push(&av, "-jvm-target");
-      ccb_argv_push(&av, p->cfg->jvm_target);
-      ccb_argv_push(&av, "-d");
-      ccb_argv_push(&av, p->classes_dir);
-      ccb_argv_push(&av, "-cp");
-      ccb_argv_push(&av, cp_str);
-      ccb_push_plugin_args(p, &av);
-      for (size_t i = 0; i < nkt; i++) {
-        ccb_argv_push(&av, kt_files[i]);
-      }
-      for (size_t i = 0; i < nrjava; i++) {
-        ccb_argv_push(&av, rjava_files[i]);
-      }
-      for (size_t i = 0; i < njava; i++) {
-        ccb_argv_push(&av, java_files[i]);
-      }
       char **env = ccb_jvm_env(p, ar);
-      ccb_status rc = ccb_run_kotlinc(p, av.v, env,
+      ccb_status rc = ccb_run_kotlinc_sources(p, ar, env,
+        p->classes_dir, cp_str, kt_files, nkt, rjava_files, nrjava,
+        NULL, 0, java_files, njava,
         "check the Kotlin/Java sources for errors");
-      free(av.v);
       if (rc != CCB_OK) {
         free(cp_str);
         free(fp);
@@ -363,40 +334,10 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     // androidx.recyclerview.R$attr were missing at runtime), so
     // javac must compile R.java too.
     if (njava > 0 || nrjava > 0) {
-      ccb_str jcp;
-      ccb_str_init(&jcp);
-      ccb_str_append(&jcp, p->classes_dir);
-      ccb_str_append_c(&jcp, ':');
-      ccb_str_append(&jcp, cp_str);
-      char *jcp_str = ccb_str_steal(&jcp);
-      ccb_argv av;
-      memset(&av, 0, sizeof(av));
-      av.ar = ar;
-      ccb_argv_push(&av, p->sdk->javac);
-      // UTF-8 source encoding regardless of the host locale: Java
-      // files are written in UTF-8 (a non-ASCII comment must not
-      // fail the build on a non-UTF-8 machine).
-      ccb_argv_push(&av, "-encoding");
-      ccb_argv_push(&av, "UTF-8");
-      ccb_argv_push(&av, "-source");
-      ccb_argv_push(&av, p->cfg->jvm_target);
-      ccb_argv_push(&av, "-target");
-      ccb_argv_push(&av, p->cfg->jvm_target);
-      ccb_argv_push(&av, "-cp");
-      ccb_argv_push(&av, jcp_str);
-      ccb_argv_push(&av, "-d");
-      ccb_argv_push(&av, p->classes_dir);
-      for (size_t i = 0; i < nrjava; i++) {
-        ccb_argv_push(&av, rjava_files[i]);
-      }
-      for (size_t i = 0; i < njava; i++) {
-        ccb_argv_push(&av, java_files[i]);
-      }
       char **env = ccb_jvm_env(p, ar);
-      ccb_status rc = ccb_run_tool(p, "javac", "CCB-E3005", av.v, env,
-        "check the Java sources for errors");
-      free(av.v);
-      free(jcp_str);
+      ccb_status rc = ccb_run_javac_sources(p, ar, env,
+        p->classes_dir, cp_str, rjava_files, nrjava, java_files,
+        njava, "check the Java sources for errors");
       if (rc != CCB_OK) {
         free(cp_str);
         free(fp);

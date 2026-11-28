@@ -204,6 +204,8 @@ int ccb_mod_fp_files(ccb_pipe *p, ccb_fp_builder *b, const char *dir,
 size_t ccb_mod_file_count(const char *dir, const char *ext);
 ccb_status ccb_mod_zip_tree(ccb_zip_writer *w, const char *dir,
     const char *prefix);
+ccb_status ccb_mod_zip_tree_filtered(ccb_zip_writer *w, const char *dir,
+    const char *prefix, int (*skip)(const char *path));
 int ccb_mod_is_r_class(const char *path);
 void ccb_mod_register(ccb_pipe *p, ccb_module *m, const char *aar_path,
     const char *classes_jar, const char *kind);
@@ -218,6 +220,33 @@ ccb_status ccb_step_compile_res(ccb_pipe *p);
 ccb_status ccb_step_link(ccb_pipe *p);
 char *ccb_java_home(ccb_pipe *p);
 char **ccb_jvm_env(ccb_pipe *p, ccb_arena *ar);
+
+// Shared compile providers (ccb_pipeline_compile.c): one argv
+// builder + runner per compile operation, used by the app steps and
+// the module builder alike (audit D1).
+void ccb_aapt2_compile_argv(ccb_pipe *p, ccb_argv *av,
+    const char *res_dir, const char *out_zip);
+ccb_status ccb_aapt2_compile(ccb_pipe *p, const char *res_dir,
+    const char *out_zip, const char *suggestion);
+void ccb_aapt2_link_argv(ccb_pipe *p, ccb_argv *av, const char *out,
+    const char *manifest, const char *gen_dir, const char *rtxt,
+    int is_aab);
+char *ccb_build_classpath(ccb_pipe *p);
+void ccb_kotlinc_argv(ccb_pipe *p, ccb_argv *av, const char *out_dir,
+    const char *cp, char **kt, size_t nkt, char **rjava, size_t nrjava,
+    char **extra, size_t nextra, char **java, size_t njava);
+ccb_status ccb_run_kotlinc_sources(ccb_pipe *p, ccb_arena *ar,
+    char **env, const char *out_dir, const char *cp, char **kt,
+    size_t nkt, char **rjava, size_t nrjava, char **extra,
+    size_t nextra, char **java, size_t njava,
+    const char *suggestion);
+void ccb_javac_argv(ccb_pipe *p, ccb_argv *av, const char *out_dir,
+    const char *cp, char **first, size_t nfirst, char **second,
+    size_t nsecond);
+ccb_status ccb_run_javac_sources(ccb_pipe *p, ccb_arena *ar,
+    char **env, const char *out_dir, const char *cp, char **first,
+    size_t nfirst, char **second, size_t nsecond,
+    const char *suggestion);
 ccb_status ccb_step_code(ccb_pipe *p);
 int ccb_dex_has_stdlib(ccb_pipe *p);
 // True when path is a whole dex file: dex magic plus a header

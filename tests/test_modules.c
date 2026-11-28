@@ -616,6 +616,28 @@ int main(int argc, char **argv) {
   ccb_proc_result_free(&r);
   CHECK(dex_contains(DEX_DIR, "base2"));
 
+  // Multi-module project: byte-identical clean rebuilds, through
+  // the shared compile providers (Step 6): the app APK and the
+  // module AAR must both reproduce exactly.
+  {
+    char m1[65];
+    char m2[65];
+    char a1[65];
+    char a2[65];
+    CHECK(ccb_sha256_file(APK_OUT, m1) == CCB_OK);
+    CHECK(ccb_sha256_file(
+      B("proj/build/intermediates/modules/base/base.aar"), a1) == CCB_OK);
+    CHECK(ccb_remove_recursive(B("proj/build")) == CCB_OK);
+    CHECK(ccb_proc_run(build_args, PROJ, env_extra, &r) == CCB_OK);
+    CHECK(r.exit_code == 0);
+    ccb_proc_result_free(&r);
+    CHECK(ccb_sha256_file(APK_OUT, m2) == CCB_OK);
+    CHECK(ccb_sha256_file(
+      B("proj/build/intermediates/modules/base/base.aar"), a2) == CCB_OK);
+    CHECK_STR_EQ(m1, m2);
+    CHECK_STR_EQ(a1, a2);
+  }
+
   // Single-module project: no modules phase, byte-identical rebuilds.
   ccb_remove_recursive(SINGLE_PROJ);
   write_app_scaffold(SINGLE_PROJ);

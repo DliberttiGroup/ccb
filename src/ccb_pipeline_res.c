@@ -131,19 +131,9 @@ ccb_status ccb_step_compile_res(ccb_pipe *p) {
       continue;
     }
     ccb_free_str_array(files, nfiles);
-    CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
-    ccb_argv av;
-    memset(&av, 0, sizeof(av));
-    av.ar = ar;
-    ccb_argv_push(&av, p->sdk->aapt2);
-    ccb_argv_push(&av, "compile");
-    ccb_argv_push(&av, "--dir");
-    ccb_argv_push(&av, targets[i].res_dir);
-    ccb_argv_push(&av, "-o");
-    ccb_argv_push(&av, targets[i].zip_path);
-    ccb_status rc = ccb_run_tool(p, "aapt2-compile", "CCB-E3002", av.v, NULL,
+    ccb_status rc = ccb_aapt2_compile(p, targets[i].res_dir,
+      targets[i].zip_path,
       "check the resource files for errors (bad XML, duplicate names)");
-    free(av.v);
     if (rc != CCB_OK) {
       free(fp);
       goto compile_fail;
@@ -330,24 +320,9 @@ ccb_status ccb_step_link(ccb_pipe *p) {
   ccb_argv av;
   memset(&av, 0, sizeof(av));
   av.ar = ar;
-  ccb_argv_push(&av, p->sdk->aapt2);
-  ccb_argv_push(&av, "link");
-  if (is_aab) {
-    ccb_argv_push(&av, "--proto-format");
-  }
-  ccb_argv_push(&av, "-o");
-  ccb_argv_push(&av, link_out);
-  ccb_argv_push(&av, "--manifest");
-  ccb_argv_push(&av, p->merged_manifest != NULL ? p->merged_manifest : p->cfg->manifest);
-  ccb_argv_push(&av, "-I");
-  ccb_argv_push(&av, p->sdk->android_jar);
-  ccb_argv_push(&av, "--java");
-  ccb_argv_push(&av, p->gen_dir);
-  ccb_argv_push(&av, "--auto-add-overlay");
-  ccb_argv_push(&av, "--min-sdk-version");
-  ccb_argv_pushf(&av, "%ld", p->cfg->min_sdk);
-  ccb_argv_push(&av, "--target-sdk-version");
-  ccb_argv_pushf(&av, "%ld", p->cfg->target_sdk);
+  ccb_aapt2_link_argv(p, &av, link_out,
+    p->merged_manifest != NULL ? p->merged_manifest : p->cfg->manifest,
+    p->gen_dir, NULL, is_aab);
   ccb_argv_push(&av, "--version-code");
   ccb_argv_pushf(&av, "%ld", p->cfg->version_code);
   ccb_argv_push(&av, "--version-name");

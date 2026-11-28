@@ -197,19 +197,8 @@ static int ccb_mod_fingerprint(ccb_pipe *p, ccb_module *m, char **fp_out,
 static ccb_status ccb_mod_compile_resources(ccb_mod_ctx *c) {
   ccb_pipe *p = c->p;
   ccb_module *m = c->m;
-  CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
-  ccb_argv av;
-  memset(&av, 0, sizeof(av));
-  av.ar = ar;
-  ccb_argv_push(&av, p->sdk->aapt2);
-  ccb_argv_push(&av, "compile");
-  ccb_argv_push(&av, "--dir");
-  ccb_argv_push(&av, m->res);
-  ccb_argv_push(&av, "-o");
-  ccb_argv_push(&av, c->compiled);
-  ccb_status rc = ccb_run_tool(p, "aapt2-compile", "CCB-E3002", av.v,
-    NULL, "check the module resource files for errors");
-  free(av.v);
+  ccb_status rc = ccb_aapt2_compile(p, m->res, c->compiled,
+    "check the module resource files for errors");
   if (rc != CCB_OK) {
     return rc;
   }
@@ -218,25 +207,12 @@ static ccb_status ccb_mod_compile_resources(ccb_mod_ctx *c) {
       "cannot create module R.java directory");
     return CCB_ERR_BUILD;
   }
+  CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
+  ccb_argv av;
   memset(&av, 0, sizeof(av));
   av.ar = ar;
-  ccb_argv_push(&av, p->sdk->aapt2);
-  ccb_argv_push(&av, "link");
-  ccb_argv_push(&av, "-o");
-  ccb_argv_push(&av, c->link_out);
-  ccb_argv_push(&av, "--manifest");
-  ccb_argv_push(&av, m->manifest);
-  ccb_argv_push(&av, "-I");
-  ccb_argv_push(&av, p->sdk->android_jar);
-  ccb_argv_push(&av, "--java");
-  ccb_argv_push(&av, c->gen_dir);
-  ccb_argv_push(&av, "--output-text-symbols");
-  ccb_argv_push(&av, c->rtxt);
-  ccb_argv_push(&av, "--auto-add-overlay");
-  ccb_argv_push(&av, "--min-sdk-version");
-  ccb_argv_pushf(&av, "%ld", p->cfg->min_sdk);
-  ccb_argv_push(&av, "--target-sdk-version");
-  ccb_argv_pushf(&av, "%ld", p->cfg->target_sdk);
+  ccb_aapt2_link_argv(p, &av, c->link_out, m->manifest, c->gen_dir,
+    c->rtxt, 0);
   ccb_argv_push(&av, c->compiled);
   rc = ccb_run_tool(p, "aapt2-link", "CCB-E3003", av.v, NULL,
     "check the module manifest and resources");
@@ -308,35 +284,12 @@ static void ccb_mod_collect_srcs(ccb_mod_ctx *c, ccb_mod_srcs *s) {
   }
 }
 
-// Classpath: android.jar + declared jars + declared and already-built
-// module AAR classes (dependencies register as they finish, in
-// topological order).
-static char *ccb_mod_classpath(ccb_mod_ctx *c) {
-  ccb_pipe *p = c->p;
-  ccb_str cp;
-  ccb_str_init(&cp);
-  ccb_str_append(&cp, p->sdk->android_jar);
-  for (size_t i = 0; i < p->cfg->jars_count; i++) {
-    ccb_str_append_c(&cp, ':');
-    ccb_str_append(&cp, p->cfg->jars[i]);
-  }
-  for (size_t i = 0; i < p->aar_class_jars_count; i++) {
-    ccb_str_append_c(&cp, ':');
-    ccb_str_append(&cp, p->aar_class_jars[i]);
-  }
-  return ccb_str_steal(&cp);
-}
-
 // Compile the module's sources with kotlinc, then its Java sources
 // with javac. Takes ownership of cp_str and the collected file lists.
 static ccb_status ccb_mod_run_kotlinc(ccb_mod_ctx *c, char *cp_str,
     ccb_mod_srcs *s) {
   ccb_pipe *p = c->p;
   CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
-  ccb_argv av;
-  ccb_argv jav;
-  ccb_str jcp;
-  char *jcp_str = NULL;
   char **env = NULL;
   ccb_status rc = CCB_OK;
   if (!p->opts->dry_run && ccb_mkdir_p(c->classes_dir) != CCB_OK) {
@@ -349,61 +302,16 @@ static ccb_status ccb_mod_run_kotlinc(ccb_mod_ctx *c, char *cp_str,
   // kotlinc: skipped for Java-only modules (same rule as the app
   // compile step): javac below compiles the Java sources alone.
   if (s->nkt > 0 && p->sdk->kotlinc != NULL) {
-    memset(&av, 0, sizeof(av));
-    av.ar = ar;
-    ccb_argv_push(&av, p->sdk->kotlinc);
-    ccb_argv_push(&av, "-jvm-target");
-    ccb_argv_push(&av, p->cfg->jvm_target);
-    ccb_argv_push(&av, "-d");
-    ccb_argv_push(&av, c->classes_dir);
-    ccb_argv_push(&av, "-cp");
-    ccb_argv_push(&av, cp_str);
-    ccb_push_plugin_args(p, &av);
-    for (size_t i = 0; i < s->nkt; i++) {
-      ccb_argv_push(&av, s->kt[i]);
-    }
-    for (size_t i = 0; i < s->nrjava; i++) {
-      ccb_argv_push(&av, s->rjava[i]);
-    }
-    for (size_t i = 0; i < s->nup; i++) {
-      ccb_argv_push(&av, s->up[i]);
-    }
-    for (size_t i = 0; i < s->njava; i++) {
-      ccb_argv_push(&av, s->java[i]);
-    }
-    rc = ccb_run_kotlinc(p, av.v, env,
-      "check the module Kotlin/Java sources for errors");
-    free(av.v);
+    rc = ccb_run_kotlinc_sources(p, ar, env, c->classes_dir, cp_str,
+      s->kt, s->nkt, s->rjava, s->nrjava, s->up, s->nup, s->java,
+      s->njava, "check the module Kotlin/Java sources for errors");
     if (rc != CCB_OK) {
       goto done;
     }
   }
   if (s->njava > 0) {
-    ccb_str_init(&jcp);
-    ccb_str_append(&jcp, c->classes_dir);
-    ccb_str_append_c(&jcp, ':');
-    ccb_str_append(&jcp, cp_str);
-    jcp_str = ccb_str_steal(&jcp);
-    memset(&jav, 0, sizeof(jav));
-    jav.ar = ar;
-    ccb_argv_push(&jav, p->sdk->javac);
-    ccb_argv_push(&jav, "-encoding");
-    ccb_argv_push(&jav, "UTF-8");
-    ccb_argv_push(&jav, "-source");
-    ccb_argv_push(&jav, p->cfg->jvm_target);
-    ccb_argv_push(&jav, "-target");
-    ccb_argv_push(&jav, p->cfg->jvm_target);
-    ccb_argv_push(&jav, "-cp");
-    ccb_argv_push(&jav, jcp_str);
-    ccb_argv_push(&jav, "-d");
-    ccb_argv_push(&jav, c->classes_dir);
-    for (size_t i = 0; i < s->njava; i++) {
-      ccb_argv_push(&jav, s->java[i]);
-    }
-    rc = ccb_run_tool(p, "javac", "CCB-E3005", jav.v, env,
-      "check the module Java sources for errors");
-    free(jav.v);
-    free(jcp_str);
+    rc = ccb_run_javac_sources(p, ar, env, c->classes_dir, cp_str,
+      s->java, s->njava, NULL, 0, "check the Java sources for errors");
   }
 done:
   ccb_mod_srcs_free(s);
@@ -412,7 +320,10 @@ done:
 }
 
 static ccb_status ccb_mod_compile_sources(ccb_mod_ctx *c) {
-  char *cp_str = ccb_mod_classpath(c);
+  // Classpath: android.jar + declared jars + declared and
+  // already-built module AAR classes (dependencies register as they
+  // finish, in topological order). Shared with the app code step.
+  char *cp_str = ccb_build_classpath(c->p);
   ccb_mod_srcs s;
   ccb_mod_collect_srcs(c, &s);
   return ccb_mod_run_kotlinc(c, cp_str, &s);
@@ -446,18 +357,8 @@ static ccb_status ccb_mod_write_classes_jar(ccb_mod_ctx *c) {
       "cannot create module classes.jar");
     return CCB_ERR_BUILD;
   }
-  size_t plen = strlen(c->classes_dir);
-  int bad = 0;
-  for (size_t i = 0; i < nall; i++) {
-    if (ccb_mod_is_r_class(all[i])) {
-      continue;
-    }
-    const char *rel = all[i] + plen + 1;
-    if (ccb_zip_writer_add_file(&w, rel, all[i]) != CCB_OK) {
-      bad = 1;
-      break;
-    }
-  }
+  int bad = ccb_mod_zip_tree_filtered(&w, c->classes_dir, "",
+    ccb_mod_is_r_class) != CCB_OK;
   if (bad || ccb_zip_writer_finish(&w) != CCB_OK) {
     ccb_zip_writer_abort(&w);
     ccb_free_str_array(all, nall);

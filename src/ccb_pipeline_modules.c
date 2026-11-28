@@ -125,11 +125,12 @@ size_t ccb_mod_file_count(const char *dir, const char *ext) {
   return nfiles;
 }
 
-// Add every file under dir to the zip writer as <prefix>/<relpath>.
+// Add every file under dir to the zip writer as <prefix>/<relpath>,
+// skipping files for which skip returns true (NULL skips nothing).
 // Files come sorted from ccb_collect_files, so the archive is
 // deterministic. An empty prefix adds bare relative paths.
-ccb_status ccb_mod_zip_tree(ccb_zip_writer *w, const char *dir,
-    const char *prefix) {
+ccb_status ccb_mod_zip_tree_filtered(ccb_zip_writer *w, const char *dir,
+    const char *prefix, int (*skip)(const char *path)) {
   char **files = NULL;
   size_t nfiles = 0;
   if (ccb_collect_files(dir, NULL, &files, &nfiles) != CCB_OK) {
@@ -138,6 +139,9 @@ ccb_status ccb_mod_zip_tree(ccb_zip_writer *w, const char *dir,
   ccb_status rc = CCB_OK;
   size_t plen = strlen(dir);
   for (size_t i = 0; i < nfiles; i++) {
+    if (skip != NULL && skip(files[i])) {
+      continue;
+    }
     const char *rel = files[i] + plen + 1;
     char *arc = prefix[0] == '\0' ? ccb_xstrdup(rel) : ccb_path_join(prefix, rel);
     if (ccb_zip_writer_add_file(w, arc, files[i]) != CCB_OK) {
@@ -149,6 +153,11 @@ ccb_status ccb_mod_zip_tree(ccb_zip_writer *w, const char *dir,
   }
   ccb_free_str_array(files, nfiles);
   return rc;
+}
+
+ccb_status ccb_mod_zip_tree(ccb_zip_writer *w, const char *dir,
+    const char *prefix) {
+  return ccb_mod_zip_tree_filtered(w, dir, prefix, NULL);
 }
 
 // Basename of a .class file: R classes (R.class, R$*.class) must never
