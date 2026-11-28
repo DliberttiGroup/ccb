@@ -41,6 +41,28 @@ static ccb_status record_skip_run(void *ctx, ccb_task *t) {
   return CCB_OK;
 }
 
+// Skips with a logged cache reason: ctx is the ccb_log, so the
+// reason flows through the log stash to the task's skip_reason.
+static ccb_status record_skip_reason_run(void *ctx, ccb_task *t) {
+  ccb_log *log = ctx;
+  record_id(t->id);
+  ccb_log_cache(log, t->id, 1, "inputs unchanged");
+  t->skipped = 1;
+  return CCB_OK;
+}
+
+// True when t declares an input with this name and kind.
+static int task_has_input(ccb_task *t, const char *name,
+    ccb_task_input_kind kind) {
+  for (size_t i = 0; i < t->inputs_count; i++) {
+    if (strcmp(t->inputs[i].name, name) == 0 &&
+        t->inputs[i].kind == kind) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // Fails, pushing one diagnostic into the ctx diag list so the
 // executor's task-ID stamping can be checked.
 static ccb_status fail_run(void *ctx, ccb_task *t) {
@@ -347,6 +369,26 @@ int main(void) {
     ccb_graph_free(g);
   }
 
+  // --- ENV inputs need no producer; optional SOURCE inputs may
+  // be missing; required inputs default on ---
+  {
+    char *missing = ccb_test_path(BASE, "optional-missing.txt");
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *t = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_input(t, "MY_SECRET_PW", CCB_TASK_INPUT_ENV);
+    ccb_task_add_input_opt(t, missing, CCB_TASK_INPUT_SOURCE, 0);
+    CHECK(t->inputs[0].required == 1);
+    CHECK(t->inputs[1].required == 0);
+    CHECK_STR_EQ(ccb_task_input_kind_name(CCB_TASK_INPUT_ENV),
+      "env");
+    CHECK(ccb_graph_validate(g, &diags) == CCB_OK);
+    CHECK(ccb_graph_check_source_inputs(g, &diags) == CCB_OK);
+    CHECK(ccb_graph_has_input(g, "MY_SECRET_PW"));
+    CHECK(!ccb_graph_has_input(g, "nope"));
+    ccb_graph_free(g);
+  }
+
   // --- topological order on a diamond ---
   {
     ccb_graph *g = diamond_graph(record_run);
@@ -425,6 +467,49 @@ int main(void) {
     ccb_graph_free(g);
   }
 
+  // --- executor: skip reason flows from the run's cache log to
+  // the task and the summary; a skip with no logged reason has
+  // none, and a reason never leaks across tasks ---
+  {
+    reset_seen();
+    ccb_graph *g = diamond_graph(record_skip_reason_run);
+    ccb_diag_list exec_diags;
+    ccb_diag_list_init(&exec_diags);
+    CHECK(ccb_graph_execute(g, &log, &log, &exec_diags) ==
+      CCB_OK);
+    for (size_t i = 0; i < g->count; i++) {
+      CHECK(g->tasks[i]->skipped == 1);
+      CHECK(g->tasks[i]->skip_reason != NULL);
+      if (g->tasks[i]->skip_reason != NULL) {
+        CHECK_STR_EQ(g->tasks[i]->skip_reason,
+          "inputs unchanged");
+      }
+    }
+    ccb_str sum;
+    ccb_str_init(&sum);
+    ccb_graph_summary_json(g, &sum);
+    CHECK(ccb_test_contains(sum.buf,
+      "\"skip_reason\":\"inputs unchanged\""));
+    ccb_str_free(&sum);
+    ccb_diag_list_free(&exec_diags);
+    ccb_graph_free(g);
+    reset_seen();
+    g = diamond_graph(record_skip_run);
+    ccb_diag_list_init(&exec_diags);
+    CHECK(ccb_graph_execute(g, NULL, &log, &exec_diags) ==
+      CCB_OK);
+    for (size_t i = 0; i < g->count; i++) {
+      CHECK(g->tasks[i]->skipped == 1);
+      CHECK(g->tasks[i]->skip_reason == NULL);
+    }
+    ccb_str_init(&sum);
+    ccb_graph_summary_json(g, &sum);
+    CHECK(ccb_test_contains(sum.buf, "\"skip_reason\":null"));
+    ccb_str_free(&sum);
+    ccb_diag_list_free(&exec_diags);
+    ccb_graph_free(g);
+  }
+
   // --- executor failure: fail-fast, cancel rest, stamp task ID ---
   {
     reset_seen();
@@ -466,6 +551,27 @@ int main(void) {
       CHECK(ccb_graph_find(g, "dexcheck")->cache ==
         CCB_TASK_CACHE_ALWAYS_RUN);
       CHECK(ccb_graph_find(g, "config")->run == NULL);
+      // The config task declares its real inputs and both of its
+      // outputs; every task consumes the toolchain it resolves.
+      ccb_task *config = ccb_graph_find(g, "config");
+      CHECK(config != NULL);
+      if (config != NULL) {
+        CHECK(task_has_input(config, "ccb.toml",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(task_has_input(config,
+          "src/main/AndroidManifest.xml", CCB_TASK_INPUT_SOURCE));
+        CHECK(config->outputs_count == 2);
+      }
+      for (size_t i = 0; i < g->count; i++) {
+        ccb_task *t = g->tasks[i];
+        if (strcmp(t->id, "config") == 0) {
+          continue;
+        }
+        CHECK(task_has_input(t, "project-model",
+          CCB_TASK_INPUT_GENERATED));
+        CHECK(task_has_input(t, "toolchain",
+          CCB_TASK_INPUT_GENERATED));
+      }
       ccb_graph_free(g);
     }
     ccb_diag_list_free(&gdiags);
@@ -827,7 +933,8 @@ int main(void) {
       ccb_task *deps = ccb_graph_find(g, "deps");
       CHECK(deps != NULL);
       if (deps != NULL) {
-        CHECK(deps->inputs_count == 2);
+        // project-model + toolchain + one deduped AAR.
+        CHECK(deps->inputs_count == 3);
       }
       ccb_task *code = ccb_graph_find(g, "compile-code");
       CHECK(code != NULL);
@@ -844,6 +951,216 @@ int main(void) {
     }
     ccb_diag_list_free(&gdiags);
     ccb_config_free(cfg);
+  }
+
+  // --- pipeline builder declares the files each step reads ---
+  {
+    ccb_config *cfg = fake_config(0);
+    cfg->jars = ccb_xcalloc(1, sizeof(char *));
+    cfg->jars[0] = ccb_xstrdup("lib.jar");
+    cfg->jars_count = 1;
+    cfg->kotlin_plugin_jars = ccb_xcalloc(1, sizeof(char *));
+    cfg->kotlin_plugin_jars[0] = ccb_xstrdup("plugin.jar");
+    cfg->kotlin_plugin_jars_count = 1;
+    cfg->minify = 1;
+    cfg->proguard_rules = ccb_xstrdup("rules.pro");
+    ccb_diag_list gdiags;
+    ccb_diag_list_init(&gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *code = ccb_graph_find(g, "compile-code");
+      CHECK(code != NULL);
+      if (code != NULL) {
+        CHECK(task_has_input(code, "lib.jar",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(task_has_input(code, "plugin.jar",
+          CCB_TASK_INPUT_SOURCE));
+      }
+      ccb_task *dex = ccb_graph_find(g, "dex");
+      CHECK(dex != NULL);
+      if (dex != NULL) {
+        CHECK(task_has_input(dex, "lib.jar",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(task_has_input(dex, "rules.pro",
+          CCB_TASK_INPUT_SOURCE));
+      }
+      ccb_graph_free(g);
+    }
+    // Without minification the ProGuard rules are not read, so
+    // they are not declared either.
+    cfg->minify = 0;
+    g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *dex = ccb_graph_find(g, "dex");
+      CHECK(dex != NULL);
+      if (dex != NULL) {
+        CHECK(!task_has_input(dex, "rules.pro",
+          CCB_TASK_INPUT_SOURCE));
+      }
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+  }
+
+  // --- native declares NDK sources and CMakeLists.txt only when
+  // the step reads them ---
+  {
+    ccb_config *cfg = fake_config(0);
+    cfg->ndk_sources = ccb_xcalloc(1, sizeof(char *));
+    cfg->ndk_sources[0] = ccb_xstrdup("src/main/cpp");
+    cfg->ndk_sources_count = 1;
+    cfg->cmake_lists = ccb_xstrdup("CMakeLists.txt");
+    cfg->has_ndk = 0;
+    cfg->has_cmake = 0;
+    ccb_diag_list gdiags;
+    ccb_diag_list_init(&gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *native = ccb_graph_find(g, "native");
+      CHECK(native != NULL);
+      if (native != NULL) {
+        CHECK(!task_has_input(native, "src/main/cpp",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(!task_has_input(native, "CMakeLists.txt",
+          CCB_TASK_INPUT_SOURCE));
+      }
+      ccb_graph_free(g);
+    }
+    cfg->has_ndk = 1;
+    cfg->has_cmake = 1;
+    g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *native = ccb_graph_find(g, "native");
+      CHECK(native != NULL);
+      if (native != NULL) {
+        CHECK(task_has_input(native, "src/main/cpp",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(task_has_input(native, "CMakeLists.txt",
+          CCB_TASK_INPUT_SOURCE));
+      }
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+  }
+
+  // --- sign declares the keystore and the password variables ---
+  {
+    ccb_config *cfg = fake_config(0);
+    cfg->variant = ccb_xstrdup("release");
+    cfg->has_release_signing = 1;
+    cfg->release_store = ccb_xstrdup("release.keystore");
+    cfg->release_store_pw_env = ccb_xstrdup("MY_STORE_PW");
+    cfg->release_key_pw_env = ccb_xstrdup("MY_KEY_PW");
+    ccb_diag_list gdiags;
+    ccb_diag_list_init(&gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *sign = ccb_graph_find(g, "sign");
+      CHECK(sign != NULL);
+      if (sign != NULL) {
+        CHECK(task_has_input(sign, "release.keystore",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(task_has_input(sign, "MY_STORE_PW",
+          CCB_TASK_INPUT_ENV));
+        CHECK(task_has_input(sign, "MY_KEY_PW",
+          CCB_TASK_INPUT_ENV));
+      }
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+    // A configured debug keystore is declared; the default one the
+    // step generates when absent is not (documented gap).
+    cfg = fake_config(0);
+    cfg->debug_store = ccb_xstrdup("debug.keystore");
+    ccb_diag_list_init(&gdiags);
+    g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *sign = ccb_graph_find(g, "sign");
+      CHECK(sign != NULL);
+      if (sign != NULL) {
+        CHECK(task_has_input(sign, "debug.keystore",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(!task_has_input(sign, "MY_STORE_PW",
+          CCB_TASK_INPUT_ENV));
+      }
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+    cfg = fake_config(0);
+    ccb_diag_list_init(&gdiags);
+    g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    if (g != NULL) {
+      ccb_task *sign = ccb_graph_find(g, "sign");
+      CHECK(sign != NULL);
+      if (sign != NULL) {
+        CHECK(!task_has_input(sign, "debug.keystore",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(!task_has_input(sign, "release.keystore",
+          CCB_TASK_INPUT_SOURCE));
+      }
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+  }
+
+  // --- plan JSON carries input kind/required; affected emit ---
+  {
+    ccb_graph *g = diamond_graph(record_run);
+    FILE *f = tmpfile();
+    CHECK(f != NULL);
+    if (f != NULL) {
+      CHECK(ccb_graph_emit_plan_json(g, f) == CCB_OK);
+      rewind(f);
+      char buf[4096];
+      size_t n = fread(buf, 1, sizeof buf - 1, f);
+      buf[n] = '\0';
+      CHECK(ccb_test_contains(buf,
+        "\"name\":\"src-b\",\"kind\":\"source\",\"required\":true"));
+      CHECK(ccb_test_contains(buf,
+        "\"name\":\"out-b\",\"kind\":\"generated\",\"required\":true"));
+      fclose(f);
+      f = tmpfile();
+      CHECK(ccb_graph_emit_affected_human(g, "src-b", f) ==
+        CCB_OK);
+      rewind(f);
+      n = fread(buf, 1, sizeof buf - 1, f);
+      buf[n] = '\0';
+      CHECK(ccb_test_contains(buf, "tasks affected by 'src-b'"));
+      CHECK(ccb_test_contains(buf, "  b\n"));
+      CHECK(ccb_test_contains(buf, "  d\n"));
+      fclose(f);
+      f = tmpfile();
+      CHECK(ccb_graph_emit_affected_json(g, "src-b", f) ==
+        CCB_OK);
+      rewind(f);
+      n = fread(buf, 1, sizeof buf - 1, f);
+      buf[n] = '\0';
+      CHECK(ccb_test_contains(buf,
+        "\"event\":\"affected\",\"input\":\"src-b\",\"tasks\":"
+        "[\"b\",\"d\"]"));
+      fclose(f);
+      f = tmpfile();
+      CHECK(ccb_graph_emit_affected_human(g, "nope", f) ==
+        CCB_OK);
+      rewind(f);
+      n = fread(buf, 1, sizeof buf - 1, f);
+      buf[n] = '\0';
+      CHECK(ccb_test_contains(buf, "no tasks affected by 'nope'"));
+      fclose(f);
+    }
+    ccb_graph_free(g);
   }
 
   ccb_diag_list_free(&diags);

@@ -58,6 +58,7 @@ typedef struct {
   int aab;
   const char *config_path;
   const char *variant;
+  const char *graph_affected; // --affected INPUT: list tasks affected by it
   const char *command;
   const char *positional;
   const char *init_package;

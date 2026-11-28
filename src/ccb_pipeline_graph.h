@@ -17,8 +17,17 @@
 // "r-java", "classes", "dex", "native-libs", "unsigned-artifact",
 // "aligned-artifact", "signed-artifact"); project files use their
 // config paths as SOURCE inputs. Every task also declares the
-// "project-model" GENERATED input produced by "config", so a config
-// change invalidates the whole graph in affected-task terms.
+// "project-model" and "toolchain" GENERATED inputs produced by
+// "config", so a config or toolchain change invalidates the whole
+// graph in affected-task terms. File inputs the steps read are
+// declared on the task that reads them (classpath jars and plugin
+// jars on compile-code, jars and ProGuard rules on dex, the
+// keystore on sign); the release signing password variables are
+// declared on sign as ENV inputs, by name only. A task declares an
+// input only when the step reads it: the native task declares NDK
+// sources only with [ndk] and CMakeLists.txt only with [cmake].
+// The one deliberate gap is the default debug keystore, which the
+// sign step generates when absent, so it is not a declared input.
 //
 // What this does NOT do: it does not split ccb_pipe (the shared
 // context the step functions read — that is Phase 4), it does not

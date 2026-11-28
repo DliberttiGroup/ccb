@@ -21,6 +21,15 @@ const char *ccb_task_state_name(ccb_task_state s) {
   }
 }
 
+const char *ccb_task_input_kind_name(ccb_task_input_kind kind) {
+  switch (kind) {
+    case CCB_TASK_INPUT_SOURCE: return "source";
+    case CCB_TASK_INPUT_GENERATED: return "generated";
+    case CCB_TASK_INPUT_ENV: return "env";
+    default: return "unknown";
+  }
+}
+
 long ccb_graph_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -116,6 +125,11 @@ ccb_task *ccb_graph_add_task(ccb_graph *g, const char *id,
 
 void ccb_task_add_input(ccb_task *t, const char *name,
     ccb_task_input_kind kind) {
+  ccb_task_add_input_opt(t, name, kind, 1);
+}
+
+void ccb_task_add_input_opt(ccb_task *t, const char *name,
+    ccb_task_input_kind kind, int required) {
   if (t->inputs_count == t->inputs_cap) {
     size_t ncap = t->inputs_cap == 0 ? 8 : t->inputs_cap * 2;
     t->inputs = ccb_xrealloc(t->inputs, ncap * sizeof(*t->inputs));
@@ -123,6 +137,7 @@ void ccb_task_add_input(ccb_task *t, const char *name,
   }
   t->inputs[t->inputs_count].name = ccb_xstrdup(name);
   t->inputs[t->inputs_count].kind = kind;
+  t->inputs[t->inputs_count].required = required ? 1 : 0;
   t->inputs_count++;
 }
 
@@ -235,9 +250,20 @@ static int ccb_check_dup_inputs(ccb_task *t, ccb_diag_list *diags) {
       continue;
     }
     if (t->inputs[first].kind != t->inputs[j].kind) {
-      ccb_vdiag_task(diags, "CCB-E1013", t->id,
-        "declares input as both source and generated",
-        t->inputs[j].name);
+      ccb_str msg;
+      ccb_str_init(&msg);
+      ccb_str_append(&msg, "task '");
+      ccb_str_append(&msg, t->id);
+      ccb_str_append(&msg, "' declares input '");
+      ccb_str_append(&msg, t->inputs[j].name);
+      ccb_str_append(&msg, "' as both ");
+      ccb_str_append(&msg,
+        ccb_task_input_kind_name(t->inputs[first].kind));
+      ccb_str_append(&msg, " and ");
+      ccb_str_append(&msg,
+        ccb_task_input_kind_name(t->inputs[j].kind));
+      ccb_graph_diag(diags, "CCB-E1013", msg.buf);
+      ccb_str_free(&msg);
     } else {
       ccb_vdiag_task(diags, "CCB-E1013", t->id,
         "declares input more than once", t->inputs[j].name);
@@ -565,6 +591,9 @@ ccb_status ccb_graph_check_source_inputs(ccb_graph *g,
       if (t->inputs[j].kind != CCB_TASK_INPUT_SOURCE) {
         continue;
       }
+      if (!t->inputs[j].required) {
+        continue;
+      }
       if (access(t->inputs[j].name, F_OK) == 0) {
         continue;
       }
@@ -689,12 +718,22 @@ ccb_status ccb_graph_execute(ccb_graph *g, void *ctx, ccb_log *log,
     t->state = CCB_TASK_RUNNING;
     ccb_log_task_start(log, t->id);
     long t0 = ccb_graph_now_ms();
+    // The skip reason is the last cache reason logged during this
+    // task's own run; clear any reason an earlier task left behind
+    // so a skip without its own reason reports none, not a stale one.
+    if (log != NULL) {
+      log->last_cache_reason = NULL;
+    }
     size_t diag_before = diags != NULL ? diags->count : 0;
     ccb_status rc = t->run != NULL ? t->run(ctx, t) : CCB_OK;
     t->duration_ms = ccb_graph_now_ms() - t0;
     if (rc == CCB_OK) {
       t->state = CCB_TASK_DONE;
-      ccb_log_task_done(log, t->id, t->duration_ms, t->skipped);
+      if (t->skipped && log != NULL) {
+        t->skip_reason = log->last_cache_reason;
+      }
+      ccb_log_task_done(log, t->id, t->duration_ms, t->skipped,
+        t->skip_reason);
       continue;
     }
     t->state = CCB_TASK_FAILED;
@@ -720,6 +759,18 @@ ccb_status ccb_graph_execute(ccb_graph *g, void *ctx, ccb_log *log,
 }
 
 // ---------- affected tasks ----------
+
+int ccb_graph_has_input(ccb_graph *g, const char *name) {
+  for (size_t i = 0; i < g->count; i++) {
+    ccb_task *t = g->tasks[i];
+    for (size_t j = 0; j < t->inputs_count; j++) {
+      if (strcmp(t->inputs[j].name, name) == 0) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
 
 ccb_status ccb_graph_affected(ccb_graph *g, const char **changed,
     size_t n_changed, char ***out_ids, size_t *out_count) {
@@ -792,8 +843,15 @@ void ccb_graph_summary_json(ccb_graph *g, ccb_str *out) {
     ccb_json_escape(out, t->id);
     ccb_str_append(out, ",\"state\":");
     ccb_json_escape(out, ccb_task_state_name(t->state));
-    ccb_str_appendf(out, ",\"duration_ms\":%ld,\"skipped\":%s}",
+    ccb_str_appendf(out, ",\"duration_ms\":%ld,\"skipped\":%s",
       t->duration_ms, t->skipped ? "true" : "false");
+    if (t->skip_reason != NULL) {
+      ccb_str_append(out, ",\"skip_reason\":");
+      ccb_json_escape(out, t->skip_reason);
+    } else {
+      ccb_str_append(out, ",\"skip_reason\":null");
+    }
+    ccb_str_append(out, "}");
   }
   ccb_str_append(out, "]");
   free(order);
@@ -855,7 +913,13 @@ ccb_status ccb_graph_emit_plan_json(ccb_graph *g, FILE *f) {
       if (j > 0) {
         ccb_str_append(&out, ",");
       }
+      ccb_str_append(&out, "{\"name\":");
       ccb_json_escape(&out, t->inputs[j].name);
+      ccb_str_append(&out, ",\"kind\":");
+      ccb_json_escape(&out,
+        ccb_task_input_kind_name(t->inputs[j].kind));
+      ccb_str_appendf(&out, ",\"required\":%s}",
+        t->inputs[j].required ? "true" : "false");
     }
     ccb_str_append(&out, "],\"outputs\":[");
     for (size_t j = 0; j < t->outputs_count; j++) {
@@ -870,5 +934,53 @@ ccb_status ccb_graph_emit_plan_json(ccb_graph *g, FILE *f) {
   fputs(out.buf != NULL ? out.buf : "", f);
   ccb_str_free(&out);
   free(order);
+  return CCB_OK;
+}
+
+ccb_status ccb_graph_emit_affected_human(ccb_graph *g,
+    const char *changed, FILE *f) {
+  char **ids = NULL;
+  size_t nids = 0;
+  const char *one[] = { changed };
+  if (ccb_graph_affected(g, one, 1, &ids, &nids) != CCB_OK) {
+    return CCB_ERR_CONFIG;
+  }
+  if (nids == 0) {
+    fprintf(f, "no tasks affected by '%s'\n", changed);
+    ccb_free_str_array(ids, nids);
+    return CCB_OK;
+  }
+  fprintf(f, "tasks affected by '%s' (%zu, in execution order):\n",
+    changed, nids);
+  for (size_t k = 0; k < nids; k++) {
+    fprintf(f, "  %s\n", ids[k]);
+  }
+  ccb_free_str_array(ids, nids);
+  return CCB_OK;
+}
+
+ccb_status ccb_graph_emit_affected_json(ccb_graph *g,
+    const char *changed, FILE *f) {
+  char **ids = NULL;
+  size_t nids = 0;
+  const char *one[] = { changed };
+  if (ccb_graph_affected(g, one, 1, &ids, &nids) != CCB_OK) {
+    return CCB_ERR_CONFIG;
+  }
+  ccb_str out;
+  ccb_str_init(&out);
+  ccb_str_append(&out, "{\"event\":\"affected\",\"input\":");
+  ccb_json_escape(&out, changed);
+  ccb_str_append(&out, ",\"tasks\":[");
+  for (size_t k = 0; k < nids; k++) {
+    if (k > 0) {
+      ccb_str_append(&out, ",");
+    }
+    ccb_json_escape(&out, ids[k]);
+  }
+  ccb_str_append(&out, "]}\n");
+  fputs(out.buf != NULL ? out.buf : "", f);
+  ccb_str_free(&out);
+  ccb_free_str_array(ids, nids);
   return CCB_OK;
 }

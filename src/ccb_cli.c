@@ -44,8 +44,10 @@ const char *CCB_USAGE =
   "  build [--preview-gate] [--no-preview-gate] [--aab]\n"
   "        [--kotlinc-daemon] [--no-kotlinc-daemon]\n"
   "                                            build the APK (or .aab with --aab)\n"
-  "  graph [--aab]                             print the build plan (task graph\n"
-  "                                            in execution order) without building\n"
+  "  graph [--aab] [--affected INPUT]          print the build plan (task graph\n"
+  "                                            in execution order) without building;\n"
+  "                                            with --affected, list the tasks a\n"
+  "                                            changed input invalidates instead\n"
   "  clean                                     remove the build directory\n"
   "                                            (and stop the kotlinc daemon)\n"
   "  daemon stop                               stop the kotlinc daemon\n"
@@ -360,6 +362,14 @@ static int ccb_parse_args(int argc, char **argv, ccb_args *a) {
         a->print_env = 1;
       } else if (strcmp(flag, "--aab") == 0) {
         a->aab = 1;
+      } else if (strcmp(flag, "--affected") == 0) {
+        if (value == NULL) {
+          if (i + 1 >= argc) {
+            return -1;
+          }
+          value = argv[++i];
+        }
+        a->graph_affected = value;
       } else if (strcmp(flag, "--config") == 0) {
         if (value == NULL) {
           if (i + 1 >= argc) {

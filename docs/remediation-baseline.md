@@ -92,7 +92,7 @@ must not re-litigate them as if they were still open:
   validation for duplicate task IDs (`CCB-E1012`,
   `ccb_graph.c:94`), unknown dependencies (`CCB-E1013`,
   `ccb_graph.c:191,225,238`), cycles (`CCB-E1014`,
-  `ccb_graph.c:296-321`), and duplicate outputs (`CCB-E1015`,
+  `ccb_graph.c:296-321`), and duplicate outputs (`CCB-E1013`,
   `ccb_graph.c:201-222`, `366`). `ccb_pipeline_build`
   (`src/ccb_pipeline.c:603-652`) builds the graph and executes it;
   the stage order is exactly the legacy order

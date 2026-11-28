@@ -57,11 +57,17 @@ typedef enum {
 } ccb_task_cache;
 
 // Input kind: SOURCE is a project file, GENERATED is produced by
-// another task in the graph.
+// another task in the graph, ENV is an environment variable read by
+// name (the value is never recorded, only the name, so a signing
+// password variable is a declared input without leaking the secret
+// into the plan, the summary, or affected-task matching).
 typedef enum {
   CCB_TASK_INPUT_SOURCE = 0,
-  CCB_TASK_INPUT_GENERATED
+  CCB_TASK_INPUT_GENERATED,
+  CCB_TASK_INPUT_ENV
 } ccb_task_input_kind;
+
+const char *ccb_task_input_kind_name(ccb_task_input_kind kind);
 
 typedef struct ccb_task ccb_task;
 
@@ -75,6 +81,11 @@ typedef ccb_status (*ccb_task_run_fn)(void *ctx, ccb_task *task);
 typedef struct {
   char *name;
   ccb_task_input_kind kind;
+  // Required inputs must exist for ccb_graph_check_source_inputs;
+  // an optional input may be absent (the task tolerates it, e.g. a
+  // debug keystore the step generates when missing). Required is
+  // the default: ccb_task_add_input declares a required input.
+  int required;
 } ccb_task_input;
 
 struct ccb_task {
@@ -94,6 +105,11 @@ struct ccb_task {
   ccb_task_run_fn run;
   long duration_ms; // set by the executor; -1 when never run
   int skipped; // set by the run function on a cache-hit skip
+  // Why the task skipped, when it did. Borrowed: either a string
+  // literal or the log's last cache reason, both outliving the
+  // task; never freed. NULL when the task ran or when its skip
+  // logged no reason. Set by the executor, not the run function.
+  const char *skip_reason;
 };
 
 typedef struct {
@@ -113,26 +129,37 @@ ccb_task *ccb_graph_add_task(ccb_graph *g, const char *id,
   ccb_diag_list *diags);
 void ccb_task_add_input(ccb_task *t, const char *name,
   ccb_task_input_kind kind);
+// Declare an input with an explicit required flag. A required
+// SOURCE input must exist for ccb_graph_check_source_inputs; an
+// optional one may be absent. ccb_task_add_input is this with
+// required = 1.
+void ccb_task_add_input_opt(ccb_task *t, const char *name,
+  ccb_task_input_kind kind, int required);
 void ccb_task_add_output(ccb_task *t, const char *name);
 void ccb_task_add_dep(ccb_task *t, const char *dep_id);
 
 // Validate the graph: duplicate IDs, duplicate or conflicting
 // declarations (a dependency, input, or output listed twice; one
-// input as both SOURCE and GENERATED; a SOURCE input that is also
-// the task's own output), unknown dependencies, duplicate outputs,
-// GENERATED inputs with no producer or whose producer the consumer
-// does not depend on (directly or transitively), and cycles.
+// input declared with conflicting kinds; a SOURCE input that is
+// also the task's own output), unknown dependencies, duplicate
+// outputs, GENERATED inputs with no producer or whose producer the
+// consumer does not depend on (directly or transitively), and
+// cycles.
 // Reports every problem found (except the producer-dependency and
 // cycle checks, which need resolvable dependencies and are skipped
 // when any earlier check fails). Returns CCB_OK or CCB_ERR_CONFIG;
 // diags filled on failure.
 ccb_status ccb_graph_validate(ccb_graph *g, ccb_diag_list *diags);
 
-// Check SOURCE inputs against the filesystem. A missing source input
-// is CCB-E1015 naming the task and the input. Callers that build
-// graphs over generated intermediates run this only when the sources
-// are expected to exist (the pipeline does not: its steps diagnose
-// missing files themselves).
+// Check required SOURCE inputs against the filesystem. A missing
+// required source input is CCB-E1015 naming the task and the input.
+// Optional SOURCE inputs are skipped, as are GENERATED and ENV
+// inputs. Callers that build graphs over generated intermediates
+// run this only when the sources are expected to exist (the
+// pipeline does not: config load already rejects missing declared
+// paths, and its steps diagnose the rest with their own codes).
+ccb_status ccb_graph_check_source_inputs(ccb_graph *g,
+  ccb_diag_list *diags);
 ccb_status ccb_graph_check_source_inputs(ccb_graph *g,
   ccb_diag_list *diags);
 
@@ -165,18 +192,37 @@ ccb_status ccb_graph_execute(ccb_graph *g, void *ctx, ccb_log *log,
 ccb_status ccb_graph_affected(ccb_graph *g, const char **changed,
   size_t n_changed, char ***out_ids, size_t *out_count);
 
+// True when any task declares an input with this exact name.
+// (The CLI uses it to resolve a relative --affected path against
+// the project root before matching.)
+int ccb_graph_has_input(ccb_graph *g, const char *name);
+
 // Append a machine-readable build summary: a JSON array of one
-// object per task ({id, state, duration_ms, skipped}), in plan
-// order. Tasks never run have duration_ms -1.
+// object per task ({id, state, duration_ms, skipped, skip_reason}),
+// in plan order. skip_reason is the reason string when the task
+// skipped, else null. Tasks never run have duration_ms -1.
 void ccb_graph_summary_json(ccb_graph *g, ccb_str *out);
 
 // Inspect the plan. Human: one line per task in execution order
 // ("  <id> (after: <dep>, <dep>)" or "  <id>" when it has no deps).
-// JSON: one {"event":"build_plan","tasks":[...]} line. Both print to
-// the given stream; on a cycle they print nothing and return
-// CCB_ERR_CONFIG.
+// JSON: one {"event":"build_plan","tasks":[...]} line, each task
+// with its type, deps, inputs (objects with name, kind, and
+// required), and outputs. Both print to the given stream; on a
+// cycle they print nothing and return CCB_ERR_CONFIG.
 ccb_status ccb_graph_emit_plan_human(ccb_graph *g, FILE *f);
 ccb_status ccb_graph_emit_plan_json(ccb_graph *g, FILE *f);
+
+// Inspect affected tasks. Human: one line per affected task in
+// execution order, or a "no tasks affected" line. JSON: one
+// {"event":"affected","input":...,"tasks":[...]} line. The changed
+// input is matched by declared input name (a file path, a logical
+// name such as "dex", or an environment variable name). Both print
+// to the given stream; on a cycle they print nothing and return
+// CCB_ERR_CONFIG.
+ccb_status ccb_graph_emit_affected_human(ccb_graph *g,
+  const char *changed, FILE *f);
+ccb_status ccb_graph_emit_affected_json(ccb_graph *g,
+  const char *changed, FILE *f);
 
 // Milliseconds since an arbitrary point (CLOCK_MONOTONIC). Exposed
 // for callers that time work done outside the executor (e.g. the

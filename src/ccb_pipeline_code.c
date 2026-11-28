@@ -209,6 +209,7 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     ccb_log_info(&p->log, "no sources, skipping compile-code");
     p->code_will_run = 0;
     p->steps_skipped++;
+    ccb_log_cache(&p->log, "compile-code", 1, "no sources to compile");
     goto code_done;
   }
   // Classpath: android.jar + jars + AAR classes.jars.

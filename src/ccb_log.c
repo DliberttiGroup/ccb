@@ -10,6 +10,7 @@ void ccb_log_init(ccb_log *log, int json, int verbose) {
   log->json = json;
   log->verbose = verbose;
   log->explain = 0;
+  log->last_cache_reason = NULL;
 }
 
 void ccb_log_phase_start(ccb_log *log, const char *phase) {
@@ -72,6 +73,10 @@ void ccb_log_info(ccb_log *log, const char *fmt, ...) {
 }
 
 void ccb_log_cache(ccb_log *log, const char *stage, int hit, const char *reason) {
+  // Record the reason for the executor's skip_reason, even in
+  // explain mode (where the event itself is suppressed): the
+  // reason is task-result data, not chatter.
+  log->last_cache_reason = reason;
   // In explain mode the stdout step table is the product; cache chatter
   // on stderr would only be noise.
   if (log->explain) {
@@ -107,7 +112,7 @@ void ccb_log_task_start(ccb_log *log, const char *task_id) {
 }
 
 void ccb_log_task_done(ccb_log *log, const char *task_id,
-    long duration_ms, int skipped) {
+    long duration_ms, int skipped, const char *skip_reason) {
   if (!log->json) {
     return;
   }
@@ -115,8 +120,13 @@ void ccb_log_task_done(ccb_log *log, const char *task_id,
   ccb_str_init(&out);
   ccb_str_append(&out, "{\"event\":\"task\",\"task\":");
   ccb_json_escape(&out, task_id);
-  ccb_str_appendf(&out, ",\"status\":\"finished\",\"duration_ms\":%ld,\"result\":\"%s\"}\n",
+  ccb_str_appendf(&out, ",\"status\":\"finished\",\"duration_ms\":%ld,\"result\":\"%s\"",
     duration_ms, skipped ? "skipped" : "done");
+  if (skip_reason != NULL) {
+    ccb_str_append(&out, ",\"reason\":");
+    ccb_json_escape(&out, skip_reason);
+  }
+  ccb_str_append(&out, "}\n");
   fputs(out.buf != NULL ? out.buf : "", stdout);
   ccb_str_free(&out);
 }

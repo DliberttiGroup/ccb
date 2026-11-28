@@ -503,6 +503,7 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
       p->dex_will_run = 0;
       p->steps_skipped++;
     }
+    ccb_log_cache(&p->log, "dex", 1, "no classes or jars");
     ccb_free_str_array(class_files, nclass);
     return CCB_OK;
   }

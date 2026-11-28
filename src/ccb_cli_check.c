@@ -588,8 +588,10 @@ int ccb_cmd_build(ccb_args *a) {
 // order with each task's dependencies, inputs, and outputs — without
 // building anything. Human table by default, one build_plan JSON
 // object with --json. --aab shows the AAB plan (package-aab, no
-// align). The config is loaded read-only; no SDK resolution happens,
-// so this works without a toolchain installed.
+// align). With --affected INPUT, list the tasks that input
+// invalidates instead (human list, or one affected JSON object
+// with --json). The config is loaded read-only; no SDK resolution
+// happens, so this works without a toolchain installed.
 int ccb_cmd_graph(ccb_args *a) {
   ccb_diag_list diags;
   ccb_diag_list_init(&diags);
@@ -607,7 +609,28 @@ int ccb_cmd_graph(ccb_args *a) {
     return 2;
   }
   ccb_status rc;
-  if (a->json) {
+  if (a->graph_affected != NULL) {
+    // Declared file inputs are project-root-resolved absolute
+    // paths; a relative --affected path is resolved against the
+    // project root when it names a declared input that way.
+    // Logical names ("dex", "project-model") and env var names
+    // pass through unchanged.
+    const char *changed = a->graph_affected;
+    char *resolved = NULL;
+    if (!ccb_graph_has_input(g, changed) && changed[0] != '/' &&
+        cfg->project_root != NULL) {
+      resolved = ccb_path_join(cfg->project_root, changed);
+      if (ccb_graph_has_input(g, resolved)) {
+        changed = resolved;
+      }
+    }
+    if (a->json) {
+      rc = ccb_graph_emit_affected_json(g, changed, stdout);
+    } else {
+      rc = ccb_graph_emit_affected_human(g, changed, stdout);
+    }
+    free(resolved);
+  } else if (a->json) {
     rc = ccb_graph_emit_plan_json(g, stdout);
   } else {
     rc = ccb_graph_emit_plan_human(g, stdout);
