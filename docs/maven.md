@@ -53,7 +53,8 @@ maven_central = true
   artifact never resolves, even transitively. Excluding a direct
   dependency is a config error at load with `CCB-E1005` naming both the
   exclusion and the dependency; excluding some other version of a direct
-  dependency is allowed.
+  dependency is allowed. Per-dependency `<exclusions>` in POMs are
+  honored too (see [resolution](maven-resolve.md#exclusions)).
 
 ## Compiler plugins
 
@@ -155,8 +156,19 @@ Artifact type comes from the artifact's POM `<packaging>`:
 *ccb-maven-limits*
 
 - No signature (PGP) verification: checksums only.
-- No per-dependency `<exclusions>` in POMs: exclusions are only the
-  project-level `[deps] maven_exclude`.
 - Profile activation is by id only: `<jdk>`, `<os>`, `<property>`,
-  `<file>` activation is not evaluated.
-- Parent-declared `<exclusions>` are ignored.
+  `<file>` activation is not evaluated. A profile using one of those
+  forms stays inactive unless its id is listed in `maven_profiles`;
+  with `--verbose`, resolution notes each such profile by id and
+  form. A profile id in `maven_profiles` that matches no resolved
+  POM is likewise noted verbosely (usually a typo).
+- `<scope>import</scope>` dependencyManagement entries (BOM imports)
+  are not applied: the imported BOM is never fetched and its managed
+  versions never apply. A version-less dependency whose version lives
+  only in the imported BOM fails with `CCB-E3019` naming the cause;
+  give the dependency an explicit version or a
+  dependencyManagement entry instead.
+- `<classifier>` on a dependency is ignored: the base artifact is
+  fetched (noted with `--verbose`). A `<type>` outside `jar` / `aar` /
+  `pom` is likewise ignored; packaging comes from the artifact POM
+  (noted with `--verbose`).

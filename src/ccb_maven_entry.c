@@ -86,6 +86,26 @@ static void mv_drop_jvm_variants(ccb_maven_result *out) {
   out->entries_count = w;
 }
 
+static void mv_note_unmatched_profiles(mv_resolve *r,
+    const ccb_config *cfg) {
+  if (!r->verbose) {
+    return;
+  }
+  for (size_t i = 0; i < cfg->maven_profiles_count; i++) {
+    int matched = 0;
+    for (size_t j = 0; j < r->matched_count; j++) {
+      if (strcmp(cfg->maven_profiles[i], r->matched_profiles[j]) == 0) {
+        matched = 1;
+        break;
+      }
+    }
+    if (!matched) {
+      printf("maven: profile '%s' in [deps] maven_profiles matched no resolved POM\n",
+        cfg->maven_profiles[i]);
+    }
+  }
+}
+
 ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
     int readonly, ccb_maven_result *out, ccb_diag_list *diags) {
   memset(out, 0, sizeof(*out));
@@ -137,6 +157,9 @@ ccb_status ccb_maven_resolve(const ccb_config *cfg, int prefetch, int verbose,
       goto fail;
     }
   }
+  // A listed profile id that matched no resolved POM is usually a
+  // typo: say so verbosely instead of silently activating nothing.
+  mv_note_unmatched_profiles(&r, cfg);
   // JVM-platform variants drop out when the Android variant of the
   // same library is present (see mv_drop_jvm_variants).
   mv_drop_jvm_variants(out);

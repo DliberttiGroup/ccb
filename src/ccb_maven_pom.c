@@ -25,8 +25,9 @@
 // One <profile>: id, <activeByDefault> activation, and the
 // properties, dependencies, and dependencyManagement it contributes
 // when active. Other activation forms (jdk, os, property, file)
-// are parsed nowhere: a profile using them is inactive unless its
-// id is listed in [deps] maven_profiles.
+// are parsed into mv_profile.unsupported_activation, not evaluated:
+// a profile using them is inactive unless its id is listed in
+// [deps] maven_profiles (diagnosed verbosely at resolve time).
 
 static int mv_path_is(mv_parser *x, const char *n0, const char *n1,
     const char *n2, const char *n3, const char *n4) {
@@ -184,8 +185,19 @@ char *mv_trim(char *s) {
   return s;
 }
 
-static void mv_text(mv_parser *x, const char *text, size_t len) {
-  char *decoded = mv_decode_entities(x, text, len);
+static int mv_tail_is(mv_parser *x, const char *a, const char *b,
+    const char *c) {
+  if (x->depth < 3) {
+    return 0;
+  }
+  return strcmp(x->stack[x->depth - 3], a) == 0 &&
+    strcmp(x->stack[x->depth - 2], b) == 0 &&
+    strcmp(x->stack[x->depth - 1], c) == 0;
+}
+
+static void mv_text(mv_parser *x, const char *text, size_t len, int decode) {
+  char *decoded = decode != 0 ? mv_decode_entities(x, text, len) :
+    ccb_arena_strndup(x->a, text, len);
   char *val = mv_trim(decoded);
   if (val[0] == '\0') {
     return;
@@ -227,6 +239,23 @@ static void mv_text(mv_parser *x, const char *text, size_t len) {
     if (x->cur_profile != NULL) {
       x->cur_profile->active_default = strcmp(val, "true") == 0;
     }
+  } else if (x->depth >= 5 && strcmp(x->stack[0], "project") == 0 &&
+      strcmp(x->stack[1], "profiles") == 0 &&
+      strcmp(x->stack[2], "profile") == 0 &&
+      strcmp(x->stack[3], "activation") == 0 &&
+      x->cur_profile != NULL &&
+      x->cur_profile->unsupported_activation == NULL) {
+    // Text under <activation><jdk> / <os> / <property> / <file>
+    // (the form name is stack[4] even for nested text like
+    // <os><family>): record the first unsupported form. These
+    // profiles stay inactive unless listed by id; the resolver
+    // diagnoses them verbosely.
+    const char *form = x->stack[4];
+    if (strcmp(form, "jdk") == 0 || strcmp(form, "os") == 0 ||
+        strcmp(form, "property") == 0 || strcmp(form, "file") == 0) {
+      x->cur_profile->unsupported_activation =
+        ccb_arena_strdup(x->a, form);
+    }
   } else if (x->depth == 5 && strcmp(x->stack[0], "project") == 0 &&
       strcmp(x->stack[1], "profiles") == 0 &&
       strcmp(x->stack[2], "profile") == 0 &&
@@ -251,12 +280,22 @@ static void mv_text(mv_parser *x, const char *text, size_t len) {
         prof->props_count++;
       }
     }
+  } else if (x->cur != NULL && x->in_excl &&
+      (mv_tail_is(x, "exclusions", "exclusion", "groupId") ||
+        mv_tail_is(x, "exclusions", "exclusion", "artifactId"))) {
+    // Text inside a dependency's <exclusions><exclusion>: the
+    // groupId/artifactId of one excluded artifact.
+    if (strcmp(x->stack[x->depth - 1], "groupId") == 0) {
+      mv_set_field(&x->cur_excl.group, val);
+    } else {
+      mv_set_field(&x->cur_excl.artifact, val);
+    }
   } else if (x->cur != NULL) {
     // Text arrives with the field element still on the stack, so a
     // dependency field sits exactly one level below its container:
     // depth 4 (plain), 5 (managed), 6 (profile), or 7 (profile
-    // managed). Anything deeper (e.g. text inside <exclusions>) is
-    // not a dependency field and is ignored.
+    // managed). Anything deeper (e.g. text inside <exclusions>)
+    // is not a dependency field and is handled above.
     int field_depth = x->cur_where == 0 ? 4 : x->cur_where == 1 ? 5 :
       x->cur_where == 2 ? 6 : 7;
     if (x->depth == field_depth) {
@@ -271,6 +310,10 @@ static void mv_text(mv_parser *x, const char *text, size_t len) {
         mv_set_field(&x->cur->scope, val);
       } else if (strcmp(field, "optional") == 0) {
         mv_set_field(&x->cur->optional, val);
+      } else if (strcmp(field, "classifier") == 0) {
+        mv_set_field(&x->cur->classifier, val);
+      } else if (strcmp(field, "type") == 0) {
+        mv_set_field(&x->cur->type, val);
       }
     }
   }
@@ -349,6 +392,12 @@ static void mv_open(mv_parser *x, const char *name) {
     memset(x->cur, 0, sizeof(*x->cur));
     x->cur_where = 3;
   }
+  if (x->cur != NULL && strcmp(name, "exclusion") == 0 &&
+      x->depth >= 2 &&
+      strcmp(x->stack[x->depth - 2], "exclusions") == 0) {
+    memset(&x->cur_excl, 0, sizeof(x->cur_excl));
+    x->in_excl = 1;
+  }
 }
 
 // True when the element now closing is a <dependency> in one of the
@@ -390,6 +439,15 @@ static void mv_close(mv_parser *x, const char *name) {
     x->failed = 1;
     return;
   }
+  if (x->in_excl && strcmp(name, "exclusion") == 0) {
+    if (x->cur != NULL && x->cur_excl.group != NULL &&
+        x->cur_excl.artifact != NULL) {
+      mv_dep *dep = x->cur;
+      MV_GROW(x->a, dep->excls, dep->excl_count, dep->excl_cap, mv_excl);
+      dep->excls[dep->excl_count++] = x->cur_excl;
+    }
+    x->in_excl = 0;
+  }
   if (x->cur != NULL && mv_is_dep_close(x)) {
     mv_pom *pom = x->pom;
     if (x->cur_where == 0) {
@@ -408,6 +466,7 @@ static void mv_close(mv_parser *x, const char *name) {
       prof->mgmt[prof->mgmt_count++] = *x->cur;
     }
     x->cur = NULL;
+    x->in_excl = 0;
   }
   if (x->cur_profile != NULL &&
       mv_path_is(x, "project", "profiles", "profile", NULL, NULL)) {
@@ -523,12 +582,35 @@ static int mv_parse_open_tag(mv_parser *x, const char *p) {
   return 0;
 }
 
+// Find the end of a "<![CDATA[ ... ]]>" section starting at q
+// (past "<![CDATA["). Returns the pointer to "]]>", or NULL when
+// unterminated.
+static const char *mv_skip_cdata(const char *end, const char *q) {
+  for (; q + 2 < end; q++) {
+    if (memcmp(q, "]]>", 3) == 0) {
+      return q;
+    }
+  }
+  return NULL;
+}
+
 // Parse one markup item starting at x->p ('<'): a comment, a
-// processing instruction, a declaration, a close tag, or an open tag.
-// Advances x->p past the item. Returns 0 on success, -1 on
-// malformed XML.
+// CDATA section, a processing instruction, a declaration, a close
+// tag, or an open tag. Advances x->p past the item. Returns 0 on
+// success, -1 on malformed XML.
 static int mv_parse_markup(mv_parser *x) {
   const char *p = x->p + 1;
+  if (p + 7 < x->end && memcmp(p, "![CDATA[", 8) == 0) {
+    // CDATA content is literal text for the current element: no
+    // entity decoding, unlike regular text.
+    const char *e = mv_skip_cdata(x->end, p + 8);
+    if (e == NULL) {
+      return -1;
+    }
+    mv_text(x, p + 8, (size_t)(e - (p + 8)), 0);
+    x->p = e + 3;
+    return 0;
+  }
   if (p + 2 < x->end && memcmp(p, "!--", 3) == 0) {
     const char *e = mv_skip_comment(x->end, p + 3);
     if (e == NULL) {
@@ -582,7 +664,7 @@ int mv_parse_pom(ccb_arena *a, const char *text, size_t len, mv_pom *pom) {
     const char *lt = memchr(x.p, '<', (size_t)(x.end - x.p));
     const char *text_end = lt != NULL ? lt : x.end;
     if (text_end > x.p) {
-      mv_text(&x, x.p, (size_t)(text_end - x.p));
+      mv_text(&x, x.p, (size_t)(text_end - x.p), 1);
     }
     x.p = text_end;
   }
@@ -606,9 +688,10 @@ static const char *mv_prop_get(mv_pom *pom, const char *key) {
 // Expand ${...} references: same-POM properties first, then
 // project.groupId / project.artifactId / project.version (the
 // effective coordinates, so a child POM's ${project.version} tracks
-// its parent-inherited version). Unknown names fail (*bad = 1).
-// Nested references resolve over up to 8 passes; anything left after
-// that is a cycle and fails too.
+// its parent-inherited version), then environment variables as
+// ${env:VAR}. Unknown names fail (*bad = 1). Nested references
+// resolve over up to 8 passes; anything left after that is a cycle
+// and fails too.
 char *mv_subst(ccb_arena *a, mv_pom *pom, const char *eff_group,
     const char *eff_artifact, const char *eff_version, const char *value,
     int *bad) {
@@ -649,6 +732,9 @@ char *mv_subst(ccb_arena *a, mv_pom *pom, const char *eff_group,
       }
       if (rep == NULL && strcmp(name, "project.version") == 0) {
         rep = eff_version;
+      }
+      if (rep == NULL && memcmp(name, "env:", 4) == 0) {
+        rep = getenv(name + 4);
       }
       if (rep == NULL) {
         ccb_str_free(&s);

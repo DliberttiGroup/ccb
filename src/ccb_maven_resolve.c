@@ -150,10 +150,14 @@ mv_excl *mv_exclusions(ccb_arena *a, const ccb_config *cfg,
 static int mv_is_excluded(mv_excl *excls, size_t count, const char *group,
     const char *artifact, const char *version) {
   for (size_t i = 0; i < count; i++) {
-    if (strcmp(excls[i].group, group) == 0 &&
-        strcmp(excls[i].artifact, artifact) == 0 &&
-        (excls[i].version == NULL ||
-          strcmp(excls[i].version, version) == 0)) {
+    if (strcmp(excls[i].group, group) != 0 ||
+        strcmp(excls[i].artifact, artifact) != 0) {
+      continue;
+    }
+    if (excls[i].version == NULL) {
+      return 1;
+    }
+    if (version != NULL && strcmp(excls[i].version, version) == 0) {
       return 1;
     }
   }
@@ -361,10 +365,12 @@ int mv_lock_enforce(ccb_arena *a, const char *lock_path,
 // ancestor winning among parents. The merged set is what ${...}
 // expansion sees, so a managed version like ${lib.version} resolves
 // from whichever ancestor defined the property. Parent-declared
-// exclusions are not inherited (CCB has no per-dependency
-// exclusions); group/version inheritance from the <parent> block
-// keeps working as before. A parent version may itself be a range
-// or -SNAPSHOT spec and resolves the same way a dependency does.
+// exclusions are inherited: the parent's dependency and
+// dependencyManagement entries merge into the child with their
+// <exclusions> attached. Group/version inheritance from the
+// <parent> block keeps working as before. A parent version may
+// itself be a range or -SNAPSHOT spec and resolves the same way a
+// dependency does.
 //
 // Chain rules: at most MV_PARENT_MAX_DEPTH ancestors are followed;
 // a longer chain, or a cycle (a parent coordinate repeating any
@@ -525,21 +531,28 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, mv_repo *repos,
       ccb_str_free(&m);
       return -1;
     }
-    // Substitute the parent coordinates against the merged-so-far
-    // set (child properties first). The project.* fallbacks use the
-    // child's raw coordinates: the parent's own group/version cannot
-    // be known before it is fetched.
-    const char *raw_group = pom->group != NULL ? pom->group : pom->parent_group;
-    const char *raw_version = pom->version != NULL ? pom->version :
-      pom->parent_version;
+    // Substitute the parent coordinates against the POM that
+    // declares them (cur), not the merged child set: a parent's
+    // own properties decide its parent reference, so a child's
+    // same-named property cannot redirect the grandparent lookup.
+    // The project.* fallbacks use cur's raw coordinates: the
+    // parent's own group/version cannot be known before it is
+    // fetched, and for a grandparent reference cur's effective
+    // group/version is the parent's own.
+    const char *raw_group = cur->group != NULL ? cur->group :
+      cur->parent_group;
+    const char *raw_artifact = cur->artifact != NULL ? cur->artifact :
+      cur->parent_artifact;
+    const char *raw_version = cur->version != NULL ? cur->version :
+      cur->parent_version;
     int bad_g = 0;
     int bad_a = 0;
     int bad_v = 0;
-    char *pg = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+    char *pg = mv_subst(a, cur, raw_group, raw_artifact, raw_version,
       cur->parent_group, &bad_g);
-    char *pa = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+    char *pa = mv_subst(a, cur, raw_group, raw_artifact, raw_version,
       cur->parent_artifact, &bad_a);
-    char *pv = mv_subst(a, pom, raw_group, pom->artifact, raw_version,
+    char *pv = mv_subst(a, cur, raw_group, raw_artifact, raw_version,
       cur->parent_version, &bad_v);
     if (bad_g || bad_a || bad_v || pg == NULL || pa == NULL || pv == NULL ||
         !mv_part_ok(pg, strlen(pg)) || !mv_part_ok(pa, strlen(pa)) ||
@@ -604,6 +617,122 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, mv_repo *repos,
   return 0;
 }
 
+// Record a profile id that matched a profile in some resolved
+// POM, for the unmatched-id note after the walk.
+static void mv_note_profile_match(mv_resolve *r, const char *id) {
+  for (size_t i = 0; i < r->matched_count; i++) {
+    if (strcmp(r->matched_profiles[i], id) == 0) {
+      return;
+    }
+  }
+  MV_GROW(r->arena, r->matched_profiles, r->matched_count,
+    r->matched_cap, char *);
+  r->matched_profiles[r->matched_count++] =
+    ccb_arena_strdup(r->arena, id);
+}
+
+// Verbose note for a profile that stays inactive because its only
+// activation is a form CCB does not evaluate (jdk, os, property,
+// file). The profile still activates when its id is listed in
+// [deps] maven_profiles; this note is what makes that visible.
+static void mv_note_inactive_profile(mv_resolve *r, const char *coord,
+    mv_profile *prof) {
+  if (r->verbose && prof->unsupported_activation != NULL) {
+    printf("maven: %s: profile '%s' uses <activation><%s>, which CCB does not evaluate; list its id in [deps] maven_profiles to activate it\n",
+      coord, prof->id != NULL ? prof->id : "(no id)",
+      prof->unsupported_activation);
+  }
+}
+
+// Find this POM's dependencyManagement entry for dg:da, comparing
+// substituted group/artifact. Returns the raw entry, or NULL. The
+// first matching entry wins, like the version lookup.
+static mv_dep *mv_mgmt_find(ccb_arena *a, mv_pom *pom,
+    const char *eff_group, const char *eff_artifact, const char *eff_version,
+    const char *dg, const char *da) {
+  for (size_t m = 0; m < pom->mgmt_count; m++) {
+    mv_dep *mg = &pom->mgmt[m];
+    int mbad = 0;
+    char *mg_g = mv_subst(a, pom, eff_group, eff_artifact, eff_version,
+      mg->group, &mbad);
+    char *mg_a = mv_subst(a, pom, eff_group, eff_artifact, eff_version,
+      mg->artifact, &mbad);
+    if (mbad || mg_g == NULL || mg_a == NULL) {
+      continue;
+    }
+    if (strcmp(mg_g, dg) == 0 && strcmp(mg_a, da) == 0) {
+      return mg;
+    }
+  }
+  return NULL;
+}
+
+// True when the POM's (merged) dependencyManagement imports a BOM:
+// an entry with <scope>import</scope>. CCB does not apply BOM
+// imports, so a version-less dependency whose version lives only
+// in the imported BOM fails with a hint (see mv_queue_dep).
+static int mv_pom_has_bom_import(mv_pom *pom) {
+  for (size_t i = 0; i < pom->mgmt_count; i++) {
+    if (pom->mgmt[i].scope != NULL &&
+        strcmp(pom->mgmt[i].scope, "import") == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Verbose note for each BOM import in the merged management set:
+// the imported BOM is never fetched and its managed versions never
+// apply, so a build that needs them fails loudly at the
+// version-less dependency instead of resolving something wrong.
+static void mv_note_bom_imports(mv_resolve *r, mv_pom *pom,
+    const char *coord) {
+  if (!r->verbose) {
+    return;
+  }
+  for (size_t i = 0; i < pom->mgmt_count; i++) {
+    mv_dep *mg = &pom->mgmt[i];
+    if (mg->scope == NULL || strcmp(mg->scope, "import") != 0) {
+      continue;
+    }
+    printf("maven: %s: dependencyManagement imports BOM %s:%s:%s with <scope>import</scope>, which CCB does not support; managed versions from the BOM are ignored\n",
+      coord, mg->group != NULL ? mg->group : "?",
+      mg->artifact != NULL ? mg->artifact : "?",
+      mg->version != NULL ? mg->version : "?");
+  }
+}
+
+// Verbose notes for dependency fields CCB parses but does not
+// honor: a <classifier> (the base artifact is fetched instead)
+// and a <type> outside jar/aar/pom (packaging comes from the
+// artifact POM instead). Both fire only for the winning path.
+static void mv_note_classifier_type(mv_resolve *r, const char *coord,
+    mv_dep *dep, mv_pom *pom, const char *eff_group,
+    const char *eff_artifact, const char *eff_version, const char *dg,
+    const char *da) {
+  if (!r->verbose) {
+    return;
+  }
+  int bad = 0;
+  if (dep->classifier != NULL && dep->classifier[0] != '\0') {
+    char *cls = mv_subst(r->arena, pom, eff_group, eff_artifact,
+      eff_version, dep->classifier, &bad);
+    if (!bad && cls != NULL && cls[0] != '\0') {
+      printf("maven: %s: dependency %s:%s requests classifier '%s', which CCB ignores; the base artifact is used\n",
+        coord, dg, da, cls);
+    }
+  }
+  if (dep->type != NULL && dep->type[0] != '\0') {
+    char *type = mv_subst(r->arena, pom, eff_group, eff_artifact,
+      eff_version, dep->type, &bad);
+    if (!bad && type != NULL && strcmp(type, "jar") != 0 &&
+        strcmp(type, "aar") != 0 && strcmp(type, "pom") != 0) {
+      printf("maven: %s: dependency %s:%s requests type '%s', which CCB ignores; packaging comes from the artifact POM\n",
+        coord, dg, da, type);
+    }
+  }
+}
+
 // Apply the POM's active profiles: a profile is active when its id
 // is listed in [deps] maven_profiles, or — when that list is empty —
 // when it declares <activeByDefault>. Profiles apply after the
@@ -613,8 +742,10 @@ static int mv_merge_parents(ccb_arena *a, const char *cache, mv_repo *repos,
 // keeps the POM's own entry first). Inactive profiles contribute
 // nothing: a POM declaring a dependency only inside an inactive
 // profile behaves as if it had no such dependency.
-static void mv_apply_profiles(ccb_arena *a, mv_pom *pom,
-    const ccb_config *cfg) {
+static void mv_apply_profiles(mv_resolve *r, mv_pom *pom,
+    const char *coord) {
+  ccb_arena *a = r->arena;
+  const ccb_config *cfg = r->cfg;
   int explicit = cfg->maven_profiles_count > 0;
   for (size_t i = 0; i < pom->profiles_count; i++) {
     mv_profile *prof = &pom->profiles[i];
@@ -624,6 +755,7 @@ static void mv_apply_profiles(ccb_arena *a, mv_pom *pom,
         for (size_t j = 0; j < cfg->maven_profiles_count; j++) {
           if (strcmp(cfg->maven_profiles[j], prof->id) == 0) {
             active = 1;
+            mv_note_profile_match(r, prof->id);
             break;
           }
         }
@@ -632,6 +764,7 @@ static void mv_apply_profiles(ccb_arena *a, mv_pom *pom,
       active = prof->active_default;
     }
     if (!active) {
+      mv_note_inactive_profile(r, coord, prof);
       continue;
     }
     for (size_t j = 0; j < prof->props_count; j++) {
@@ -708,11 +841,25 @@ int mv_seed_queue(mv_resolve *r, const ccb_config *cfg) {
     ccb_str_append(&ks, art);
     char *key = ccb_arena_strdup(r->arena, ks.buf);
     ccb_str_free(&ks);
+    // Nearest-wins is decided on group:artifact alone, before the
+    // version spec is resolved: a duplicate direct declaration must
+    // not fail the build for metadata its version never needs.
+    mv_seen *prev = mv_seen_find(r->seen, r->seen_count, key);
+    if (prev != NULL) {
+      if (r->verbose) {
+        printf("maven: %s: requested %s, using nearest %s\n", key, v,
+          prev->version);
+      }
+      free(g);
+      free(art);
+      free(v);
+      continue;
+    }
     // A direct version may be a range, LATEST, RELEASE, or
-    // -SNAPSHOT spec: resolve it to a concrete version before the
-    // seen check, so the concrete version is what wins and is
-    // recorded in the lockfile. The concrete version is arena
-    // memory; v stays the malloc'd parse result and is freed below.
+    // -SNAPSHOT spec: resolve it to a concrete version, so the
+    // concrete version is what wins and is recorded in the
+    // lockfile. The concrete version is arena memory; v stays the
+    // malloc'd parse result and is freed below.
     char *concrete = mv_resolve_version(r, g, art, v);
     if (concrete == NULL) {
       free(g);
@@ -720,28 +867,22 @@ int mv_seed_queue(mv_resolve *r, const ccb_config *cfg) {
       free(v);
       return -1;
     }
-    mv_seen *prev = mv_seen_find(r->seen, r->seen_count, key);
-    if (prev != NULL) {
-      if (r->verbose && strcmp(prev->version, concrete) != 0) {
-        printf("maven: %s: requested %s, using nearest %s\n", key,
-          concrete, prev->version);
-      }
-    } else {
-      MV_GROW(r->arena, r->seen, r->seen_count, r->seen_cap, mv_seen);
-      r->seen[r->seen_count].key = key;
-      r->seen[r->seen_count].version =
-        ccb_arena_strdup(r->arena, concrete);
-      r->seen_count++;
-      MV_GROW(r->arena, r->queue, r->qcount, r->qcap, mv_qitem);
-      r->queue[r->qcount].group = ccb_arena_strdup(r->arena, g);
-      r->queue[r->qcount].artifact = ccb_arena_strdup(r->arena, art);
-      r->queue[r->qcount].version = ccb_arena_strdup(r->arena, concrete);
-      r->queue[r->qcount].dir_version = mv_is_snapshot_spec(v) ?
-        ccb_arena_strdup(r->arena, v) :
-        ccb_arena_strdup(r->arena, concrete);
-      r->queue[r->qcount].depth = 0;
-      r->qcount++;
-    }
+    MV_GROW(r->arena, r->seen, r->seen_count, r->seen_cap, mv_seen);
+    r->seen[r->seen_count].key = key;
+    r->seen[r->seen_count].version =
+      ccb_arena_strdup(r->arena, concrete);
+    r->seen_count++;
+    MV_GROW(r->arena, r->queue, r->qcount, r->qcap, mv_qitem);
+    r->queue[r->qcount].group = ccb_arena_strdup(r->arena, g);
+    r->queue[r->qcount].artifact = ccb_arena_strdup(r->arena, art);
+    r->queue[r->qcount].version = ccb_arena_strdup(r->arena, concrete);
+    r->queue[r->qcount].dir_version = mv_is_snapshot_spec(v) ?
+      ccb_arena_strdup(r->arena, v) :
+      ccb_arena_strdup(r->arena, concrete);
+    r->queue[r->qcount].depth = 0;
+    r->queue[r->qcount].excls = NULL;
+    r->queue[r->qcount].excl_count = 0;
+    r->qcount++;
     free(g);
     free(art);
     free(v);
@@ -844,50 +985,110 @@ static int mv_packaging_ext(ccb_arena *a, mv_pom *pom, const char *eff_group,
   return 0;
 }
 
+// Build the exclusion set a queued artifact's subtree inherits:
+// the exclusions inherited along this path, plus the exclusions
+// declared on this edge, plus the managed entry's exclusions
+// (a managed exclusion applies when the dependency declares none
+// of its own; unioning is the same when only one side declares
+// any, which is the common case). NULL when the set is empty.
+static mv_excl *mv_child_excls(mv_resolve *r, mv_qitem *item,
+    mv_dep *dep, mv_dep *mg, size_t *count_out) {
+  size_t count = item->excl_count + dep->excl_count +
+    (mg != NULL ? mg->excl_count : 0);
+  *count_out = count;
+  if (count == 0) {
+    return NULL;
+  }
+  mv_excl *child = ccb_arena_alloc(r->arena, count * sizeof(*child));
+  size_t w = 0;
+  for (size_t i = 0; i < item->excl_count; i++) {
+    child[w++] = item->excls[i];
+  }
+  for (size_t i = 0; i < dep->excl_count; i++) {
+    child[w++] = dep->excls[i];
+  }
+  if (mg == NULL) {
+    return child;
+  }
+  for (size_t i = 0; i < mg->excl_count; i++) {
+    child[w++] = mg->excls[i];
+  }
+  return child;
+}
+
 // Resolve one transitive dependency of a POM: skip test/provided/
 // system/import scopes and optional dependencies, fall back to
-// dependencyManagement for a missing version, skip excluded and
-// already-seen artifacts (nearest wins), else enqueue it. Returns 0
-// when the dependency is queued or skipped, -1 with a diagnostic on
-// failure.
+// dependencyManagement for a missing version, scope, or optional
+// flag, skip excluded and already-seen artifacts (nearest wins),
+// else enqueue it with the exclusion set its subtree inherits.
+// Returns 0 when the dependency is queued or skipped, -1 with a
+// diagnostic on failure.
+//
+// Ordering matters: exclusions and nearest-wins are decided on
+// group:artifact alone, before the version spec is resolved, so a
+// losing or excluded branch never fails the build for metadata it
+// does not need (a range no repo serves, a snapshot with no
+// metadata, a cache-only miss). A missing version still fails
+// before that check: a version-less dependency with no management
+// entry is a malformed POM, whatever the branch.
 static int mv_queue_dep(mv_resolve *r, mv_pom *pom, const char *eff_group,
     const char *eff_artifact, const char *eff_version, const char *coord,
-    mv_dep *dep, int item_depth) {
+    mv_dep *dep, mv_qitem *item) {
   int dbad = 0;
-  char *scope = dep->scope != NULL ?
-    mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
-      dep->scope, &dbad) : (char *)"compile";
-  if (dbad) {
+  char *dg = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+    dep->group, &dbad);
+  char *da = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+    dep->artifact, &dbad);
+  if (dbad || dg == NULL || da == NULL ||
+      !mv_part_ok(dg, strlen(dg)) || !mv_part_ok(da, strlen(da))) {
     mv_diag(r->diags, "CCB-E3019", coord,
-      "dependency scope cannot be resolved");
+      "dependency coordinates cannot be resolved");
     return -1;
+  }
+  mv_dep *mg = mv_mgmt_find(r->arena, pom, eff_group, eff_artifact,
+    eff_version, dg, da);
+  // Scope: the dependency's own, else the managed entry's, else
+  // compile. Same fallback for <optional>.
+  char *scope = NULL;
+  const char *scope_src = dep->scope != NULL ? dep->scope :
+    (mg != NULL ? mg->scope : NULL);
+  if (scope_src != NULL) {
+    scope = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+      scope_src, &dbad);
+    if (dbad || scope == NULL) {
+      mv_diag(r->diags, "CCB-E3019", coord,
+        "dependency scope cannot be resolved");
+      return -1;
+    }
+  }
+  if (scope == NULL) {
+    scope = (char *)"compile";
   }
   if (strcmp(scope, "test") == 0 || strcmp(scope, "provided") == 0 ||
       strcmp(scope, "system") == 0 || strcmp(scope, "import") == 0) {
     return 0;
   }
-  char *optional = dep->optional != NULL ?
-    mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
-      dep->optional, &dbad) : NULL;
-  if (dbad) {
-    mv_diag(r->diags, "CCB-E3019", coord,
-      "dependency optional flag cannot be resolved");
-    return -1;
+  char *optional = NULL;
+  const char *opt_src = dep->optional != NULL ? dep->optional :
+    (mg != NULL ? mg->optional : NULL);
+  if (opt_src != NULL) {
+    optional = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
+      opt_src, &dbad);
+    if (dbad) {
+      mv_diag(r->diags, "CCB-E3019", coord,
+        "dependency optional flag cannot be resolved");
+      return -1;
+    }
   }
   if (optional != NULL && strcmp(optional, "true") == 0) {
     return 0;
   }
-  char *dg = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
-    dep->group, &dbad);
-  char *da = mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
-    dep->artifact, &dbad);
   char *dv = dep->version != NULL ?
     mv_subst(r->arena, pom, eff_group, eff_artifact, eff_version,
       dep->version, &dbad) : NULL;
-  if (dbad || dg == NULL || da == NULL ||
-      !mv_part_ok(dg, strlen(dg)) || !mv_part_ok(da, strlen(da))) {
+  if (dbad) {
     mv_diag(r->diags, "CCB-E3019", coord,
-      "dependency coordinates cannot be resolved");
+      "dependency version cannot be resolved");
     return -1;
   }
   if (dv != NULL && !mv_part_ok(dv, strlen(dv))) {
@@ -909,29 +1110,27 @@ static int mv_queue_dep(mv_resolve *r, mv_pom *pom, const char *eff_group,
     ccb_str_append(&m, da);
     ccb_str_append(&m,
       " has no version and no dependencyManagement entry");
+    if (mv_pom_has_bom_import(pom)) {
+      ccb_str_append(&m,
+        " (this POM imports a BOM with <scope>import</scope>, which CCB does not support: give the dependency an explicit version or a dependencyManagement entry)");
+    }
     mv_diag(r->diags, "CCB-E3019", coord, m.buf);
     ccb_str_free(&m);
     return -1;
   }
-  // A transitive version may also be a range, LATEST, RELEASE, or
-  // -SNAPSHOT spec: resolve it to a concrete version here, so the
-  // exclusion check and nearest-wins both see the version that will
-  // actually be fetched. The spec is kept for the directory version:
-  // a snapshot's timestamped files live under its -SNAPSHOT
-  // directory.
-  char *spec = dv;
-  dv = mv_resolve_version(r, dg, da, dv);
-  if (dv == NULL) {
-    return -1;
-  }
-  // Exclusions are checked before nearest-wins: an excluded
-  // artifact never enters the seen set, so an excluded version
-  // can never win and another version from a later path can.
-  // The subtree is pruned with it: an excluded artifact's own
-  // dependencies are never queued.
-  if (mv_is_excluded(r->excls, r->excl_count, dg, da, dv)) {
+  // Exclusions are checked before nearest-wins and before the
+  // version spec is resolved: an excluded artifact never enters
+  // the seen set, so an excluded version can never win and another
+  // version from a later path can. The subtree is pruned with it:
+  // an excluded artifact's own dependencies are never queued.
+  // Project-level exclusions and the per-edge exclusions this
+  // artifact inherited are both unversioned here (a versioned
+  // project exclusion is checked again after resolution, below).
+  if (mv_is_excluded(r->excls, r->excl_count, dg, da, NULL) ||
+      mv_is_excluded(item->excls, item->excl_count, dg, da, NULL)) {
     if (r->verbose) {
-      printf("maven: %s:%s:%s: excluded, skipping\n", dg, da, dv);
+      printf("maven: %s: dependency %s:%s is excluded, skipping\n",
+        coord, dg, da);
     }
     return 0;
   }
@@ -944,22 +1143,48 @@ static int mv_queue_dep(mv_resolve *r, mv_pom *pom, const char *eff_group,
   ccb_str_free(&ks);
   mv_seen *prev = mv_seen_find(r->seen, r->seen_count, key);
   if (prev != NULL) {
-    if (r->verbose && strcmp(prev->version, dv) != 0) {
+    if (r->verbose) {
       printf("maven: %s: requested %s, using nearest %s\n", key, dv,
         prev->version);
     }
     return 0;
   }
+  // A transitive version may also be a range, LATEST, RELEASE, or
+  // -SNAPSHOT spec: resolve it to a concrete version here, so the
+  // exclusion check and nearest-wins both see the version that will
+  // actually be fetched. The spec is kept for the directory version:
+  // a snapshot's timestamped files live under its -SNAPSHOT
+  // directory.
+  char *spec = dv;
+  dv = mv_resolve_version(r, dg, da, dv);
+  if (dv == NULL) {
+    return -1;
+  }
+  if (mv_is_excluded(r->excls, r->excl_count, dg, da, dv)) {
+    if (r->verbose) {
+      printf("maven: %s:%s:%s: excluded, skipping\n", dg, da, dv);
+    }
+    return 0;
+  }
+  mv_note_classifier_type(r, coord, dep, pom, eff_group, eff_artifact,
+    eff_version, dg, da);
   MV_GROW(r->arena, r->seen, r->seen_count, r->seen_cap, mv_seen);
   r->seen[r->seen_count].key = key;
   r->seen[r->seen_count].version = ccb_arena_strdup(r->arena, dv);
   r->seen_count++;
+  // The child's exclusion set: the exclusions inherited along this
+  // path, plus the exclusions declared on this edge, plus the
+  // managed entry's exclusions.
+  size_t child_count = 0;
+  mv_excl *child = mv_child_excls(r, item, dep, mg, &child_count);
   MV_GROW(r->arena, r->queue, r->qcount, r->qcap, mv_qitem);
   r->queue[r->qcount].group = dg;
   r->queue[r->qcount].artifact = da;
   r->queue[r->qcount].version = dv;
   r->queue[r->qcount].dir_version = mv_is_snapshot_spec(spec) ? spec : dv;
-  r->queue[r->qcount].depth = item_depth + 1;
+  r->queue[r->qcount].depth = item->depth + 1;
+  r->queue[r->qcount].excls = child;
+  r->queue[r->qcount].excl_count = child_count;
   r->qcount++;
   return 0;
 }
@@ -1005,7 +1230,8 @@ int mv_resolve_one(mv_resolve *r, mv_qitem item, int walk,
       coord, r->prefetch, r->readonly, r->diags) != 0) {
     return -1;
   }
-  mv_apply_profiles(r->arena, &pom, r->cfg);
+  mv_apply_profiles(r, &pom, coord);
+  mv_note_bom_imports(r, &pom, coord);
   char *eff_group = NULL;
   char *eff_artifact = NULL;
   char *eff_version = NULL;
@@ -1071,7 +1297,7 @@ int mv_resolve_one(mv_resolve *r, mv_qitem item, int walk,
   // Transitive dependencies of this POM.
   for (size_t d = 0; d < pom.deps_count; d++) {
     if (mv_queue_dep(r, &pom, eff_group, eff_artifact, eff_version, coord,
-        &pom.deps[d], item.depth) != 0) {
+        &pom.deps[d], &item) != 0) {
       return -1;
     }
   }

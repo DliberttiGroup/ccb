@@ -34,6 +34,11 @@ cache:
   half-prefetched project is never reported as ready. Prefetch fetches the
   full parent-POM chain for every resolved POM, and re-downloads version
   metadata fresh, so ranges and snapshots float to the newest match.
+  When every repository fails to serve fresh metadata (no network, repo
+  down), prefetch reuses the cached metadata copy when one exists and
+  its recorded checksum still verifies, so setup still works offline
+  for ranges and snapshots it already resolved; a cached copy that
+  fails its checksum fails with `CCB-E3020` instead.
   In a project with `[build] kotlin_plugins`, setup also prefetches the
   plugin jars and reports `maven: prefetched N compiler plugin jars`.
 - `ccb build` and `ccb check` resolve cache-only. A coordinate never

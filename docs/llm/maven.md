@@ -26,7 +26,7 @@ maven_central = true
 - `maven_central`：为 `true` 时，在 Google Maven 之后搜索 Maven Central。默认 `false`：仅 Google Maven。
 - `maven_profiles`：要激活的 profile id 数组（见下面的 Profiles）。默认空：只有 `<activeByDefault>` 的 profile 会生效。
 - `maven_repos`：额外仓库数组（见下面的仓库）。
-- `maven_exclude`：排除项数组，每个为 `group:artifact`（所有版本）或 `group:artifact:version`（仅该版本）。被排除的构件永远不会解析，即使是传递依赖。排除一个直接依赖是加载时的配置错误，错误为 `CCB-E1005`，注明排除项和该依赖；排除某个直接依赖的其他版本是允许的。
+- `maven_exclude`：排除项数组，每个为 `group:artifact`（所有版本）或 `group:artifact:version`（仅该版本）。被排除的构件永远不会解析，即使是传递依赖。排除一个直接依赖是加载时的配置错误，错误为 `CCB-E1005`，注明排除项和该依赖；排除某个直接依赖的其他版本是允许的。POM 中按依赖的 `<exclusions>` 同样生效（见下文排除项一节）。
 
 ## 编译器插件
 
@@ -68,21 +68,21 @@ kotlin_plugin_options = ["androidx.compose.compiler.plugins.kotlin:generateFunct
 
 直接依赖和传递依赖都从 POM 的 `<dependencies>` 解析：
 
-- 作用域：`compile`（包括缺失作用域，Maven 将其视为 compile）和 `runtime` 会解析。`test`、`provided`、`system`、`import` 会跳过，标记为 `<optional>true</optional>` 的依赖也会跳过。
-- 版本冲突按最近者获胜解析：从直接声明出发按广度优先遍历依赖，某个 `group:artifact` 第一次出现的版本获胜。之后更深（或同深度、后声明）的版本会被跳过；使用 `--verbose` 时，跳过会打印为 `maven: <g:a>: requested <v>, using nearest <w>`。
+- 作用域：`compile`（包括缺失作用域，Maven 将其视为 compile）和 `runtime` 会解析。`test`、`provided`、`system`、`import` 会跳过，标记为 `<optional>true</optional>` 的依赖也会跳过。依赖未声明作用域或 `<optional>` 时，取其 `<dependencyManagement>` 条目的值。
+- 版本冲突按最近者获胜解析：从直接声明出发按广度优先遍历依赖，某个 `group:artifact` 第一次出现的版本获胜。之后更深（或同深度、后声明）的版本会被跳过；使用 `--verbose` 时，跳过会打印为 `maven: <g:a>: requested <v>, using nearest <w>`。最近者获胜只按 `group:artifact` 判定，在解析失败分支的版本规格之前：失败分支的范围、`LATEST`、`RELEASE` 或 `-SNAPSHOT` 永远不会取回元数据，因此失败分支不会因为它不需要的元数据而导致构建失败。完全没有版本的依赖即使在失败分支上仍然会失败（见下文）：缺失版本是格式错误的 POM，不是解析细节。
 - 循环安全：已见过的 `group:artifact` 永远不会重新入队。
-- 属性：`${...}` 从同一 POM 的 `<properties>` 以及 `project.groupId` / `project.artifactId` / `project.version` 解析。依赖版本也可以来自同一 POM 的 `<dependencyManagement>` 条目。
-- 父 POM：当 POM 带有 `<parent>` 块时，父 POM 会从同一仓库取回（与任何其他 POM 相同的缓存和校验和规则），并应用到子 POM 上，沿链递归向上。父 POM 的 `<properties>`、`<dependencyManagement>`、`<dependencies>` 和 `<profiles>` 会合并进子 POM：子 POM 的条目获胜，父 POM 之间最近的祖先获胜；`${...}` 展开使用合并后的集合。省略 `groupId` 或 `version` 的 POM 会从其 `<parent>` 块继承这些值。链最多 10 个祖先；更长的链，或循环（父坐标重复链中更早的坐标），会以 `CCB-E3024` 失败，注明该链。父版本本身也可以是一个范围或 `-SNAPSHOT` 规格。不继承的内容：父 POM 声明的排除项（会被忽略）。
-- 排除项（`[deps] maven_exclude`）在最近者获胜之前检查：被排除的构件永远不会进入已见集合，因此被排除的版本永远不会获胜，同一构件的另一个版本可以从之后的路径获胜。被排除构件自身的传递依赖会随之剪掉：永远不会入队。使用 `--verbose` 时，每次跳过的排除项会打印为 `maven: <g:a:v>: excluded, skipping`。
+- 属性：`${...}` 从同一 POM 的 `<properties>` 以及 `project.groupId` / `project.artifactId` / `project.version` 解析，另外环境变量可写为 `${env:VAR}`。依赖版本也可以来自同一 POM 的 `<dependencyManagement>` 条目。父引用（`<parent><version>${v}</version></parent>`）按声明它的 POM 代入，而不是按合并后的子集：子 POM 的同名属性不能把祖父查找重定向。
+- 父 POM：当 POM 带有 `<parent>` 块时，父 POM 会从同一仓库取回（与任何其他 POM 相同的缓存和校验和规则），并应用到子 POM 上，沿链递归向上。父 POM 的 `<properties>`、`<dependencyManagement>`、`<dependencies>` 和 `<profiles>` 会合并进子 POM：子 POM 的条目获胜，父 POM 之间最近的祖先获胜；`${...}` 展开使用合并后的集合。省略 `groupId` 或 `version` 的 POM 会从其 `<parent>` 块继承这些值。链最多 10 个祖先；更长的链，或循环（父坐标重复链中更早的坐标），会以 `CCB-E3024` 失败，注明该链。父版本本身也可以是一个范围或 `-SNAPSHOT` 规格。
+- 排除项：依赖的 `<exclusions>` 会剪掉声明边之下的子树：被排除的 `group:artifact` 在声明依赖之下永远不会解析，排除项会沿路径向下继承，但永远不会泄漏到兄弟分支——通过干净边到达的同一构件仍然会解析；被排除的构件永远不会进入已见集合，因此永远不会赢得最近者获胜。父 POM 声明的排除项（在其 `<dependencies>` 条目上）和 `<dependencyManagement>` 中的排除项，在边被继承时同样适用。项目级排除项（`[deps] maven_exclude`）同样在最近者获胜之前检查：被排除的构件永远不会进入已见集合，因此被排除的版本永远不会获胜，同一构件的另一个版本可以从之后的路径获胜。被排除构件自身的传递依赖会随之剪掉：永远不会入队。使用 `--verbose` 时，每次跳过的排除项会打印为 `maven: <g:a:v>: excluded, skipping`（项目级、带版本）或 `maven: <coord>: dependency <g:a> is excluded, skipping`（不带版本 / 按依赖）。
 - KMP 变体：当某个 `-jvm` 构件的 `-android` 兄弟构件（同一 group、同一版本）也被解析出来时，该 `-jvm` 构件会被丢弃——Kotlin 多平台库会同时发布两者，而 dex 会拒绝两者都定义的类。没有 `-android` 兄弟构件的 `-jvm` 构件会被保留（纯 JVM 库没有兄弟构件）。兄弟构件必须是同一版本；版本不匹配时两者都保留。
 - Profiles：见下面的 Profiles 一节。
-- 经过 dependencyManagement 回退后仍没有版本的依赖，会以 `CCB-E3019` 失败，注明该依赖。
+- 经过 dependencyManagement 回退后仍没有版本的依赖，会以 `CCB-E3019` 失败，注明该依赖。当 POM 以 `<scope>import</scope>` 导入 BOM（不支持，见下文）时，诊断会说明这一点：该版本可能只存在于被导入的 BOM 中。`<dependencyManagement>` 中的 `<scope>import</scope>` 条目（BOM 导入）不会被应用：被导入的 BOM 永远不会被取回，其受管版本永远不会生效；使用 `--verbose` 时，每次导入会注明。依赖的 `<classifier>` 会被忽略（取回基础构件），`jar` / `aar` / `pom` 之外的 `<type>` 也会被忽略（打包类型来自构件 POM）；两者都会以 `--verbose` 注明。
 
 ## Profiles
 
-- 当某个 profile 的 id 列在 `[deps] maven_profiles` 中时，它是激活的；或者，当该列表为空时，它的 `<activation><activeByDefault>` 为 true 时是激活的。任何其他激活方式（`<jdk>`、`<os>`、`<property>`、`<file>`）都不会被求值：除非被列出，否则该 profile 保持未激活。
+- 当某个 profile 的 id 列在 `[deps] maven_profiles` 中时，它是激活的；或者，当该列表为空时，它的 `<activation><activeByDefault>` 为 true 时是激活的。任何其他激活方式（`<jdk>`、`<os>`、`<property>`、`<file>`）都不会被求值：除非被列出，否则该 profile 保持未激活。使用 `--verbose` 时，每个这样的未激活 profile 会按 id 和形式注明。
 - 激活的 profile 的属性和 dependencyManagement 会就地覆盖 POM 自身的；它的依赖会追加到 POM 自身的依赖之后。继承自父 POM 的 profile 同样如此。
-- `maven_profiles` 中未知的 profile id 不会激活任何东西，也不会使任何东西失败。
+- `maven_profiles` 中未知的 profile id 不会激活任何东西，也不会使任何东西失败。使用 `--verbose` 时，它会在遍历结束后注明（通常是拼写错误）。
 
 ## 缓存与校验和
 
@@ -97,7 +97,7 @@ kotlin_plugin_options = ["androidx.compose.compiler.plugins.kotlin:generateFunct
 
 `ccb setup` 是唯一允许访问网络的命令（spec §6.1）：
 
-- 在带有 `[deps] maven` 的项目中，`ccb setup` 会把每个直接 + 传递构件预取到缓存中（在 SDK 步骤之后、最终验证之前），并报告 `maven: prefetched N artifacts (A aar, J jar)`。预取失败会带着诊断停止 setup——半预取的项目永远不会被报告为就绪。预取会为每个解析出的 POM 取回完整的父 POM 链，并重新下载版本元数据的最新版本，因此范围和快照会浮动到最新的匹配项。在带有 `[build] kotlin_plugins` 的项目中，setup 还会预取插件 jar，并报告 `maven: prefetched N compiler plugin jars`。
+- 在带有 `[deps] maven` 的项目中，`ccb setup` 会把每个直接 + 传递构件预取到缓存中（在 SDK 步骤之后、最终验证之前），并报告 `maven: prefetched N artifacts (A aar, J jar)`。预取失败会带着诊断停止 setup——半预取的项目永远不会被报告为就绪。预取会为每个解析出的 POM 取回完整的父 POM 链，并重新下载版本元数据的最新版本，因此范围和快照会浮动到最新的匹配项。当所有仓库都无法提供最新的元数据（无网络、仓库宕机）时，预取会在缓存副本存在且其记录的校验和仍能验证时重用它，因此 setup 对已解析过的范围和快照仍可离线工作；缓存副本校验和失败时以 `CCB-E3020` 失败。在带有 `[build] kotlin_plugins` 的项目中，setup 还会预取插件 jar，并报告 `maven: prefetched N compiler plugin jars`。
 - `ccb build` 和 `ccb check` 只解析缓存。某个从未预取过的坐标会以 `CCB-E3021` 失败，注明该坐标并告诉你运行 `ccb setup`。失败发生在第 0 阶段，在任何构建阶段运行之前。
 - 工作流：添加一个坐标，运行 `ccb setup`，然后离线构建。删除缓存（或在新机器上检出）只是意味着再运行一次 `ccb setup`。
 
@@ -115,9 +115,9 @@ kotlin_plugin_options = ["androidx.compose.compiler.plugins.kotlin:generateFunct
 ## 限制
 
 - 没有签名（PGP）验证：只有校验和。
-- POM 中没有按依赖的 `<exclusions>`：排除项只有项目级的 `[deps] maven_exclude`。
-- Profile 激活只按 id：`<jdk>`、`<os>`、`<property>`、`<file>` 激活不会被求值。
-- 父 POM 声明的 `<exclusions>` 会被忽略。
+- Profile 激活只按 id：`<jdk>`、`<os>`、`<property>`、`<file>` 激活不会被求值。未激活的此类 profile 会以 `--verbose` 注明；`maven_profiles` 中匹配不到任何已解析 POM 的 id 同样会注明（通常是拼写错误）。
+- `<scope>import</scope>` 的 dependencyManagement 条目（BOM 导入）不会被应用：被导入的 BOM 永远不会被取回，其受管版本永远不会生效；版本只存在于被导入 BOM 中的无版本依赖会以 `CCB-E3019` 失败并注明原因。
+- 依赖上的 `<classifier>` 会被忽略：取回基础构件（以 `--verbose` 注明）；`jar` / `aar` / `pom` 之外的 `<type>` 同样会被忽略，打包类型来自构件 POM（以 `--verbose` 注明）。
 
 ## 故障排查
 
@@ -128,7 +128,7 @@ kotlin_plugin_options = ["androidx.compose.compiler.plugins.kotlin:generateFunct
 | `CCB-E3021` | 构件尚未进入本地缓存。运行 `ccb setup`，然后重新构建。父 POM 从缓存中被逐出时也一样：setup 会重新预取整条链。 |
 | `CCB-E3024` | 父链循环，或祖先超过 10 个。在 POM 中修复该链。 |
 | `CCB-E3020` | 下载的文件与仓库已发布的校验和不符。删除缓存条目（或整个 `<缓存>/<group 路径>/<artifact>/<version>/` 目录），重新运行 `ccb setup`；如果问题仍然存在，该仓库或镜像在提供错误的字节。 |
-| `CCB-E3019` | 坐标在 Google Maven（或已启用时的 Central）中不存在。检查拼写和版本，以及该构件是否确实在 Central 上（是的话设置 `maven_central`）。另外：没有已发布版本满足的范围、没有快照元数据的快照，或私有仓库缺失的凭据变量（诊断会注明该变量）。 |
+| `CCB-E3019` | 坐标在 Google Maven（或已启用时的 Central）中不存在。检查拼写和版本，以及该构件是否确实在 Central 上（是的话设置 `maven_central`）。另外：没有已发布版本满足的范围、没有快照元数据的快照，或私有仓库缺失的凭据变量（诊断会注明该变量）。另外：版本只存在于以 `<scope>import</scope>` 导入的 BOM 中的无版本依赖——CCB 不应用 BOM 导入；给该依赖一个显式版本或 dependencyManagement 条目。 |
 | `CCB-E1005`（坐标） | 声明的坐标格式错误或未固定。修复 `ccb.toml` 中的字符串。插件坐标必须是确切版本。 |
 | `CCB-E1005`（仓库条目） | `[deps] maven_repos` 条目格式错误：使用 `url` 或 `url username env:VAR`（或字面密码）。URL 中不允许出现 userinfo。 |
 | `CCB-E1005`（排除项） | 排除项移除了项目直接声明的东西。删除该排除项或该直接坐标。 |

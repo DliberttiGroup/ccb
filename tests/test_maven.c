@@ -168,6 +168,27 @@ static void pom_simple(const char *group, const char *artifact,
   ccb_str_free(&pom);
 }
 
+static void dep_xml_excl(ccb_str *s, const char *group,
+    const char *artifact, const char *version, const char *excl_group,
+    const char *excl_artifact) {
+  ccb_str_append(s, "<dependency><groupId>");
+  ccb_str_append(s, group);
+  ccb_str_append(s, "</groupId><artifactId>");
+  ccb_str_append(s, artifact);
+  ccb_str_append(s, "</artifactId>");
+  if (version != NULL) {
+    ccb_str_append(s, "<version>");
+    ccb_str_append(s, version);
+    ccb_str_append(s, "</version>");
+  }
+  ccb_str_append(s, "<exclusions><exclusion><groupId>");
+  ccb_str_append(s, excl_group);
+  ccb_str_append(s, "</groupId><artifactId>");
+  ccb_str_append(s, excl_artifact);
+  ccb_str_append(s, "</artifactId></exclusion></exclusions>");
+  ccb_str_append(s, "</dependency>");
+}
+
 static void dep_xml(ccb_str *s, const char *group, const char *artifact,
     const char *version) {
   ccb_str_append(s, "<dependency><groupId>");
@@ -351,6 +372,16 @@ static ccb_status resolve_here(const char **coords, size_t count, int prefetch,
     ccb_maven_result *out, ccb_diag_list *diags) {
   ccb_config *c = manual_cfg(coords, count);
   ccb_status rc = ccb_maven_resolve(c, prefetch, 0, 0, out, diags);
+  ccb_config_free(c);
+  return rc;
+}
+
+// Like resolve_here, but with verbose notes enabled (unsupported
+// semantics, nearest-wins, exclusions).
+static ccb_status resolve_verbose_here(const char **coords, size_t count,
+    int prefetch, ccb_maven_result *out, ccb_diag_list *diags) {
+  ccb_config *c = manual_cfg(coords, count);
+  ccb_status rc = ccb_maven_resolve(c, prefetch, 1, 0, out, diags);
   ccb_config_free(c);
   return rc;
 }
@@ -1169,6 +1200,39 @@ static void put_x(const char *group, const char *artifact,
   free(art_path);
 }
 
+// Write one artifact + raw POM into the exclusion/lockfile fixture
+// repo. ext "pom" writes the POM only.
+static void put_x_raw(const char *group, const char *artifact,
+    const char *version, const char *ext, const char *pom) {
+  ccb_str leaf;
+  ccb_str_init(&leaf);
+  ccb_str_append(&leaf, artifact);
+  ccb_str_append_c(&leaf, '-');
+  ccb_str_append(&leaf, version);
+  ccb_str_append(&leaf, ".pom");
+  char *pom_path = repo_x_leaf_path(group, artifact, version, leaf.buf);
+  ccb_str_free(&leaf);
+  char *dir = ccb_dirname(pom_path);
+  CHECK(ccb_mkdir_p(dir) == CCB_OK);
+  free(dir);
+  write_text(pom_path, pom);
+  free(pom_path);
+  if (strcmp(ext, "pom") == 0) {
+    return;
+  }
+  ccb_str al;
+  ccb_str_init(&al);
+  ccb_str_append(&al, artifact);
+  ccb_str_append_c(&al, '-');
+  ccb_str_append(&al, version);
+  ccb_str_append_c(&al, '.');
+  ccb_str_append(&al, ext);
+  char *art_path = repo_x_leaf_path(group, artifact, version, al.buf);
+  ccb_str_free(&al);
+  write_text(art_path, "fake-artifact-bytes");
+  free(art_path);
+}
+
 static void build_repo_x(void) {
   {
     ccb_str deps;
@@ -1201,6 +1265,98 @@ static void build_repo_x(void) {
     put_x("com.example", "b", "1.0", deps.buf);
     ccb_str_free(&deps);
   }
+  // Step 9 fixtures: per-dependency exclusions and losing ranges.
+  put_x("com.example", "loser", "1.0", NULL);
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "loser", "[9.0,10.0)");
+    put_x("com.example", "rangemom", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "loser2", "[9.0,10.0)");
+    put_x("com.example", "rangemom2", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "deep", "2.0");
+    put_x("com.example", "exclmid", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml_excl(&deps, "com.example", "exclmid", "1.0",
+      "com.example", "deep");
+    put_x("com.example", "excltop", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "cleansub", "1.0");
+    put_x("com.example", "cleantop", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "deep", "2.0");
+    put_x("com.example", "cleansub", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "deep", "2.0");
+    put_x("com.example", "mgmtdep", "1.0", deps.buf);
+    ccb_str_free(&deps);
+  }
+  // Parent-declared exclusion: pexcl declares exclmid with deep
+  // excluded; pexclchild inherits that edge.
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml_excl(&deps, "com.example", "exclmid", "1.0",
+      "com.example", "deep");
+    ccb_str pom;
+    ccb_str_init(&pom);
+    ccb_str_append(&pom, "<project><modelVersion>4.0.0</modelVersion>"
+      "<groupId>com.example</groupId><artifactId>pexcl</artifactId>"
+      "<version>1.0</version><packaging>pom</packaging>"
+      "<dependencies>");
+    ccb_str_append(&pom, deps.buf);
+    ccb_str_append(&pom, "</dependencies></project>");
+    put_x_raw("com.example", "pexcl", "1.0", "pom", pom.buf);
+    ccb_str_free(&pom);
+    ccb_str_free(&deps);
+  }
+  put_x_raw("com.example", "pexclchild", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>pexclchild</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<parent><groupId>com.example</groupId><artifactId>pexcl</artifactId>"
+    "<version>1.0</version></parent></project>");
+  // Managed exclusion: the dependencyManagement entry for mgmtdep
+  // excludes deep, and the version-less dependency inherits it.
+  put_x_raw("com.example", "mgmtchild", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>mgmtchild</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>mgmtdep</artifactId>"
+    "<version>1.0</version>"
+    "<exclusions><exclusion><groupId>com.example</groupId>"
+    "<artifactId>deep</artifactId></exclusion></exclusions>"
+    "</dependency></dependencies></dependencyManagement>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>mgmtdep</artifactId></dependency></dependencies>"
+    "</project>");
 }
 
 // Manual config with exclusions and a project root (for lockfiles).
@@ -2483,6 +2639,485 @@ static void test_plugins(void) {
   }
 }
 
+// ---------- Step 9: per-dependency exclusions ----------
+
+static void test_per_dep_exclusions(void) {
+  char *saved_repos = NULL;
+  char *saved_cache = NULL;
+  use_repo_x(&saved_repos, &saved_cache);
+  build_repo_x();
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  // The exclusion on excltop -> exclmid prunes exclmid's subtree:
+  // deep never resolves.
+  {
+    const char *coords[] = { "com.example:excltop:1.0" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 1, 1, NULL, 0, NULL, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "excltop-1.0.jar"));
+    CHECK(result_has(&out, "exclmid-1.0.jar"));
+    CHECK(!result_has(&out, "deep-2.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // The exclusion does not leak to sibling branches: deep is
+  // excluded on the shallow excltop path, but the deeper clean
+  // cleantop path still resolves it. If the excluded edge had
+  // entered the seen set, deep would be missing here.
+  {
+    const char *coords[] = { "com.example:excltop:1.0",
+      "com.example:cleantop:1.0" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 2, 1, NULL, 0, NULL, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "deep-2.0.jar"));
+    CHECK(result_has(&out, "exclmid-1.0.jar"));
+    CHECK(result_has(&out, "cleansub-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Parent-declared exclusion: pexclchild inherits pexcl's edge to
+  // exclmid, exclusions included.
+  {
+    const char *coords[] = { "com.example:pexclchild:1.0" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 1, 1, NULL, 0, NULL, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "pexclchild-1.0.jar"));
+    CHECK(result_has(&out, "exclmid-1.0.jar"));
+    CHECK(!result_has(&out, "deep-2.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Managed exclusion: the dependencyManagement entry for mgmtdep
+  // excludes deep, and the version-less dependency inherits it.
+  {
+    const char *coords[] = { "com.example:mgmtchild:1.0" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords, 1, 1, NULL, 0, NULL, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "mgmtchild-1.0.jar"));
+    CHECK(result_has(&out, "mgmtdep-1.0.jar"));
+    CHECK(!result_has(&out, "deep-2.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  restore_env(saved_repos, saved_cache);
+}
+
+// ---------- Step 9: losing branches and excluded ranges ----------
+
+static void test_losing_range(void) {
+  // A losing branch's range is never resolved: rangemom wants
+  // loser:[9.0,10.0) (no metadata exists for it), but the direct
+  // loser:1.0 wins nearest, so the build succeeds.
+  pom_simple("com.example", "loser", "1.0", "jar", NULL);
+  {
+    ccb_str deps;
+    ccb_str_init(&deps);
+    dep_xml(&deps, "com.example", "loser", "[9.0,10.0)");
+    pom_simple("com.example", "rangemom", "1.0", "jar", deps.buf);
+    ccb_str_free(&deps);
+  }
+  const char *coords[] = { "com.example:rangemom:1.0",
+    "com.example:loser:1.0" };
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_here(coords, 2, 1, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "loser-1.0.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  // Same for an excluded range: the exclusion is decided before
+  // the version spec is resolved, so the missing metadata is never
+  // fetched.
+  {
+    char *saved_repos = NULL;
+    char *saved_cache = NULL;
+    use_repo_x(&saved_repos, &saved_cache);
+    build_repo_x();
+    const char *coords2[] = { "com.example:rangemom2:1.0" };
+    const char *excls[] = { "com.example:loser2" };
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_x(coords2, 1, 1, excls, 1, NULL, &out, &diags) == CCB_OK);
+    CHECK(!result_has(&out, "loser2-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+    restore_env(saved_repos, saved_cache);
+  }
+}
+
+// ---------- Step 9: dependencyManagement scope / optional ----------
+
+static void test_mgmt_scope_optional(void) {
+  pom_simple("com.example", "scoped", "1.0", "jar", NULL);
+  pom_simple("com.example", "optdep", "1.0", "jar", NULL);
+  // Managed scope=test applies when the dependency declares none.
+  put_artifact("com.example", "scopemom", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>scopemom</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>scoped</artifactId>"
+    "<version>1.0</version><scope>test</scope></dependency>"
+    "</dependencies></dependencyManagement>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>scoped</artifactId></dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:scopemom:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(!result_has(&out, "scoped-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // The dependency's own scope wins over the managed one.
+  put_artifact("com.example", "scopemom2", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>scopemom2</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>scoped</artifactId>"
+    "<version>1.0</version><scope>test</scope></dependency>"
+    "</dependencies></dependencyManagement>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>scoped</artifactId><scope>compile</scope>"
+    "</dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:scopemom2:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "scoped-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Managed optional=true applies when the dependency declares none.
+  put_artifact("com.example", "optmom", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>optmom</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>optdep</artifactId>"
+    "<version>1.0</version><optional>true</optional></dependency>"
+    "</dependencies></dependencyManagement>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>optdep</artifactId></dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:optmom:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(!result_has(&out, "optdep-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- Step 9: parent-coordinate property scope ----------
+
+static void test_parent_coord_props(void) {
+  put_artifact("com.example", "ggp9", "1.0", "pom",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>ggp9</artifactId>"
+    "<version>1.0</version><packaging>pom</packaging></project>",
+    CHK_NONE);
+  put_artifact("com.example", "gp9", "2.0", "pom",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>gp9</artifactId>"
+    "<version>2.0</version><packaging>pom</packaging>"
+    "<properties><v>1.0</v></properties>"
+    "<parent><groupId>com.example</groupId><artifactId>ggp9</artifactId>"
+    "<version>${v}</version></parent></project>",
+    CHK_NONE);
+  put_artifact("com.example", "c9", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>c9</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<properties><v>9.9</v></properties>"
+    "<parent><groupId>com.example</groupId><artifactId>gp9</artifactId>"
+    "<version>2.0</version></parent></project>",
+    CHK_NONE);
+  const char *coords[] = { "com.example:c9:1.0" };
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  // The grandparent reference ${v} resolves from the parent's own
+  // properties (1.0), not the child's same-named property (9.9):
+  // ggp9:9.9 does not exist, so the merged-set lookup failed.
+  CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "c9-1.0.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+}
+
+// ---------- Step 9: BOM import ----------
+
+static void test_bom_import(void) {
+  pom_simple("com.example", "bommed", "1.0", "jar", NULL);
+  put_artifact("com.example", "bomimp", "1.0", "pom",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>bomimp</artifactId>"
+    "<version>1.0</version><packaging>pom</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>bommed</artifactId>"
+    "<version>1.0</version></dependency></dependencies>"
+    "</dependencyManagement></project>",
+    CHK_NONE);
+  put_artifact("com.example", "bomuser", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>bomuser</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencyManagement><dependencies><dependency>"
+    "<groupId>com.example</groupId><artifactId>bomimp</artifactId>"
+    "<version>1.0</version><type>pom</type><scope>import</scope>"
+    "</dependency></dependencies></dependencyManagement>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>bommed</artifactId></dependency></dependencies></project>",
+    CHK_NONE);
+  const char *coords[] = { "com.example:bomuser:1.0" };
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  // The version lives only in the imported BOM, which CCB does not
+  // apply: the failure names the cause instead of silently
+  // resolving something else.
+  CHECK(resolve_verbose_here(coords, 1, 1, &out, &diags) != CCB_OK);
+  CHECK(has_code(&diags, "CCB-E3019"));
+  CHECK(diag_msg_has(&diags, "scope>import"));
+  ccb_diag_list_free(&diags);
+}
+
+// ---------- Step 9: classifier / type ----------
+
+static void test_classifier_type(void) {
+  pom_simple("com.example", "clsdep", "1.0", "jar", NULL);
+  put_artifact("com.example", "cls", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>cls</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>clsdep</artifactId><version>1.0</version>"
+    "<classifier>tests</classifier></dependency></dependencies></project>",
+    CHK_NONE);
+  put_artifact("com.example", "cls2", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>cls2</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>clsdep</artifactId><version>1.0</version>"
+    "<type>test-jar</type></dependency></dependencies></project>",
+    CHK_NONE);
+  // Both pin the current behavior: the base artifact is fetched,
+  // and the classifier/type is noted verbosely, not silently.
+  {
+    const char *coords[] = { "com.example:cls:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_verbose_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "clsdep-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  {
+    const char *coords[] = { "com.example:cls2:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_verbose_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "clsdep-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- Step 9: profile activation forms ----------
+
+static void test_profile_activation_forms(void) {
+  pom_simple("com.example", "jdkdep", "1.0", "jar", NULL);
+  pom_simple("com.example", "osdep", "1.0", "jar", NULL);
+  pom_simple("com.example", "propdep", "1.0", "jar", NULL);
+  pom_simple("com.example", "filedep", "1.0", "jar", NULL);
+  pom_simple("com.example", "actdep", "1.0", "jar", NULL);
+  put_artifact("com.example", "actapp", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>actapp</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<profiles>"
+    "<profile><id>jdkprof</id><activation><jdk>1.8</jdk></activation>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>jdkdep</artifactId><version>1.0</version>"
+    "</dependency></dependencies></profile>"
+    "<profile><id>osprof</id><activation><os><family>windows</family></os></activation>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>osdep</artifactId><version>1.0</version>"
+    "</dependency></dependencies></profile>"
+    "<profile><id>propprof</id><activation><property><name>foo</name></property></activation>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>propdep</artifactId><version>1.0</version>"
+    "</dependency></dependencies></profile>"
+    "<profile><id>fileprof</id><activation><file><exists>src/foo.txt</exists></file></activation>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>filedep</artifactId><version>1.0</version>"
+    "</dependency></dependencies></profile>"
+    "<profile><id>plainprof</id>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>actdep</artifactId><version>1.0</version>"
+    "</dependency></dependencies></profile>"
+    "</profiles></project>",
+    CHK_NONE);
+  // Default: no activation form is evaluated, so none of the
+  // profiles contributes anything.
+  {
+    const char *coords[] = { "com.example:actapp:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_verbose_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(!result_has(&out, "jdkdep-1.0.jar"));
+    CHECK(!result_has(&out, "osdep-1.0.jar"));
+    CHECK(!result_has(&out, "propdep-1.0.jar"));
+    CHECK(!result_has(&out, "filedep-1.0.jar"));
+    CHECK(!result_has(&out, "actdep-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // Listing the ids activates those profiles regardless of the
+  // activation block; the others stay quiet.
+  {
+    const char *coords[] = { "com.example:actapp:1.0" };
+    const char *profs[] = { "jdkprof", "osprof" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_profiles_here(coords, 1, profs, 2, 1, &out,
+      &diags) == CCB_OK);
+    CHECK(result_has(&out, "jdkdep-1.0.jar"));
+    CHECK(result_has(&out, "osdep-1.0.jar"));
+    CHECK(!result_has(&out, "propdep-1.0.jar"));
+    CHECK(!result_has(&out, "filedep-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- Step 9: CDATA and ${env:} ----------
+
+static void test_pom_extras(void) {
+  pom_simple("com.example", "standalone", "1.0", "jar", NULL);
+  // A CDATA version is literal text for the field.
+  put_artifact("com.example", "cdata", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>cdata</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>standalone</artifactId>"
+    "<version><![CDATA[1.0]]></version>"
+    "</dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:cdata:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "standalone-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // A CDATA property value, expanded through ${...}.
+  put_artifact("com.example", "cdataprop", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>cdataprop</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<properties><ver><![CDATA[1.0]]></ver></properties>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>standalone</artifactId><version>${ver}</version>"
+    "</dependency></dependencies></project>",
+    CHK_NONE);
+  {
+    const char *coords[] = { "com.example:cdataprop:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "standalone-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  // ${env:VAR} interpolates from the environment.
+  put_artifact("com.example", "envdep", "1.0", "jar",
+    "<project><modelVersion>4.0.0</modelVersion>"
+    "<groupId>com.example</groupId><artifactId>envdep</artifactId>"
+    "<version>1.0</version><packaging>jar</packaging>"
+    "<dependencies><dependency><groupId>com.example</groupId>"
+    "<artifactId>standalone</artifactId>"
+    "<version>${env:CCB_MAVEN_TEST_VER}</version>"
+    "</dependency></dependencies></project>",
+    CHK_NONE);
+  setenv("CCB_MAVEN_TEST_VER", "1.0", 1);
+  {
+    const char *coords[] = { "com.example:envdep:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+    CHECK(result_has(&out, "standalone-1.0.jar"));
+    ccb_maven_result_free(&out);
+    ccb_diag_list_free(&diags);
+  }
+  unsetenv("CCB_MAVEN_TEST_VER");
+  {
+    const char *coords[] = { "com.example:envdep:1.0" };
+    ccb_maven_result out;
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    CHECK(resolve_here(coords, 1, 1, &out, &diags) != CCB_OK);
+    CHECK(has_code(&diags, "CCB-E3019"));
+    ccb_diag_list_free(&diags);
+  }
+}
+
+// ---------- Step 9: metadata prefetch fallback ----------
+
+static void test_metadata_fallback(void) {
+  // test_ranges left cached metadata + artifacts for ranged.
+  // Point the repos at an empty dir: fresh metadata cannot be
+  // downloaded anywhere, so prefetch reuses the cached copy and
+  // the range still resolves.
+  const char *old_repos = getenv("CCB_MAVEN_REPOS");
+  char *saved_repos = old_repos != NULL ? ccb_xstrdup(old_repos) : NULL;
+  char *empty = ccb_path_join(BASE, "repo_empty");
+  CHECK(ccb_mkdir_p(empty) == CCB_OK);
+  ccb_str r;
+  ccb_str_init(&r);
+  ccb_str_append(&r, "file://");
+  ccb_str_append(&r, empty);
+  char *repos_env = ccb_str_steal(&r);
+  setenv("CCB_MAVEN_REPOS", repos_env, 1);
+  free(repos_env);
+  const char *coords[] = { "com.example:ranged:[1.0,2.0)" };
+  ccb_maven_result out;
+  ccb_diag_list diags;
+  ccb_diag_list_init(&diags);
+  CHECK(resolve_here(coords, 1, 1, &out, &diags) == CCB_OK);
+  CHECK(result_has(&out, "ranged-2.0-SNAPSHOT.jar"));
+  ccb_maven_result_free(&out);
+  ccb_diag_list_free(&diags);
+  if (saved_repos != NULL) {
+    setenv("CCB_MAVEN_REPOS", saved_repos, 1);
+    free(saved_repos);
+  } else {
+    unsetenv("CCB_MAVEN_REPOS");
+  }
+  free(empty);
+}
+
 #define PROJ_E2E_COMPOSE B("proj_e2e_compose")
 #define CACHE_E2E_COMPOSE B("cache_e2e_compose")
 #define APK_E2E_COMPOSE B("proj_e2e_compose/build/outputs/debug/app.apk")
@@ -2931,12 +3566,21 @@ int main(int argc, char **argv) {
   test_exclusion_config();
   test_lockfile();
   test_ranges();
+  test_metadata_fallback();
   test_snapshots();
   test_parent_deps();
   test_profiles();
   test_private_repos();
   test_plugins();
   test_jvm_variants();
+  test_per_dep_exclusions();
+  test_losing_range();
+  test_mgmt_scope_optional();
+  test_parent_coord_props();
+  test_bom_import();
+  test_classifier_type();
+  test_profile_activation_forms();
+  test_pom_extras();
   test_e2e(argc, argv);
   test_e2e_parents(argc, argv);
   test_e2e_compose(argc, argv);

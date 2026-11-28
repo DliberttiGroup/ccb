@@ -38,9 +38,24 @@ typedef struct {
 typedef struct {
   char *group;
   char *artifact;
+  char *version; // NULL: every version of the artifact is excluded
+} mv_excl;
+
+typedef struct {
+  char *group;
+  char *artifact;
   char *version;
   char *scope;
   char *optional;
+  char *classifier; // NULL: none declared (CCB fetches the base artifact)
+  char *type; // NULL: Maven default (jar); only jar/aar/pom are honored
+  // Per-dependency <exclusions>: group:artifact pairs (Maven
+  // exclusions carry no version) that prune this dependency's
+  // subtree. Parsed from <dependency><exclusions> in plain,
+  // managed, and profile dependencies alike.
+  mv_excl *excls;
+  size_t excl_count;
+  size_t excl_cap;
 } mv_dep;
 
 typedef struct {
@@ -51,6 +66,12 @@ typedef struct {
 typedef struct {
   char *id;
   int active_default;
+  // First unsupported <activation> form seen in this profile
+  // ("jdk", "os", "property", or "file"), or NULL when the profile
+  // uses only id / activeByDefault activation. CCB does not
+  // evaluate these forms: the profile stays inactive unless its
+  // id is listed in [deps] maven_profiles (diagnosed verbosely).
+  char *unsupported_activation;
   mv_prop *props;
   size_t props_count;
   size_t props_cap;
@@ -97,6 +118,10 @@ typedef struct {
   // 3 profile dependencyManagement.
   int cur_where;
   mv_profile *cur_profile;
+  // The <exclusion> currently open inside the current dependency
+  // (in_excl != 0), with its groupId/artifactId as parsed so far.
+  mv_excl cur_excl;
+  int in_excl;
   int failed;
 } mv_parser;
 
@@ -122,18 +147,20 @@ typedef struct {
   // directory), else the same as version.
   char *dir_version;
   int depth;
+  // Per-edge exclusions inherited along the path that reached this
+  // artifact: the union of the <exclusions> declared on each
+  // dependency edge above it (plus the dependencyManagement
+  // exclusions of the edge that produced it). They prune this
+  // artifact's subtree, never the artifact itself, and never leak
+  // to sibling branches: each queue item carries its own set.
+  mv_excl *excls;
+  size_t excl_count;
 } mv_qitem;
 
 typedef struct {
   char *key;
   char *version;
 } mv_seen;
-
-typedef struct {
-  char *group;
-  char *artifact;
-  char *version; // NULL: every version of the artifact is excluded
-} mv_excl;
 
 typedef struct {
   char *group;
@@ -165,6 +192,12 @@ typedef struct {
   size_t res_aars_cap;
   size_t res_jars_cap;
   size_t res_entries_cap;
+  // Profile ids from [deps] maven_profiles that matched a profile
+  // in some resolved POM. A listed id that never matches is
+  // diagnosed verbosely after the walk (usually a typo).
+  char **matched_profiles;
+  size_t matched_count;
+  size_t matched_cap;
   ccb_maven_result *out;
   ccb_diag_list *diags;
 } mv_resolve;

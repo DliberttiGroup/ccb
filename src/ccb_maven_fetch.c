@@ -250,7 +250,11 @@ static char *mv_metadata_url(ccb_arena *a, const char *base,
 // usable (*path_out set), 1 not found anywhere, 3 cached file
 // corrupt, 4 cache-only miss, 5 cannot store. Prefetch always
 // re-downloads fresh (ranges and snapshots float at setup time);
-// cache-only never touches the network.
+// cache-only never touches the network. When every repository fails
+// to serve fresh metadata during prefetch, the cached copy is
+// reused when it exists and its recorded checksum still verifies,
+// so setup still works offline for ranges and snapshots it already
+// resolved; a cached copy that fails its checksum reports 3.
 static int mv_fetch_metadata(ccb_arena *a, const char *cache,
     mv_repo *repos, size_t repos_count, const char *group,
     const char *artifact, const char *version, int prefetch,
@@ -298,6 +302,17 @@ static int mv_fetch_metadata(ccb_arena *a, const char *cache,
     mv_write_sidecar(final_path, hex);
     *path_out = final_path;
     return 0;
+  }
+  // Every repository failed to serve fresh metadata: fall back to
+  // the cached copy when one exists and its recorded checksum still
+  // verifies. A cached copy that fails its checksum reports
+  // corrupt (3) instead of missing (1).
+  if (ccb_path_exists(final_path)) {
+    if (mv_cache_file_ok(final_path, readonly)) {
+      *path_out = final_path;
+      return 0;
+    }
+    return 3;
   }
   return 1;
 }

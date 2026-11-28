@@ -26,10 +26,19 @@
 // profiles (child entries win, nearest ancestor wins among parents),
 // and active profiles contribute properties, dependencyManagement,
 // and dependencies (activeByDefault, or listed in
-// `[deps] maven_profiles`). Exclusions (`[deps] maven_exclude`,
-// "group:artifact" or "group:artifact:version") suppress an artifact
-// wherever it is reached, checked before nearest-wins; excluding a
-// direct dependency is a config error. Checksums: a published .sha256
+// `[deps] maven_profiles`). Per-dependency `<exclusions>` in POMs
+// prune the declaring edge's subtree (inherited down the path, never
+// leaking to sibling branches), including exclusions declared by a
+// parent POM or in dependencyManagement; `[deps] maven_exclude`
+// ("group:artifact" or "group:artifact:version") suppresses an
+// artifact wherever it is reached, checked before nearest-wins;
+// excluding a direct dependency is a config error. A
+// `<scope>import</scope>` dependencyManagement entry (BOM import)
+// is not applied: a version-less dependency whose version lives only
+// in the imported BOM fails with CCB-E3019 naming the cause.
+// Profiles using `<jdk>`, `<os>`, `<property>`, or `<file>`
+// activation stay inactive unless listed by id (noted with
+// `--verbose`). Checksums: a published .sha256
 // (else .sha1) is verified on download and a mismatch fails with
 // CCB-E3020; when a repo publishes no checksum, the computed SHA-256
 // is recorded in a `.ccb-sha256` sidecar next to the cached file and
