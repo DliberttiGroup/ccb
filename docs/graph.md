@@ -44,12 +44,45 @@ with no outputs (`dexcheck`, `verify`) is a check, not a producer.
 | Code | Meaning |
 | ---- | ------- |
 | CCB-E1012 | Duplicate task ID. |
-| CCB-E1013 | Unknown dependency, GENERATED input produced by no task, or two tasks claiming the same output. |
+| CCB-E1013 | Invalid task-graph reference: unknown dependency; GENERATED input produced by no task, produced by the task itself, or produced by a task the consumer does not depend on (directly or transitively); two tasks claiming the same output; a dependency, input, or output declared twice on one task; one input declared as both SOURCE and GENERATED; a SOURCE input that is also the task's own output. |
 | CCB-E1014 | Task dependency cycle, naming the cycle path (e.g. `a -> c -> b -> a`), following the CCB-E1010 module-cycle pattern. |
 | CCB-E1015 | Missing SOURCE input file (reported by `ccb_graph_check_source_inputs`, which the pipeline does not run — its steps diagnose missing files themselves with their own codes). |
 
-The cycle check runs only when every dependency resolves; a graph
-with an unknown dependency reports that instead.
+The producer-dependency and cycle checks run only when every
+earlier check passes; a graph with an unknown dependency reports
+that instead. The producer rule is what closes audit finding C8
+(config load was the only graph validation): dependencies are the
+graph's only ordering, so a consumer of a GENERATED input must
+depend on its producer, directly or transitively — otherwise the
+plan could run the consumer before the artifact exists. The
+pipeline satisfies this through its linear chain: `package`
+consumes `linked-apk` from `link` without a direct edge, but
+`link` is a transitive dependency, so it validates. A dependency
+with no shared input is legal (ordering-only, e.g. `native` after
+`dexcheck`), and an output no task consumes is legal (a final
+artifact, e.g. `signed-artifact` is consumed by `verify`, but
+`library-aar` is the product itself).
+
+The pipeline builder declares each SOURCE input once: config lists
+may repeat a path (the same AAR twice, a `java_extra` dir equal to
+the java dir) and the engine would reject the duplicate. The
+engine stays strict for hand-built graphs.
+
+Determinism: planning is a pure function of the graph — Kahn
+topological order with insertion order breaking ties. Planning the
+same graph twice, or rebuilding it identically, yields the
+identical plan; this is pinned by tests, including a 51-task
+layered graph.
+
+Deliberately not wired in: `ccb_graph_check_source_inputs`
+(E1015) is still not run by the pipeline. The steps diagnose
+missing files themselves with step-specific codes and tolerate
+absent optional inputs, so a blanket pre-check would mask those
+codes and could fail builds that succeed today. Wiring it in
+needs a per-input required/optional analysis first (follow-up
+for a later step). Likewise `ccb_graph_affected` still has no CLI
+surface: it is the primitive Phase 3 (incremental cache) and
+Phase 5 (multi-module) build on, not a validation feature.
 
 ## Execution
 

@@ -89,6 +89,89 @@ static const char *diag_message(ccb_diag_list *diags, size_t i) {
     diags->items[i].message : "";
 }
 
+// Plan order as a space-separated string of task IDs.
+static void plan_string(ccb_graph *g, char *buf, size_t cap) {
+  ccb_task **order = NULL;
+  size_t norder = 0;
+  buf[0] = '\0';
+  if (ccb_graph_plan(g, &order, &norder) != CCB_OK) {
+    return;
+  }
+  size_t used = 0;
+  for (size_t i = 0; i < norder; i++) {
+    size_t len = strlen(order[i]->id);
+    if (used + len + 1 < cap) {
+      memcpy(buf + used, order[i]->id, len);
+      used += len;
+      buf[used++] = ' ';
+      buf[used] = '\0';
+    }
+  }
+  free(order);
+}
+
+// Position of task t in the plan order, or norder when absent.
+static size_t plan_pos(ccb_task **order, size_t norder, ccb_task *t) {
+  for (size_t k = 0; k < norder; k++) {
+    if (order[k] == t) {
+      return k;
+    }
+  }
+  return norder;
+}
+
+// Every dependency appears before its dependent in the plan.
+static void check_plan_valid(ccb_graph *g) {
+  ccb_task **order = NULL;
+  size_t norder = 0;
+  CHECK(ccb_graph_plan(g, &order, &norder) == CCB_OK);
+  CHECK(norder == g->count);
+  for (size_t i = 0; i < g->count; i++) {
+    ccb_task *t = g->tasks[i];
+    size_t tpos = plan_pos(order, norder, t);
+    for (size_t j = 0; j < t->deps_count; j++) {
+      ccb_task *d = ccb_graph_find(g, t->deps[j]);
+      CHECK(plan_pos(order, norder, d) < tpos);
+    }
+  }
+  free(order);
+}
+
+// Layered synthetic graph: 10 chains of 5 tasks, joined by one task
+// depending on all 10 chain ends (51 tasks). Each link consumes the
+// previous task's output, like a real build.
+static ccb_graph *layered_graph(void) {
+  ccb_graph *g = ccb_graph_create();
+  char id[16];
+  char out[16];
+  char prev[16];
+  for (size_t c = 0; c < 10; c++) {
+    prev[0] = '\0';
+    for (size_t r = 0; r < 5; r++) {
+      snprintf(id, sizeof id, "c%zu_%zu", r, c);
+      ccb_task *t = ccb_graph_add_task(g, id, "test",
+        CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+      snprintf(out, sizeof out, "out-%zu-%zu", r, c);
+      ccb_task_add_output(t, out);
+      if (r > 0) {
+        ccb_task_add_dep(t, prev);
+        snprintf(out, sizeof out, "out-%zu-%zu", r - 1, c);
+        ccb_task_add_input(t, out, CCB_TASK_INPUT_GENERATED);
+      }
+      snprintf(prev, sizeof prev, "%s", id);
+    }
+  }
+  ccb_task *join = ccb_graph_add_task(g, "join", "test",
+    CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+  for (size_t c = 0; c < 10; c++) {
+    snprintf(prev, sizeof prev, "c4_%zu", c);
+    ccb_task_add_dep(join, prev);
+    snprintf(out, sizeof out, "out-4-%zu", c);
+    ccb_task_add_input(join, out, CCB_TASK_INPUT_GENERATED);
+  }
+  return g;
+}
+
 // Diamond graph: a -> {b, c} -> d. b consumes "src-b", c consumes
 // "src-c", d consumes b's output "out-b". run is used for every task
 // except b, which uses b_run (so the failure test can fail only b).
@@ -420,6 +503,343 @@ int main(void) {
     if (g != NULL) {
       const char *want[] = { "config", "deps", "library" };
       check_plan_order(g, want, 3);
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+  }
+
+  // --- empty graph: validates, plans to nothing, runs, summarizes ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    CHECK(ccb_graph_validate(g, &diags) == CCB_OK);
+    ccb_task **order = NULL;
+    size_t norder = 99;
+    CHECK(ccb_graph_plan(g, &order, &norder) == CCB_OK);
+    CHECK(norder == 0);
+    free(order);
+    ccb_diag_list exec_diags;
+    ccb_diag_list_init(&exec_diags);
+    CHECK(ccb_graph_execute(g, NULL, &log, &exec_diags) == CCB_OK);
+    ccb_diag_list_free(&exec_diags);
+    ccb_str sum;
+    ccb_str_init(&sum);
+    ccb_graph_summary_json(g, &sum);
+    CHECK_STR_EQ(sum.buf, "[]");
+    ccb_str_free(&sum);
+    char **ids = NULL;
+    size_t nids = 99;
+    const char *changed[] = { "x" };
+    CHECK(ccb_graph_affected(g, changed, 1, &ids, &nids) ==
+      CCB_OK);
+    CHECK(nids == 0);
+    ccb_free_str_array(ids, nids);
+    ccb_graph_free(g);
+  }
+
+  // --- single-node graph ---
+  {
+    reset_seen();
+    ccb_graph *g = ccb_graph_create();
+    ccb_graph_add_task(g, "only", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    CHECK(ccb_graph_validate(g, &diags) == CCB_OK);
+    const char *want[] = { "only" };
+    check_plan_order(g, want, 1);
+    CHECK(ccb_graph_mark_ready(g) == 1);
+    ccb_diag_list exec_diags;
+    ccb_diag_list_init(&exec_diags);
+    CHECK(ccb_graph_execute(g, NULL, &log, &exec_diags) == CCB_OK);
+    CHECK_STR_EQ(g_seen, "only ");
+    ccb_diag_list_free(&exec_diags);
+    ccb_graph_free(g);
+  }
+
+  // --- duplicate dependency declaration ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *a = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task *b = ccb_graph_add_task(g, "b", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_dep(b, "a");
+    ccb_task_add_dep(b, "a");
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+    CHECK(ccb_test_contains(diag_message(&diags, before),
+      "more than once"));
+    ccb_graph_free(g);
+    CCB_UNUSED(a);
+  }
+
+  // --- duplicate input, same kind ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *t = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_input(t, "src", CCB_TASK_INPUT_SOURCE);
+    ccb_task_add_input(t, "src", CCB_TASK_INPUT_SOURCE);
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+    CHECK(ccb_test_contains(diag_message(&diags, before),
+      "more than once"));
+    ccb_graph_free(g);
+  }
+
+  // --- same input as both SOURCE and GENERATED ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *t = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_input(t, "x", CCB_TASK_INPUT_SOURCE);
+    ccb_task_add_input(t, "x", CCB_TASK_INPUT_GENERATED);
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+    CHECK(ccb_test_contains(diag_message(&diags, before),
+      "both source and generated"));
+    ccb_graph_free(g);
+  }
+
+  // --- duplicate output within one task ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *t = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_output(t, "out");
+    ccb_task_add_output(t, "out");
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+    CHECK(ccb_test_contains(diag_message(&diags, before),
+      "more than once"));
+    ccb_graph_free(g);
+  }
+
+  // --- SOURCE input that is also the task's own output ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *t = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_input(t, "out", CCB_TASK_INPUT_SOURCE);
+    ccb_task_add_output(t, "out");
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+    CHECK(ccb_test_contains(diag_message(&diags, before),
+      "also its own output"));
+    ccb_graph_free(g);
+  }
+
+  // --- GENERATED input produced by the task itself ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *t = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_input(t, "out", CCB_TASK_INPUT_GENERATED);
+    ccb_task_add_output(t, "out");
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+    CHECK(ccb_test_contains(diag_message(&diags, before),
+      "produced by itself"));
+    ccb_graph_free(g);
+  }
+
+  // --- GENERATED input whose producer is not a dependency ---
+  // The consumer is added first on one pass and second on the other:
+  // without this check the plan would run it before the producer
+  // exists. The missing edge, not the insertion order, is the defect.
+  {
+    for (int flip = 0; flip < 2; flip++) {
+      ccb_graph *g = ccb_graph_create();
+      ccb_task *first = ccb_graph_add_task(g,
+        flip == 0 ? "c" : "p", "test",
+        CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+      ccb_task *second = ccb_graph_add_task(g,
+        flip == 0 ? "p" : "c", "test",
+        CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+      ccb_task *p = flip == 0 ? second : first;
+      ccb_task *c = flip == 0 ? first : second;
+      ccb_task_add_output(p, "out");
+      ccb_task_add_input(c, "out", CCB_TASK_INPUT_GENERATED);
+      size_t before = diags.count;
+      CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+      CHECK_STR_EQ(diags.items[before].code, "CCB-E1013");
+      CHECK(ccb_test_contains(diag_message(&diags, before),
+        "does not depend on"));
+      CHECK(ccb_test_contains(diag_message(&diags, before),
+        "'p'"));
+      ccb_graph_free(g);
+    }
+  }
+
+  // --- GENERATED input whose producer is a transitive dependency ---
+  // The pipeline shape: the producer is an ancestor, not a direct
+  // dep (e.g. package consumes linked-apk from link). Valid.
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *p = ccb_graph_add_task(g, "p", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task *m = ccb_graph_add_task(g, "m", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task *c = ccb_graph_add_task(g, "c", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_output(p, "out");
+    ccb_task_add_dep(m, "p");
+    ccb_task_add_dep(c, "m");
+    ccb_task_add_input(c, "out", CCB_TASK_INPUT_GENERATED);
+    CHECK(ccb_graph_validate(g, &diags) == CCB_OK);
+    ccb_graph_free(g);
+  }
+
+  // --- deterministic planning: same graph twice, rebuilt graph ---
+  {
+    ccb_graph *g = diamond_graph(record_run);
+    char first[256];
+    char second[256];
+    plan_string(g, first, sizeof first);
+    plan_string(g, second, sizeof second);
+    CHECK_STR_EQ(first, second);
+    CHECK_STR_EQ(first, "a b c d ");
+    ccb_graph_free(g);
+    g = diamond_graph(record_run);
+    plan_string(g, second, sizeof second);
+    CHECK_STR_EQ(first, second);
+    ccb_graph_free(g);
+  }
+
+  // --- insertion order is the documented tie-break ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_graph_add_task(g, "b", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    char plan[64];
+    plan_string(g, plan, sizeof plan);
+    CHECK_STR_EQ(plan, "b a ");
+    ccb_graph_free(g);
+  }
+
+  // --- chain added in reverse insertion order still plans in order ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *c = ccb_graph_add_task(g, "c", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task *b = ccb_graph_add_task(g, "b", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_dep(c, "b");
+    ccb_task_add_dep(b, "a");
+    const char *want[] = { "a", "b", "c" };
+    check_plan_order(g, want, 3);
+    check_plan_valid(g);
+    ccb_graph_free(g);
+  }
+
+  // --- layered synthetic graph: valid, deterministic, affected ---
+  {
+    ccb_graph *g = layered_graph();
+    CHECK(ccb_graph_validate(g, &diags) == CCB_OK);
+    CHECK(g->count == 51);
+    char first[1024];
+    char second[1024];
+    plan_string(g, first, sizeof first);
+    plan_string(g, second, sizeof second);
+    CHECK_STR_EQ(first, second);
+    check_plan_valid(g);
+    ccb_graph_free(g);
+    g = layered_graph();
+    plan_string(g, second, sizeof second);
+    CHECK_STR_EQ(first, second);
+    char **ids = NULL;
+    size_t nids = 0;
+    const char *changed[] = { "out-0-0" };
+    CHECK(ccb_graph_affected(g, changed, 1, &ids, &nids) ==
+      CCB_OK);
+    CHECK(nids == 5);
+    if (nids == 5) {
+      CHECK_STR_EQ(ids[0], "c1_0");
+      CHECK_STR_EQ(ids[3], "c4_0");
+      CHECK_STR_EQ(ids[4], "join");
+    }
+    ccb_free_str_array(ids, nids);
+    ccb_graph_free(g);
+  }
+
+  // --- every problem reported at once; cycle skipped when a dep
+  // is unknown (the cycle check needs resolvable dependencies) ---
+  {
+    ccb_graph *g = ccb_graph_create();
+    ccb_task *a = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_dep(a, "ghost1");
+    ccb_task_add_dep(a, "ghost2");
+    size_t before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK(diags.count == before + 2);
+    CHECK(diag_has_code(&diags, "CCB-E1013"));
+    ccb_graph_free(g);
+    g = ccb_graph_create();
+    a = ccb_graph_add_task(g, "a", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task *b = ccb_graph_add_task(g, "b", "test",
+      CCB_TASK_CACHE_FINGERPRINT, record_run, NULL);
+    ccb_task_add_dep(a, "b");
+    ccb_task_add_dep(b, "a");
+    ccb_task_add_dep(a, "ghost");
+    before = diags.count;
+    CHECK(ccb_graph_validate(g, &diags) == CCB_ERR_CONFIG);
+    CHECK(diag_has_code(&diags, "CCB-E1013"));
+    int e1014 = 0;
+    for (size_t i = before; i < diags.count; i++) {
+      if (strcmp(diags.items[i].code, "CCB-E1014") == 0) {
+        e1014 = 1;
+      }
+    }
+    CHECK(e1014 == 0);
+    ccb_graph_free(g);
+  }
+
+  // --- pipeline builder deduplicates repeated config paths ---
+  // The same AAR listed twice, and a java_extra dir equal to the
+  // java dir, must not trip the engine's duplicate-declaration
+  // check: the builder declares each source input once.
+  {
+    ccb_config *cfg = fake_config(0);
+    cfg->aars = ccb_xcalloc(2, sizeof(char *));
+    cfg->aars[0] = ccb_xstrdup("x.aar");
+    cfg->aars[1] = ccb_xstrdup("x.aar");
+    cfg->aars_count = 2;
+    cfg->java_extra_dirs = ccb_xcalloc(1, sizeof(char *));
+    cfg->java_extra_dirs[0] = ccb_xstrdup("src/main/java");
+    cfg->java_extra_dirs_count = 1;
+    ccb_diag_list gdiags;
+    ccb_diag_list_init(&gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    CHECK(gdiags.count == 0);
+    if (g != NULL) {
+      ccb_task *deps = ccb_graph_find(g, "deps");
+      CHECK(deps != NULL);
+      if (deps != NULL) {
+        CHECK(deps->inputs_count == 2);
+      }
+      ccb_task *code = ccb_graph_find(g, "compile-code");
+      CHECK(code != NULL);
+      if (code != NULL) {
+        size_t java_seen = 0;
+        for (size_t i = 0; i < code->inputs_count; i++) {
+          if (strcmp(code->inputs[i].name, "src/main/java") == 0) {
+            java_seen++;
+          }
+        }
+        CHECK(java_seen == 1);
+      }
       ccb_graph_free(g);
     }
     ccb_diag_list_free(&gdiags);

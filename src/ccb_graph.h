@@ -21,9 +21,11 @@
 // with CCB-E1013: an input with no producer is a missing input.
 //
 // Diagnostics: CCB-E1012 duplicate task ID, CCB-E1013 unknown
-// dependency / unproduced generated input / duplicate output,
-// CCB-E1014 task dependency cycle (names the cycle path, following
-// the CCB-E1010 module-cycle pattern), CCB-E1015 missing source input.
+// dependency / unproduced generated input / duplicate output /
+// duplicate or conflicting declaration / GENERATED input whose
+// producer the consumer does not depend on, CCB-E1014 task
+// dependency cycle (names the cycle path, following the CCB-E1010
+// module-cycle pattern), CCB-E1015 missing source input.
 #ifndef CCB_GRAPH_H
 #define CCB_GRAPH_H
 
@@ -114,11 +116,16 @@ void ccb_task_add_input(ccb_task *t, const char *name,
 void ccb_task_add_output(ccb_task *t, const char *name);
 void ccb_task_add_dep(ccb_task *t, const char *dep_id);
 
-// Validate the graph: duplicate IDs, unknown dependencies, duplicate
-// outputs, GENERATED inputs with no producer task, and cycles.
-// Reports every problem found (except the cycle check, which needs
-// resolvable dependencies and is skipped when any dependency is
-// unknown). Returns CCB_OK or CCB_ERR_CONFIG; diags filled on failure.
+// Validate the graph: duplicate IDs, duplicate or conflicting
+// declarations (a dependency, input, or output listed twice; one
+// input as both SOURCE and GENERATED; a SOURCE input that is also
+// the task's own output), unknown dependencies, duplicate outputs,
+// GENERATED inputs with no producer or whose producer the consumer
+// does not depend on (directly or transitively), and cycles.
+// Reports every problem found (except the producer-dependency and
+// cycle checks, which need resolvable dependencies and are skipped
+// when any earlier check fails). Returns CCB_OK or CCB_ERR_CONFIG;
+// diags filled on failure.
 ccb_status ccb_graph_validate(ccb_graph *g, ccb_diag_list *diags);
 
 // Check SOURCE inputs against the filesystem. A missing source input

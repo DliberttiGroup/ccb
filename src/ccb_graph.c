@@ -147,8 +147,8 @@ void ccb_task_add_dep(ccb_task *t, const char *dep_id) {
 
 // ---------- validation ----------
 
-// A task other than self claims this output name.
-static int ccb_has_producer(ccb_graph *g, ccb_task *self,
+// First task other than self claiming this output, or NULL.
+static ccb_task *ccb_find_producer(ccb_graph *g, ccb_task *self,
     const char *name) {
   for (size_t i = 0; i < g->count; i++) {
     ccb_task *t = g->tasks[i];
@@ -157,8 +157,24 @@ static int ccb_has_producer(ccb_graph *g, ccb_task *self,
     }
     for (size_t j = 0; j < t->outputs_count; j++) {
       if (strcmp(t->outputs[j], name) == 0) {
-        return 1;
+        return t;
       }
+    }
+  }
+  return NULL;
+}
+
+// A task other than self claims this output name.
+static int ccb_has_producer(ccb_graph *g, ccb_task *self,
+    const char *name) {
+  return ccb_find_producer(g, self, name) != NULL;
+}
+
+// Is this name one of t's own outputs?
+static int ccb_task_claims_output(ccb_task *t, const char *name) {
+  for (size_t i = 0; i < t->outputs_count; i++) {
+    if (strcmp(t->outputs[i], name) == 0) {
+      return 1;
     }
   }
   return 0;
@@ -178,6 +194,186 @@ static void ccb_vdiag_task(ccb_diag_list *diags, const char *code,
   ccb_graph_diag(diags, code, msg.buf);
   ccb_str_free(&msg);
 }
+
+// ---------- duplicate declarations ----------
+
+// One task depending on the same task twice. Returns the error count.
+static int ccb_check_dup_deps(ccb_task *t, ccb_diag_list *diags) {
+  int errors = 0;
+  for (size_t j = 1; j < t->deps_count; j++) {
+    int seen = 0;
+    for (size_t k = 0; k < j; k++) {
+      if (strcmp(t->deps[k], t->deps[j]) == 0) {
+        seen = 1;
+      }
+    }
+    if (!seen) {
+      continue;
+    }
+    ccb_vdiag_task(diags, "CCB-E1013", t->id,
+      "depends on more than once", t->deps[j]);
+    errors++;
+  }
+  return errors;
+}
+
+// One task declaring the same input twice, or once as SOURCE and
+// once as GENERATED (the name would mean two different things).
+// Returns the error count.
+static int ccb_check_dup_inputs(ccb_task *t, ccb_diag_list *diags) {
+  int errors = 0;
+  for (size_t j = 1; j < t->inputs_count; j++) {
+    size_t first = (size_t)-1;
+    for (size_t k = 0; k < j; k++) {
+      if (strcmp(t->inputs[k].name, t->inputs[j].name) != 0) {
+        continue;
+      }
+      first = k;
+      break;
+    }
+    if (first == (size_t)-1) {
+      continue;
+    }
+    if (t->inputs[first].kind != t->inputs[j].kind) {
+      ccb_vdiag_task(diags, "CCB-E1013", t->id,
+        "declares input as both source and generated",
+        t->inputs[j].name);
+    } else {
+      ccb_vdiag_task(diags, "CCB-E1013", t->id,
+        "declares input more than once", t->inputs[j].name);
+    }
+    errors++;
+  }
+  return errors;
+}
+
+// One task claiming the same output twice. Cross-task duplicates are
+// caught by ccb_check_outputs; this catches the same-task case it
+// cannot see. Returns the error count.
+static int ccb_check_dup_outputs(ccb_task *t, ccb_diag_list *diags) {
+  int errors = 0;
+  for (size_t j = 1; j < t->outputs_count; j++) {
+    int seen = 0;
+    for (size_t k = 0; k < j; k++) {
+      if (strcmp(t->outputs[k], t->outputs[j]) == 0) {
+        seen = 1;
+      }
+    }
+    if (!seen) {
+      continue;
+    }
+    ccb_vdiag_task(diags, "CCB-E1013", t->id,
+      "claims output more than once", t->outputs[j]);
+    errors++;
+  }
+  return errors;
+}
+
+// A SOURCE input that is also the task's own output: the name would
+// mean both a project file and an artifact this task produces.
+// (A GENERATED input equal to its own output is caught by
+// ccb_check_outputs, which now names it as self-produced.)
+// Returns the error count.
+static int ccb_check_input_output_clash(ccb_task *t,
+    ccb_diag_list *diags) {
+  int errors = 0;
+  for (size_t j = 0; j < t->inputs_count; j++) {
+    if (t->inputs[j].kind != CCB_TASK_INPUT_SOURCE) {
+      continue;
+    }
+    if (!ccb_task_claims_output(t, t->inputs[j].name)) {
+      continue;
+    }
+    ccb_vdiag_task(diags, "CCB-E1013", t->id,
+      "declares input that is also its own output",
+      t->inputs[j].name);
+    errors++;
+  }
+  return errors;
+}
+
+static int ccb_check_dup_decls(ccb_graph *g, ccb_diag_list *diags) {
+  int errors = 0;
+  for (size_t i = 0; i < g->count; i++) {
+    ccb_task *t = g->tasks[i];
+    errors += ccb_check_dup_deps(t, diags);
+    errors += ccb_check_dup_inputs(t, diags);
+    errors += ccb_check_dup_outputs(t, diags);
+    errors += ccb_check_input_output_clash(t, diags);
+  }
+  return errors;
+}
+
+// Is target reachable from start by following dependency edges?
+// Iterative DFS with a visited set, so cycles terminate.
+static int ccb_reaches(ccb_graph *g, size_t start, size_t target) {
+  size_t n = g->count;
+  unsigned char *seen = ccb_xcalloc(n == 0 ? 1 : n, 1);
+  size_t *stack = ccb_xmalloc((n == 0 ? 1 : n) * sizeof(*stack));
+  size_t nstack = 0;
+  int found = 0;
+  seen[start] = 1;
+  stack[nstack++] = start;
+  while (nstack > 0 && !found) {
+    size_t cur = stack[--nstack];
+    ccb_task *t = g->tasks[cur];
+    for (size_t i = 0; i < t->deps_count; i++) {
+      size_t di = ccb_graph_index(g, t->deps[i]);
+      if (di == (size_t)-1 || seen[di]) {
+        continue;
+      }
+      if (di == target) {
+        found = 1;
+        break;
+      }
+      seen[di] = 1;
+      stack[nstack++] = di;
+    }
+  }
+  free(seen);
+  free(stack);
+  return found;
+}
+
+// GENERATED inputs whose producer exists but is not a dependency of
+// the consumer, directly or transitively. Dependencies are the
+// graph's only ordering, so such a consumer may run before its
+// producer exists. Inputs with no producer are already reported by
+// ccb_check_outputs and skipped here. Returns the error count.
+static int ccb_check_producer_deps(ccb_graph *g,
+    ccb_diag_list *diags) {
+  int errors = 0;
+  for (size_t i = 0; i < g->count; i++) {
+    ccb_task *t = g->tasks[i];
+    for (size_t j = 0; j < t->inputs_count; j++) {
+      if (t->inputs[j].kind != CCB_TASK_INPUT_GENERATED) {
+        continue;
+      }
+      ccb_task *p = ccb_find_producer(g, t, t->inputs[j].name);
+      if (p == NULL) {
+        continue;
+      }
+      size_t pi = ccb_graph_index(g, p->id);
+      if (ccb_reaches(g, i, pi)) {
+        continue;
+      }
+      ccb_str msg;
+      ccb_str_init(&msg);
+      ccb_str_append(&msg, "task '");
+      ccb_str_append(&msg, t->id);
+      ccb_str_append(&msg, "' has generated input '");
+      ccb_str_append(&msg, t->inputs[j].name);
+      ccb_str_append(&msg, "' produced by '");
+      ccb_str_append(&msg, p->id);
+      ccb_str_append(&msg, "', which it does not depend on");
+      ccb_graph_diag(diags, "CCB-E1013", msg.buf);
+      ccb_str_free(&msg);
+      errors++;
+    }
+  }
+  return errors;
+}
+
 
 // Unknown dependency references. Returns the error count.
 static int ccb_check_dep_refs(ccb_graph *g, ccb_diag_list *diags) {
@@ -233,6 +429,13 @@ static int ccb_check_outputs(ccb_graph *g, ccb_diag_list *diags) {
         continue;
       }
       if (ccb_has_producer(g, t, t->inputs[j].name)) {
+        continue;
+      }
+      if (ccb_task_claims_output(t, t->inputs[j].name)) {
+        ccb_vdiag_task(diags, "CCB-E1013", t->id,
+          "has generated input produced by itself",
+          t->inputs[j].name);
+        errors++;
         continue;
       }
       ccb_vdiag_task(diags, "CCB-E1013", t->id,
@@ -343,9 +546,11 @@ ccb_status ccb_graph_validate(ccb_graph *g, ccb_diag_list *diags) {
       errors++;
     }
   }
+  errors += ccb_check_dup_decls(g, diags);
   errors += ccb_check_dep_refs(g, diags);
   errors += ccb_check_outputs(g, diags);
   if (errors == 0) {
+    errors += ccb_check_producer_deps(g, diags);
     errors += ccb_check_cycle(g, diags);
   }
   return errors == 0 ? CCB_OK : CCB_ERR_CONFIG;

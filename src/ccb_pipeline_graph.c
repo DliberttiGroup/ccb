@@ -123,9 +123,18 @@ static ccb_task *ccb_gb_add(ccb_graph_builder *b, const char *id,
 }
 
 static void ccb_gb_source(ccb_task *t, const char *path) {
-  if (t != NULL && path != NULL) {
-    ccb_task_add_input(t, path, CCB_TASK_INPUT_SOURCE);
+  if (t == NULL || path == NULL) {
+    return;
   }
+  // Config lists may repeat a path (the same AAR twice, a java_extra
+  // dir equal to the java dir); the graph engine rejects duplicate
+  // declarations, so the builder declares each source input once.
+  for (size_t i = 0; i < t->inputs_count; i++) {
+    if (strcmp(t->inputs[i].name, path) == 0) {
+      return;
+    }
+  }
+  ccb_task_add_input(t, path, CCB_TASK_INPUT_SOURCE);
 }
 
 static void ccb_gb_gen(ccb_task *t, const char *name) {
