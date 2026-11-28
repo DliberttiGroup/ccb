@@ -239,6 +239,125 @@ limits follow from the shared state above: a skipped task's
 the shared log stash), and diagnostics a failed task adds are not
 stamped with its task ID.
 
+### Stage 6 audit (Step 11): what exactly is missing
+
+Step 11 audited the module-task path (the only path that can
+overlap — see the invariant below) instead of wiring parallel
+execution in, and stopped there: the missing work is a full step
+on its own, and a rushed parallel executor would trade a
+measured scaling record for an unproven one. The audit is
+file-and-line evidence, not a guess; every item below was read
+in the Step 10 tree.
+
+**Verdict: STOP.** Stage 6 is not reached. No parallel
+execution of real builds is wired in, and no `--jobs` flag
+exists: the scheduler (`src/ccb_sched.{h,c}`) stays unused by
+any build path, and the sequential executor remains the only
+way a real build runs. What is missing is exactly (a)–(f) in
+"What remains for stage 6" below, in that order — per-task
+diag/log/cache/pipe state first (scoped module classpath and
+fingerprint, task-owned delta and artifact merged at the join,
+driver-aggregated run/skip counts, per-task log and diag lists,
+one-time zip CRC init), then the driver opt-in, then the
+sequential-vs-parallel byte-identical APK equivalence test
+against an independent-modules fixture (the Step 11 scaling
+matrix chains its modules, so it cannot exercise concurrency).
+Until (a)–(f) land and that equivalence test passes, parallel
+module builds must not be enabled, by flag or by default.
+
+**The overlap invariant.** In the app graph, every non-module
+task depends (transitively) on the previous non-module task in
+plan order — each is chained to its predecessor through
+`ccb_gb_add`, and `merge-manifest` additionally depends on every
+module task — while a module task depends only on `deps`,
+`libraries`, and its own upstream modules. So at most one
+non-module task is ever READY, and no non-module task is READY
+while any module task is unfinished: only sibling module tasks
+can run concurrently. `tests/test_graph.c` pins this (the
+chain property for non-module tasks, and the absence of a
+dependency path between two independent module tasks). The
+invariant holds for the graph as built today; a future task
+added without its chain edge would break it silently, which is
+why the test exists.
+
+**Shared state a module task touches** (all of it written from
+inside `ccb_task_module` → `ccb_build_module_at`,
+`src/ccb_pipeline_module.c`, on the executor's thread):
+
+1. `ccb_log`: `ccb_log_cache` on the skip path, `ccb_log_phase_*`
+   / `ccb_log_tool_output` via `ccb_run_tool` /
+   `ccb_run_kotlinc`, warnings and info — all write the shared
+   `last_cache_reason` stash and stdout/stderr with no locking
+   (`src/ccb_log.c`).
+2. `ccb_diag_list`: `ccb_pipe_diag` / `ccb_tool_diag` /
+   `ccb_run_tool` failure path push onto the shared list, whose
+   `ccb_diag_list_push` reallocs it (`src/ccb_diag.c`, no mutex).
+3. `ccb_cache`: the fingerprint reads it
+   (`ccb_cache_step_fp`, a linear scan) while another task's
+   `ccb_cache_delta_merge` reallocs its arrays
+   (`ccb_cache_map_set`, `src/ccb_cache.c:10`).
+4. Pipe AAR lists: `ccb_mod_register_artifact` appends to eight
+   shared lists (`src/ccb_pipeline_modules.c:220`), while another
+   task's `ccb_build_classpath` (`src/ccb_pipeline_compile.c:114`)
+   and `ccb_fp_add_aar_class_jars` iterate them.
+5. Pipe counters: `p->steps_run++` / `p->steps_skipped++`
+   (`src/ccb_pipeline_module.c:454,528`), read back by the
+   `ccb_task_module` wrapper as a before/after skip detector —
+   wrong under concurrency even with atomic increments, because
+   another task's skip lands between the two reads.
+6. stdout directly: the explain-mode `printf` in
+   `ccb_build_module_at` and the dry-run `printf` in
+   `ccb_run_tool` interleave with the JSON event stream.
+7. `ccb_zip.c:9`: the CRC table is lazily initialized under a
+   plain `ccb_crc_table_ready` flag — the values written are
+   identical, but it is still a data race under concurrent
+   module AAR writes.
+
+Two comments describe the intended design, not the code: the
+`ccb_cache_delta` comment (`src/ccb_cache.h`) says the driver
+merges each task's delta, and `ccb_mod_register_artifact` says
+only the driver thread calls it — but both the delta merge
+(`src/ccb_pipeline_module.c:524`) and the registration happen
+inside `ccb_build_module_at`, i.e. inside the task body. That is
+harmless sequentially (the executor thread is the driver thread)
+and is exactly what must move for stage 6.
+
+**Mutexes alone do not restore byte-identical output.** A
+module's compile classpath and fingerprint read the *global*
+AAR lists (`ccb_build_classpath`, `ccb_fp_add_aar_class_jars`),
+which today contain every module that finished before it. Under
+parallel completion order an unrelated module may or may not
+have registered yet when a task fingerprints, so the classpath
+and the fingerprint itself would vary run to run — nondeterministic skips, not just nondeterministic output order. Guarding
+the lists with a mutex fixes the memory race and keeps the
+determinism bug. Registration must move to the driver join, in
+topological order, *and* the module classpath and fingerprint
+must be scoped to the module's declared upstream set, so they
+do not depend on completion order at all.
+
+**What remains for stage 6**, in order: (a) scope the module
+classpath and fingerprint to the module's upstream set; (b)
+return the task-owned delta and artifact from
+`ccb_build_module_at` instead of merging/registering inline,
+and have the driver merge both at the join in topological order
+(this also makes the two comments above true); (c) report
+run/skip and its reason from the task instead of the shared
+counter delta, and aggregate `steps_run` / `steps_skipped` in
+the driver; (d) give each task its own log and diag list (or
+mutex-guard the shared ones) and stamp diags / skip reasons
+from the task's own state, closing the two known parallel-mode
+limits; (e) initialize the zip CRC table once, before any
+worker starts; (f) wire the driver to run the module phase
+through `ccb_sched` behind an explicit opt-in, and run the
+sequential-vs-parallel byte-identical APK equivalence test. The
+equivalence test also needs an independent-modules fixture: the
+Step 11 scaling matrix chains its modules, so at most one
+module task is ever READY there and it cannot exercise
+concurrency at all. The kotlinc daemon is off by default (each
+task spawns its own kotlinc JVM, ~550 MiB peak each); daemon-on
+mode needs its own concurrency audit before it is used with
+parallel module tasks.
+
 ## Inspecting the plan
 
 *ccb-graph-plan*

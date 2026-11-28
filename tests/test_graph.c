@@ -159,6 +159,66 @@ static void check_plan_valid(ccb_graph *g) {
   free(order);
 }
 
+// True when seen already holds t.
+static int task_seen(ccb_task **seen, size_t nseen, ccb_task *t) {
+  for (size_t i = 0; i < nseen; i++) {
+    if (seen[i] == t) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Depth-first walk of t's dep edges. True when the task with this
+// id is reached; seen stops cycles.
+static int task_reaches(ccb_graph *g, ccb_task *t, const char *id,
+    ccb_task **seen, size_t *nseen, size_t cap) {
+  for (size_t i = 0; i < t->deps_count; i++) {
+    ccb_task *d = ccb_graph_find(g, t->deps[i]);
+    if (d == NULL) {
+      continue;
+    }
+    if (strcmp(d->id, id) == 0) {
+      return 1;
+    }
+    if (task_seen(seen, *nseen, d) || *nseen >= cap) {
+      continue;
+    }
+    seen[*nseen] = d;
+    (*nseen)++;
+    if (task_reaches(g, d, id, seen, nseen, cap)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// True when t depends on the task with this id, directly or
+// transitively.
+static int task_transitively_depends_on(ccb_graph *g, ccb_task *t,
+    const char *id) {
+  ccb_task **seen = ccb_xcalloc(g->count, sizeof(*seen));
+  size_t nseen = 0;
+  int hit = task_reaches(g, t, id, seen, &nseen, g->count);
+  free(seen);
+  return hit;
+}
+
+// True when t directly depends on the task with this id.
+static int task_directly_depends_on(ccb_task *t, const char *id) {
+  for (size_t i = 0; i < t->deps_count; i++) {
+    if (strcmp(t->deps[i], id) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// True for a per-module task ("module-<name>").
+static int task_is_module(ccb_task *t) {
+  return strncmp(t->id, "module-", 7) == 0;
+}
+
 // Layered synthetic graph: 10 chains of 5 tasks, joined by one task
 // depending on all 10 chain ends (51 tasks). Each link consumes the
 // previous task's output, like a real build.
@@ -713,6 +773,100 @@ int main(void) {
         CHECK(hit_base);
         CHECK(hit_core);
         ccb_free_str_array(ids, nids);
+      }
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+  }
+
+  // --- pipeline graph: only sibling module tasks can overlap ---
+  // The overlap invariant (docs/graph.md, Step 11 stage-6 audit).
+  // Three modules: a and b independent, c depending on a. The
+  // non-module tasks form a chain: each one transitively depends
+  // on the previous non-module task in plan order, so at most one
+  // of them is ever READY. A module task depends only on deps,
+  // libraries, and its own upstream modules, so independent
+  // modules have no dependency path between them and are the only
+  // tasks that can run concurrently. merge-manifest joins every
+  // module task, so no later non-module task is READY while a
+  // module task is unfinished. A future task added without its
+  // chain edge breaks this silently, which is why the test exists.
+  {
+    ccb_config *cfg = fake_config(0);
+    cfg->modules = ccb_xcalloc(3, sizeof(*cfg->modules));
+    cfg->modules_count = 3;
+    cfg->modules[0].name = ccb_xstrdup("a");
+    cfg->modules[0].dir = ccb_xstrdup("liba");
+    cfg->modules[1].name = ccb_xstrdup("b");
+    cfg->modules[1].dir = ccb_xstrdup("libb");
+    cfg->modules[2].name = ccb_xstrdup("c");
+    cfg->modules[2].dir = ccb_xstrdup("libc");
+    cfg->modules[2].depends = ccb_xcalloc(1, sizeof(char *));
+    cfg->modules[2].depends[0] = ccb_xstrdup("a");
+    cfg->modules[2].depends_count = 1;
+    ccb_diag_list gdiags;
+    ccb_diag_list_init(&gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    CHECK(gdiags.count == 0);
+    if (g != NULL) {
+      const char *want[] = { "config", "deps", "libraries",
+        "module-a", "module-b", "module-c", "merge-manifest",
+        "compile-res", "link", "compile-code", "dex", "dexcheck",
+        "native", "package", "align", "sign", "verify" };
+      check_plan_order(g, want, 17);
+      // Chain: each non-module task transitively depends on the
+      // previous non-module task in plan order.
+      ccb_task **order = NULL;
+      size_t norder = 0;
+      CHECK(ccb_graph_plan(g, &order, &norder) == CCB_OK);
+      ccb_task *prev = NULL;
+      for (size_t i = 0; i < norder; i++) {
+        ccb_task *t = order[i];
+        if (task_is_module(t)) {
+          continue;
+        }
+        if (prev != NULL) {
+          CHECK(task_transitively_depends_on(g, t, prev->id));
+        }
+        prev = t;
+      }
+      free(order);
+      // Siblings: no dependency path between independent modules,
+      // either way; c depends on a but not on b.
+      ccb_task *mod_a = ccb_graph_find(g, "module-a");
+      ccb_task *mod_b = ccb_graph_find(g, "module-b");
+      ccb_task *mod_c = ccb_graph_find(g, "module-c");
+      CHECK(mod_a != NULL);
+      CHECK(mod_b != NULL);
+      CHECK(mod_c != NULL);
+      if (mod_a != NULL && mod_b != NULL && mod_c != NULL) {
+        CHECK(!task_transitively_depends_on(g, mod_a, "module-b"));
+        CHECK(!task_transitively_depends_on(g, mod_b, "module-a"));
+        CHECK(task_transitively_depends_on(g, mod_c, "module-a"));
+        CHECK(!task_transitively_depends_on(g, mod_c, "module-b"));
+        // Scope: a module depends only on deps, libraries, and
+        // its own upstream modules.
+        CHECK(mod_a->deps_count == 2);
+        CHECK(task_directly_depends_on(mod_a, "deps"));
+        CHECK(task_directly_depends_on(mod_a, "libraries"));
+        CHECK(mod_b->deps_count == 2);
+        CHECK(task_directly_depends_on(mod_b, "deps"));
+        CHECK(task_directly_depends_on(mod_b, "libraries"));
+        CHECK(mod_c->deps_count == 3);
+        CHECK(task_directly_depends_on(mod_c, "deps"));
+        CHECK(task_directly_depends_on(mod_c, "libraries"));
+        CHECK(task_directly_depends_on(mod_c, "module-a"));
+        // Join: merge-manifest directly depends on every module
+        // task, so it is READY only once all of them are DONE.
+        ccb_task *merge = ccb_graph_find(g, "merge-manifest");
+        CHECK(merge != NULL);
+        if (merge != NULL) {
+          CHECK(task_directly_depends_on(merge, "module-a"));
+          CHECK(task_directly_depends_on(merge, "module-b"));
+          CHECK(task_directly_depends_on(merge, "module-c"));
+        }
       }
       ccb_graph_free(g);
     }

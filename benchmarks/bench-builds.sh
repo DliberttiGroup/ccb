@@ -36,6 +36,11 @@ SHOWCASE=${SHOWCASE:-"$HOME/workspace/ccb-showcase"}
 DEX_CACHE="${XDG_CACHE_HOME:-"$HOME/.cache"}/ccb/dex-stdlib"
 RUNS=${BENCH_RUNS:-3}
 MEASURE="$ROOT/benchmarks/measure.py"
+# Scratch dir for per-run build logs and generated module projects.
+# /tmp is not writable everywhere this runs (Termux): honor TMPDIR.
+BENCH_TMP="${TMPDIR:-/tmp}"
+LAST_LOG="$BENCH_TMP/ccb-bench-last.log"
+SETUP_LOG="$BENCH_TMP/ccb-bench-setup.log"
 OUT=${2:-"$ROOT/benchmarks/results-$(date +%Y%m%d-%H%M).txt"}
 # modules mode: $2 is the module count, $3 the results file.
 if [ "$1" = "modules" ]; then
@@ -69,10 +74,10 @@ use_measure() {
 time_build() {
   # $1 = project dir. Prints "wall cpu maxrss" (ms, ms, MiB) on
   # stdout; exit status is the build's. Build output goes to
-  # /tmp/ccb-bench-last.log either way.
+  # $LAST_LOG either way.
   dir=$1
   if use_measure; then
-    m=$(cd "$dir" && python3 "$MEASURE" --log /tmp/ccb-bench-last.log -- "$CCB" build)
+    m=$(cd "$dir" && python3 "$MEASURE" --log "$LAST_LOG" -- "$CCB" build)
     rc=$?
     wall=$(printf '%s' "$m" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')
     user=$(printf '%s' "$m" | sed -n 's/.*user_ms=\([0-9]*\).*/\1/p')
@@ -82,7 +87,7 @@ time_build() {
     return $rc
   fi
   start=$(date +%s%N)
-  (cd "$dir" && "$CCB" build > /tmp/ccb-bench-last.log 2>&1)
+  (cd "$dir" && "$CCB" build > "$LAST_LOG" 2>&1)
   rc=$?
   end=$(date +%s%N)
   echo "$(( (end - start) / 1000000 )) 0 0"
@@ -100,18 +105,18 @@ time_setup() {
   # cost. Informational only: a failure is logged, not fatal.
   dir=$1
   if use_measure; then
-    m=$(cd "$dir" && python3 "$MEASURE" --log /tmp/ccb-bench-setup.log -- "$CCB" setup)
+    m=$(cd "$dir" && python3 "$MEASURE" --log "$SETUP_LOG" -- "$CCB" setup)
     rc=$?
     wall=$(printf '%s' "$m" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')
   else
     start=$(date +%s%N)
-    (cd "$dir" && "$CCB" setup > /tmp/ccb-bench-setup.log 2>&1)
+    (cd "$dir" && "$CCB" setup > "$SETUP_LOG" 2>&1)
     rc=$?
     end=$(date +%s%N)
     wall=$(( (end - start) / 1000000 ))
   fi
   if [ "$rc" -ne 0 ]; then
-    log "  setup: FAILED (rc=$rc, see /tmp/ccb-bench-setup.log)"
+    log "  setup: FAILED (rc=$rc, see $SETUP_LOG)"
   else
     log "  setup: ${wall} ms (dependency resolution)"
   fi
@@ -148,7 +153,7 @@ run_set() {
       mv "$kt.bench-bak" "$kt"
     fi
     if [ "$rc" -ne 0 ]; then
-      log "  $mode run $i: BUILD FAILED (see /tmp/ccb-bench-last.log)"
+      log "  $mode run $i: BUILD FAILED (see $LAST_LOG)"
       return 1
     fi
     set -- $m
@@ -183,10 +188,17 @@ main() {
   {
     echo "CCB build benchmark baseline"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "machine: shared VM, 1.5 CPUs (cgroup limit; nproc reports $(nproc)), $(free -m | awk '/^Mem:/ {print $2}') MiB RAM"
+    # Portable machine line: arch + nproc + RAM everywhere; the
+    # cgroup cpu.max quota when one applies (the shared VM's 1.5
+    # CPUs); the Android device model when getprop has one (phone).
+    echo "machine: $(uname -m), $(nproc) CPUs$(awk '$1 != "max" {printf " (cgroup cpu.max %s/%s)", $1, $2}' /sys/fs/cgroup/cpu.max 2>/dev/null), $(free -m | awk '/^Mem:/ {print $2}') MiB RAM"
+    model=$(getprop ro.product.model 2>/dev/null)
+    [ -n "$model" ] && echo "device: $model"
     echo "ccb: $($CCB version 2>&1 | head -1) ($CCB)"
     echo "java: $(java -version 2>&1 | head -1)"
-    echo "kotlinc: $( "$KOTLIN_HOME/bin/kotlinc" -version 2>&1 | head -1)"
+    # kotlinc prints its version on stderr and, on Termux, a
+    # non-fatal jansi warning first: grep the version line itself.
+    echo "kotlinc: $( "$KOTLIN_HOME/bin/kotlinc" -version 2>&1 | grep -m1 'kotlinc' || echo 'version output unavailable')"
     echo "dex-stdlib cache dir: $DEX_CACHE"
     echo "runs per mode: $RUNS (BENCH_RUNS)"
     if use_measure; then
@@ -198,7 +210,7 @@ main() {
   } | tee "$OUT"
   if [ "$1" = "modules" ]; then
     n=$2
-    moddir="/tmp/ccb-bench-mod$n"
+    moddir="$BENCH_TMP/ccb-bench-mod$n"
     "$ROOT/benchmarks/gen-modules.sh" "$n" "$moddir" || return 1
     bench_project "modules-$n" "$moddir" \
       "$moddir/app/src/main/kotlin/com/example/hello/MainActivity.kt"
