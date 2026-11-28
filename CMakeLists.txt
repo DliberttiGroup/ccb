@@ -130,7 +130,7 @@ add_test(NAME fuzz_preview_flow
 # each. `ctest -L fast` is the quick gate (no real Android build, seconds);
 # `ctest -L <area>` runs one area; plain `ctest` runs the full suite.
 # fast counts: config 2, setup 2, pipeline 9, preview 29, tui 1,
-# misc 5, graph 2 (= 50).
+# misc 6, graph 2 (= 51).
 # slow counts: pipeline 5, dexcheck 1, daemon 1, maven 1, modules 1,
 # library 1, native 1 (= 11).
 set_tests_properties(test_config test_toml
@@ -151,7 +151,7 @@ set_tests_properties(test_preview test_preview_cli_gate_diff
   test_preview_trace test_preview_tree test_preview_walk test_preview_watch
   test_preview_watch_loop test_preview_width fuzz_preview_css fuzz_preview_flow
   PROPERTIES LABELS "fast;preview")
-set_tests_properties(test_hash test_json test_proc test_str test_zip
+set_tests_properties(test_hash test_json test_proc test_str test_zip test_repro
   PROPERTIES LABELS "fast;misc")
 set_tests_properties(test_graph test_sched PROPERTIES LABELS "fast;graph")
 set_tests_properties(test_tui PROPERTIES LABELS "fast;tui")

@@ -24,7 +24,9 @@ typedef struct {
 // Missing or unreadable files yield an empty cache with CCB_OK.
 ccb_status ccb_cache_load(const char *path, ccb_cache **out);
 // Saves atomically (temp file + rename): an interrupted save never
-// leaves a torn cache behind.
+// leaves a torn cache behind. Entries are written sorted by key, so
+// the file is byte-identical for equivalent caches regardless of the
+// order steps were recorded in (see docs/reproducibility.md).
 ccb_status ccb_cache_save(const ccb_cache *cache, const char *path);
 void ccb_cache_free(ccb_cache *cache);
 const char *ccb_cache_step_fp(const ccb_cache *c, const char *step);

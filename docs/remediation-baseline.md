@@ -433,7 +433,15 @@ and the findings it addresses.
    performance change; compare medians; add medium/large fixtures
    per directive §8 (5/15/25/50/100 modules where feasible);
    define the reproducibility contract (ZIP ordering/timestamps,
-   fingerprints, lockfile consistency).
+   fingerprints, lockfile consistency). Done: contract in
+   [reproducibility.md](reproducibility.md), canonical cache-manifest
+   save order (module deltas merge in completion order), `test_repro.c`
+   pins (ZIP/fingerprint/manifest/lockfile), benchmark suite extended
+   (CPU/RSS via `measure.py`, hit rates, `setup` timing,
+   `gen-modules.sh` + `modules` mode, `check-repro.sh`). VM runs:
+   two clean hello builds byte-identical (see
+   `benchmarks/check-repro.sh`); module scaling measured at N=5
+   only on the VM, 15/25/50/100 left for Step 11 / phone.
 10. **Step 11 — Real multi-module scaling validation.** D-4, D-5
     (per-module incrementality). Two-module fixture: change module
     A, assert B's tasks rerun and dex changes; change B only,

@@ -88,7 +88,43 @@ ccb_status ccb_cache_load(const char *path, ccb_cache **out) {
   return CCB_OK;
 }
 
+// One cache entry borrowed from the cache, for canonical sorting on save.
+typedef struct {
+  const char *key;
+  const char *val;
+} ccb_cache_pair;
+
+static int ccb_cache_pair_cmp(const void *a, const void *b) {
+  const ccb_cache_pair *x = a;
+  const ccb_cache_pair *y = b;
+  return strcmp(x->key, y->key);
+}
+
 ccb_status ccb_cache_save(const ccb_cache *cache, const char *path) {
+  // Canonical order: entries are written sorted by key, so the file
+  // is byte-identical for equivalent caches no matter the order steps
+  // were recorded in. That order is not stable in general: module
+  // steps merge into the cache in task-completion order, which varies
+  // between equivalent parallel builds (see ccb_build_module_at).
+  // Load is a map lookup, so order never affects behavior.
+  ccb_cache_pair *steps = NULL;
+  ccb_cache_pair *files = NULL;
+  if (cache->step_count > 0) {
+    steps = ccb_xmalloc(cache->step_count * sizeof(*steps));
+    for (size_t i = 0; i < cache->step_count; i++) {
+      steps[i].key = cache->step_names[i];
+      steps[i].val = cache->step_fps[i];
+    }
+    qsort(steps, cache->step_count, sizeof(*steps), ccb_cache_pair_cmp);
+  }
+  if (cache->file_count > 0) {
+    files = ccb_xmalloc(cache->file_count * sizeof(*files));
+    for (size_t i = 0; i < cache->file_count; i++) {
+      files[i].key = cache->file_paths[i];
+      files[i].val = cache->file_hashes[i];
+    }
+    qsort(files, cache->file_count, sizeof(*files), ccb_cache_pair_cmp);
+  }
   ccb_str s;
   ccb_str_init(&s);
   ccb_str_append(&s, "{\n  \"version\": 1");
@@ -104,9 +140,9 @@ ccb_status ccb_cache_save(const ccb_cache *cache, const char *path) {
       ccb_str_append(&s, ",");
     }
     ccb_str_append(&s, "\n    ");
-    ccb_json_escape(&s, cache->step_names[i]);
+    ccb_json_escape(&s, steps[i].key);
     ccb_str_append(&s, ": ");
-    ccb_json_escape(&s, cache->step_fps[i]);
+    ccb_json_escape(&s, steps[i].val);
   }
   if (cache->step_count > 0) {
     ccb_str_append(&s, "\n  ");
@@ -117,14 +153,16 @@ ccb_status ccb_cache_save(const ccb_cache *cache, const char *path) {
       ccb_str_append(&s, ",");
     }
     ccb_str_append(&s, "\n    ");
-    ccb_json_escape(&s, cache->file_paths[i]);
+    ccb_json_escape(&s, files[i].key);
     ccb_str_append(&s, ": ");
-    ccb_json_escape(&s, cache->file_hashes[i]);
+    ccb_json_escape(&s, files[i].val);
   }
   if (cache->file_count > 0) {
     ccb_str_append(&s, "\n  ");
   }
   ccb_str_append(&s, "}\n}\n");
+  free(steps);
+  free(files);
   // Atomic publish: an interrupted save leaves the previous cache
   // intact instead of a torn ccb-cache.json. A corrupt cache still
   // loads as empty (see ccb_cache_load), so the worst case of any
