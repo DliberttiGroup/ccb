@@ -415,9 +415,12 @@ static ccb_status ccb_mod_assemble_aar(ccb_mod_ctx *c) {
 }
 
 // Run a module whose inputs changed: reset the work dir, compile
-// resources and sources, pack classes.jar, assemble the AAR.
+// resources and sources, pack classes.jar, assemble the AAR. The
+// completed step fingerprint goes into the plan-owned delta, never
+// into the shared cache: the caller merges it after the run
+// succeeds (a failed run's delta is discarded with the plan).
 static ccb_status ccb_mod_run(ccb_mod_ctx *c, const char *fp,
-    const char *key) {
+    const char *key, ccb_cache_delta *delta) {
   ccb_pipe *p = c->p;
   if (!p->opts->dry_run) {
     ccb_remove_recursive(c->work);
@@ -446,8 +449,7 @@ static ccb_status ccb_mod_run(ccb_mod_ctx *c, const char *fp,
     return CCB_ERR_BUILD;
   }
   if (!p->opts->dry_run) {
-    ccb_cache_set_step(p->cache, key, fp);
-    p->cache_dirty = 1;
+    ccb_cache_delta_set_step(delta, key, fp);
   }
   p->steps_run++;
   return CCB_OK;
@@ -478,6 +480,7 @@ int ccb_mod_plan_init(ccb_pipe *p, ccb_module *m,
 
 void ccb_mod_plan_free(ccb_mod_plan *plan) {
   free(plan->fp);
+  ccb_cache_delta_free(&plan->delta);
   ccb_mod_ctx_free(&plan->ctx);
   memset(plan, 0, sizeof(*plan));
 }
@@ -488,12 +491,13 @@ void ccb_mod_plan_free(ccb_mod_plan *plan) {
 // <work>/<name>.aar. kind is "module" or "library" (display names,
 // explain lines, cache stage). do_register 0 builds the AAR without
 // registering it in the app's merge lists (standalone library).
-// Per-module graph tasks are NOT done here: graph tasks still
-// execute through the shared mutable pipe, so splitting the
-// "modules" task would not gain any ownership — registration into
-// the shared merge/classpath lists would stay shared and ordered
-// by this loop. That needs Step 8 (per-task artifact ownership +
-// scheduler); the plan struct is the unit a module task will own.
+// The run owns its outputs through the plan (work dir + delta);
+// registration collects them into a task-owned artifact first and
+// merges that artifact into the pipe's shared lists in this one
+// place, so no two tasks ever append to the shared lists
+// concurrently. The per-module graph task ("module-<name>") calls
+// this for exactly its module; the sequential driver still runs
+// the tasks in plan order.
 ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
     const char *work_root, char *aar_path, const char *key,
     const char *kind, int do_register) {
@@ -511,8 +515,14 @@ ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
     printf("%s %s: %s\n", kind, m->name,
       plan.run ? "run (inputs changed)" : "skip (inputs unchanged)");
   } else if (plan.run) {
-    if (ccb_mod_run(&plan.ctx, plan.fp, key) != CCB_OK) {
+    if (ccb_mod_run(&plan.ctx, plan.fp, key, &plan.delta) != CCB_OK) {
       rc = CCB_ERR_BUILD;
+    } else if (plan.delta.step_count > 0) {
+      // Single-writer merge: the run completed, so its step
+      // fingerprint may publish; a failed run never reaches here
+      // and its delta is discarded with the plan.
+      ccb_cache_delta_merge(p->cache, &plan.delta);
+      p->cache_dirty = 1;
     }
   } else {
     p->steps_skipped++;
@@ -520,36 +530,11 @@ ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
       1, strcmp(kind, "library") == 0 ? "library inputs unchanged" : "module inputs unchanged");
   }
   if (rc == CCB_OK && do_register) {
-    ccb_mod_register(p, m, plan.ctx.aar_path,
-      plan.ctx.has_sources ? plan.ctx.classes_jar : NULL, kind);
+    ccb_mod_artifact artifact;
+    ccb_mod_artifact_collect(&artifact, m, &plan.ctx, kind);
+    ccb_mod_register_artifact(p, &artifact);
+    ccb_mod_artifact_free(&artifact);
   }
   ccb_mod_plan_free(&plan);
   return rc;
-}
-
-static ccb_status ccb_build_one_module(ccb_pipe *p, ccb_module *m) {
-  ccb_str key;
-  ccb_str_init(&key);
-  ccb_str_append(&key, "module-");
-  ccb_str_append(&key, m->name);
-  ccb_status rc = ccb_build_module_at(p, m, p->modules_dir, NULL, key.buf,
-    "module", 1);
-  ccb_str_free(&key);
-  return rc;
-}
-
-ccb_status ccb_step_modules(ccb_pipe *p) {
-  if (p->cfg->modules_count == 0) {
-    if (p->opts->explain) {
-      printf("modules: skip (no library modules)\n");
-    }
-    return CCB_OK;
-  }
-  for (size_t i = 0; i < p->cfg->modules_count; i++) {
-    ccb_status rc = ccb_build_one_module(p, &p->cfg->modules[i]);
-    if (rc != CCB_OK) {
-      return rc;
-    }
-  }
-  return CCB_OK;
 }

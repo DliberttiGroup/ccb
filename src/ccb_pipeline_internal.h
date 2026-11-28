@@ -148,15 +148,47 @@ typedef struct {
   int has_res_files;
 } ccb_mod_ctx;
 
+// One module's outputs, owned by the task that built it (Step 8):
+// the AAR the task wrote plus the registration entries downstream
+// steps read. A module task fills one of these from its own context
+// and never touches the pipe's shared AAR lists; the driver merges
+// it into the pipe (ccb_mod_register_artifact) in topological
+// order, after the task completes. All strings owned; NULL when
+// the module has no such entry (classes_jar is NULL for a
+// resources-only module).
+typedef struct {
+  char *aar_path;
+  char *classes_jar;
+  char *manifest_src;
+  char *display_name;
+  char *res_dir;
+  char *assets_dir;
+  char *package;
+} ccb_mod_artifact;
+
+void ccb_mod_artifact_collect(ccb_mod_artifact *a, ccb_module *m,
+    const ccb_mod_ctx *ctx, const char *kind);
+void ccb_mod_artifact_free(ccb_mod_artifact *a);
+// Merge one completed module's artifact into the pipe's shared AAR
+// lists. Single-writer: called only by the driver thread, in
+// topological order, never by a worker.
+void ccb_mod_register_artifact(ccb_pipe *p,
+    const ccb_mod_artifact *a);
+
 // One module's build plan (Step 7, audit D-4): the read-only
 // fingerprint + run/skip decision, separate from execution
-// (ccb_mod_run, writes outputs) and registration (ccb_mod_register,
+// (ccb_mod_run, writes outputs) and registration (ccb_mod_register_artifact,
 // mutates the pipe's shared AAR lists). A future per-module graph
 // task owns one plan; the plan carries no shared mutable state.
+// The delta (Step 8) holds the step fingerprint the run completed:
+// the driver merges it into the shared cache after the run
+// succeeds, and discards it with the plan when the run fails, so a
+// failed module never publishes a cache entry.
 typedef struct {
   ccb_mod_ctx ctx;
   char *fp; // owned fingerprint, NULL when inputs unreadable
   int run; // 1 when the module must build
+  ccb_cache_delta delta;
 } ccb_mod_plan;
 
 typedef struct {
@@ -245,8 +277,6 @@ ccb_status ccb_mod_zip_tree(ccb_zip_writer *w, const char *dir,
 ccb_status ccb_mod_zip_tree_filtered(ccb_zip_writer *w, const char *dir,
     const char *prefix, int (*skip)(const char *path));
 int ccb_mod_is_r_class(const char *path);
-void ccb_mod_register(ccb_pipe *p, ccb_module *m, const char *aar_path,
-    const char *classes_jar, const char *kind);
 // Plan one module build: fingerprint + run/skip decision. Returns 0
 // on success, -1 when inputs are unreadable (plan->fp NULL, run 1);
 // the caller frees the plan either way.
@@ -257,7 +287,6 @@ void ccb_mod_plan_free(ccb_mod_plan *plan);
 ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
     const char *work_root, char *aar_path, const char *key,
     const char *kind, int do_register);
-ccb_status ccb_step_modules(ccb_pipe *p);
 ccb_status ccb_step_libraries(ccb_pipe *p);
 char *ccb_library_aar_path(const ccb_config *cfg);
 ccb_status ccb_step_library(ccb_pipe *p);

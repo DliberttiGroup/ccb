@@ -843,8 +843,12 @@ not met and stays open work.
 - Process management: `posix_spawn` (or `fork`/`exec` with careful fd
   hygiene). No `system()` calls. Every spawned tool's argv, cwd, and
   environment must be constructible in `--dry-run` output.
-- No threads. The pipeline is sequential; parallelism is a v2
-  optimization, not a v1 requirement.
+- No threads in the pipeline itself: it runs sequentially; the
+  parallel task executor (`ccb_sched`, Step 8) exists as opt-in
+  API only and no build path calls it yet, because real steps
+  still share one log, one diag list, one cache, and one pipe.
+  Parallelism of real builds is a later step's work, not a v1
+  requirement.
 - Test strategy:
   - Unit tests for the TOML parser, path resolution, hashing, ZIP
     read/write, and command construction (a small C test harness, no

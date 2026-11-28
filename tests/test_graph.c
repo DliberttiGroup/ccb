@@ -542,11 +542,11 @@ int main(void) {
     ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
     CHECK(g != NULL);
     CHECK(gdiags.count == 0);
-    const char *want[] = { "config", "deps", "libraries", "modules",
+    const char *want[] = { "config", "deps", "libraries",
       "merge-manifest", "compile-res", "link", "compile-code", "dex",
       "dexcheck", "native", "package", "align", "sign", "verify" };
     if (g != NULL) {
-      check_plan_order(g, want, 15);
+      check_plan_order(g, want, 14);
       CHECK_STR_EQ(ccb_graph_find(g, "dexcheck")->type, "dexcheck");
       CHECK(ccb_graph_find(g, "dexcheck")->cache ==
         CCB_TASK_CACHE_ALWAYS_RUN);
@@ -587,12 +587,133 @@ int main(void) {
     CHECK(g != NULL);
     if (g != NULL) {
       const char *want[] = { "config", "deps", "libraries",
-        "modules", "merge-manifest", "compile-res", "link",
+        "merge-manifest", "compile-res", "link",
         "compile-code", "dex", "dexcheck", "native", "package-aab",
         "sign", "verify" };
-      check_plan_order(g, want, 14);
+      check_plan_order(g, want, 13);
       CHECK(ccb_graph_find(g, "align") == NULL);
       CHECK(ccb_graph_find(g, "package") == NULL);
+      ccb_graph_free(g);
+    }
+    ccb_diag_list_free(&gdiags);
+    ccb_config_free(cfg);
+  }
+
+  // --- pipeline graph: one task per module, with per-module edges ---
+  // Two modules, core depending on base: each gets its own task
+  // ("module-<name>") and output ("module-aar-<name>"); core
+  // depends on base, both depend on deps + libraries, and
+  // merge-manifest joins every module task. A module-less config
+  // has no module task at all (see the plan-order tests above).
+  {
+    ccb_config *cfg = fake_config(0);
+    cfg->modules = ccb_xcalloc(2, sizeof(*cfg->modules));
+    cfg->modules_count = 2;
+    cfg->modules[0].name = ccb_xstrdup("base");
+    cfg->modules[0].dir = ccb_xstrdup("libbase");
+    cfg->modules[1].name = ccb_xstrdup("core");
+    cfg->modules[1].dir = ccb_xstrdup("libcore");
+    cfg->modules[1].depends = ccb_xcalloc(1, sizeof(char *));
+    cfg->modules[1].depends[0] = ccb_xstrdup("base");
+    cfg->modules[1].depends_count = 1;
+    ccb_diag_list gdiags;
+    ccb_diag_list_init(&gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    CHECK(g != NULL);
+    CHECK(gdiags.count == 0);
+    if (g != NULL) {
+      const char *want[] = { "config", "deps", "libraries",
+        "module-base", "module-core", "merge-manifest",
+        "compile-res", "link", "compile-code", "dex", "dexcheck",
+        "native", "package", "align", "sign", "verify" };
+      check_plan_order(g, want, 16);
+      CHECK(ccb_graph_find(g, "modules") == NULL);
+      ccb_task *base = ccb_graph_find(g, "module-base");
+      ccb_task *core = ccb_graph_find(g, "module-core");
+      CHECK(base != NULL);
+      CHECK(core != NULL);
+      if (base != NULL && core != NULL) {
+        CHECK(task_has_input(base, "libbase",
+          CCB_TASK_INPUT_SOURCE));
+        CHECK(task_has_input(core, "libcore",
+          CCB_TASK_INPUT_SOURCE));
+        // Per-task outputs, not one shared "module-aars".
+        CHECK(base->outputs_count == 1);
+        CHECK_STR_EQ(base->outputs[0], "module-aar-base");
+        CHECK(core->outputs_count == 1);
+        CHECK_STR_EQ(core->outputs[0], "module-aar-core");
+        // Edges: both on deps + libraries; core on base.
+        CHECK(ccb_graph_find(g, "module-base") != NULL);
+        int base_deps_deps = 0;
+        int base_deps_libs = 0;
+        for (size_t i = 0; i < base->deps_count; i++) {
+          if (strcmp(base->deps[i], "deps") == 0) {
+            base_deps_deps = 1;
+          }
+          if (strcmp(base->deps[i], "libraries") == 0) {
+            base_deps_libs = 1;
+          }
+        }
+        CHECK(base_deps_deps);
+        CHECK(base_deps_libs);
+        int core_deps_base = 0;
+        for (size_t i = 0; i < core->deps_count; i++) {
+          if (strcmp(core->deps[i], "module-base") == 0) {
+            core_deps_base = 1;
+          }
+        }
+        CHECK(core_deps_base);
+        // Fan-in: merge-manifest consumes both AARs and depends
+        // on both module tasks.
+        ccb_task *merge = ccb_graph_find(g, "merge-manifest");
+        CHECK(merge != NULL);
+        if (merge != NULL) {
+          CHECK(task_has_input(merge, "module-aar-base",
+            CCB_TASK_INPUT_GENERATED));
+          CHECK(task_has_input(merge, "module-aar-core",
+            CCB_TASK_INPUT_GENERATED));
+          int merge_base = 0;
+          int merge_core = 0;
+          for (size_t i = 0; i < merge->deps_count; i++) {
+            if (strcmp(merge->deps[i], "module-base") == 0) {
+              merge_base = 1;
+            }
+            if (strcmp(merge->deps[i], "module-core") == 0) {
+              merge_core = 1;
+            }
+          }
+          CHECK(merge_base);
+          CHECK(merge_core);
+          // Downstream tasks consume the per-module AARs too.
+          CHECK(task_has_input(ccb_graph_find(g, "compile-res"),
+            "module-aar-core", CCB_TASK_INPUT_GENERATED));
+          CHECK(task_has_input(ccb_graph_find(g, "compile-code"),
+            "module-aar-base", CCB_TASK_INPUT_GENERATED));
+          CHECK(task_has_input(ccb_graph_find(g, "dex"),
+            "module-aar-core", CCB_TASK_INPUT_GENERATED));
+        }
+        // Affected: changing the base module dir affects the base
+        // task, the core task (via the edge), and downstream — but
+        // the core dir alone does not affect the base task.
+        char **ids = NULL;
+        size_t nids = 0;
+        const char *changed_base[] = { "libbase" };
+        CHECK(ccb_graph_affected(g, changed_base, 1, &ids,
+          &nids) == CCB_OK);
+        int hit_base = 0;
+        int hit_core = 0;
+        for (size_t i = 0; i < nids; i++) {
+          if (strcmp(ids[i], "module-base") == 0) {
+            hit_base = 1;
+          }
+          if (strcmp(ids[i], "module-core") == 0) {
+            hit_core = 1;
+          }
+        }
+        CHECK(hit_base);
+        CHECK(hit_core);
+        ccb_free_str_array(ids, nids);
+      }
       ccb_graph_free(g);
     }
     ccb_diag_list_free(&gdiags);

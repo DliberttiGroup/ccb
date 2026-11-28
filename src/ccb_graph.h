@@ -4,8 +4,10 @@
 // cache policy, and a run function. The graph is validated (duplicate
 // IDs, unknown dependencies, unproduced inputs, cycles), planned
 // (topological order), and executed in order by a sequential executor.
-// The executor is deliberately sequential: parallel scheduling is
-// Phase 2, which replaces only the executor, not this module.
+// The executor is deliberately sequential: parallel scheduling lives
+// in ccb_sched (Step 8), which replaces only the executor, not this
+// module. The sequential executor stays the correctness reference
+// and the default; the pipeline driver still calls it.
 //
 // What this module does NOT do: it knows nothing about Android, the
 // pipeline stages, or the cache. Callers (ccb_pipeline_graph) build a

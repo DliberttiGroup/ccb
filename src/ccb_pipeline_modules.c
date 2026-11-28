@@ -172,45 +172,73 @@ int ccb_mod_is_r_class(const char *path) {
   return strncmp(base, "R$", 2) == 0;
 }
 
-// Register a module's outputs in the AAR machinery. Runs in every mode
-// (explain, dry-run, real): downstream steps plan from these lists.
-// classes.jar is registered only when the module has real sources;
-// a resources-only module contributes no classes. kind is "module"
-// for [modules.<name>] and "library" for [deps.library.<name>].
-void ccb_mod_register(ccb_pipe *p, ccb_module *m, const char *aar_path,
-    const char *classes_jar, const char *kind) {
-  ccb_push_str(&p->merge_aar_paths, &p->merge_aar_paths_count,
-    &p->merge_aar_paths_cap, ccb_xstrdup(aar_path));
-  ccb_push_str(&p->merge_aar_srcs, &p->merge_aar_srcs_count,
-    &p->merge_aar_srcs_cap, ccb_xstrdup(m->manifest));
+// Fill a task-owned artifact from a module build's context. No
+// pipe state is touched: the artifact is the task's own output, and
+// the driver merges it later (ccb_mod_register_artifact).
+// classes_jar is NULL for a resources-only module (no classes to
+// contribute); res/assets are NULL when the module has none.
+void ccb_mod_artifact_collect(ccb_mod_artifact *a, ccb_module *m,
+    const ccb_mod_ctx *ctx, const char *kind) {
+  memset(a, 0, sizeof(*a));
+  a->aar_path = ccb_xstrdup(ctx->aar_path);
+  a->classes_jar = ctx->has_sources ? ccb_xstrdup(ctx->classes_jar) : NULL;
+  a->manifest_src = ccb_xstrdup(m->manifest);
   ccb_str disp;
   ccb_str_init(&disp);
   ccb_str_append(&disp, kind);
   ccb_str_append_c(&disp, ' ');
   ccb_str_append(&disp, m->name);
+  a->display_name = ccb_str_steal(&disp);
+  a->res_dir = m->res != NULL ? ccb_xstrdup(m->res) : NULL;
+  a->assets_dir = m->assets != NULL ? ccb_xstrdup(m->assets) : NULL;
+  a->package = ccb_xstrdup(m->package);
+}
+
+void ccb_mod_artifact_free(ccb_mod_artifact *a) {
+  if (a == NULL) {
+    return;
+  }
+  free(a->aar_path);
+  free(a->classes_jar);
+  free(a->manifest_src);
+  free(a->display_name);
+  free(a->res_dir);
+  free(a->assets_dir);
+  free(a->package);
+  memset(a, 0, sizeof(*a));
+}
+
+// Register a module's outputs in the AAR machinery. Runs in every mode
+// (explain, dry-run, real): downstream steps plan from these lists.
+// classes.jar is registered only when the module has real sources;
+// a resources-only module contributes no classes. kind is "module"
+// for [modules.<name>] and "library" for [deps.library.<name>].
+// Single-writer: only the driver thread calls this, in topological
+// order, after the owning task completed.
+void ccb_mod_register_artifact(ccb_pipe *p,
+    const ccb_mod_artifact *a) {
+  ccb_push_str(&p->merge_aar_paths, &p->merge_aar_paths_count,
+    &p->merge_aar_paths_cap, ccb_xstrdup(a->aar_path));
+  ccb_push_str(&p->merge_aar_srcs, &p->merge_aar_srcs_count,
+    &p->merge_aar_srcs_cap, ccb_xstrdup(a->manifest_src));
   ccb_push_str(&p->merge_aar_names, &p->merge_aar_names_count,
-    &p->merge_aar_names_cap, ccb_str_steal(&disp));
-  if (classes_jar != NULL) {
+    &p->merge_aar_names_cap, ccb_xstrdup(a->display_name));
+  if (a->classes_jar != NULL) {
     ccb_push_str(&p->aar_class_jars, &p->aar_class_jars_count,
-      &p->aar_class_jars_cap, ccb_xstrdup(classes_jar));
+      &p->aar_class_jars_cap, ccb_xstrdup(a->classes_jar));
   }
-  if (m->res != NULL) {
+  if (a->res_dir != NULL) {
     ccb_push_str(&p->aar_res_dirs, &p->aar_res_dirs_count,
-      &p->aar_res_dirs_cap, ccb_xstrdup(m->res));
-    ccb_str rdisp;
-    ccb_str_init(&rdisp);
-    ccb_str_append(&rdisp, kind);
-    ccb_str_append_c(&rdisp, ' ');
-    ccb_str_append(&rdisp, m->name);
+      &p->aar_res_dirs_cap, ccb_xstrdup(a->res_dir));
     ccb_push_str(&p->aar_res_names, &p->aar_res_names_count,
-      &p->aar_res_names_cap, ccb_str_steal(&rdisp));
+      &p->aar_res_names_cap, ccb_xstrdup(a->display_name));
   }
-  if (m->assets != NULL) {
+  if (a->assets_dir != NULL) {
     ccb_push_str(&p->aar_assets_dirs, &p->aar_assets_count,
-      &p->aar_assets_cap, ccb_xstrdup(m->assets));
+      &p->aar_assets_cap, ccb_xstrdup(a->assets_dir));
   }
   ccb_push_str(&p->aar_packages, &p->aar_packages_count,
-    &p->aar_packages_cap, ccb_xstrdup(m->package));
+    &p->aar_packages_cap, ccb_xstrdup(a->package));
 }
 
 // ---------- path libraries ----------

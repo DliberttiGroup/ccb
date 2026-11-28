@@ -552,9 +552,24 @@ static ccb_status ccb_save_cache(ccb_pipe *p) {
   if (p->opts->dry_run || p->opts->explain) {
     return CCB_OK;
   }
+  // Single-writer atomic publication (Step 8): the cache file is
+  // published at most once per build, from this thread only, after
+  // the executor has returned — workers never save, and tasks
+  // publish only through their merged deltas. Nothing to publish
+  // when no step ran and no tool invalidation happened (a no-op
+  // build leaves the file untouched). On a failed build the
+  // completed steps' deltas are already merged, so a retry resumes
+  // them; a failed step's delta was discarded with its plan and
+  // never reaches this file.
+  if (!p->cache_dirty) {
+    return CCB_OK;
+  }
   char *cache_path = ccb_path_join(p->cfg->build_dir, "ccb-cache.json");
   ccb_status rc = ccb_cache_save(p->cache, cache_path);
   free(cache_path);
+  if (rc == CCB_OK) {
+    p->cache_dirty = 0;
+  }
   return rc;
 }
 

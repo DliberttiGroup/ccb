@@ -34,7 +34,17 @@
 // What this does NOT do: it does not split ccb_pipe (the shared
 // context the step functions read — that is Phase 4), it does not
 // change any step's fingerprint or skip decision, and it does not
-// parallelize anything (Phase 2 owns the scheduler).
+// run anything in parallel: the pipeline driver still executes the
+// graph sequentially. The parallel executor (ccb_sched) exists and
+// is proven on synthetic graphs (Step 8, stages 1–5), but no build
+// path calls it yet — real steps still share one log, one diag
+// list, one cache, and one pipe, so parallel execution of real
+// build tasks stays off until per-task ownership of those exists.
+// Modules already fan out in the graph itself: one task per module
+// ("module-<name>", output "module-aar-<name>"), each depending on
+// deps + libraries and on its own upstream modules, with
+// merge-manifest joining them; with no modules there is no module
+// task.
 #ifndef CCB_PIPELINE_GRAPH_H
 #define CCB_PIPELINE_GRAPH_H
 

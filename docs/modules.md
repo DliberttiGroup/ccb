@@ -53,7 +53,8 @@ depends = ["base"]
 
 *ccb-modules-flow*
 
-Pipeline order: deps (declared AARs) → modules → merge-manifest →
+Pipeline order: deps (declared AARs) → one task per module
+(`module-<name>`, dependencies first) → merge-manifest →
 compile-res → link → code → dex → … The manifest merge sees declared AARs
 first, then module AARs in topological order. Merge rules: see
 [build.md](build.md) (stage 4).

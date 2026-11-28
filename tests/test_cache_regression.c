@@ -81,6 +81,13 @@ static unsigned task_bit(const char *name) {
   if (strncmp(name, "native-", 7) == 0) {
     return T_NATIVE;
   }
+  // Per-module tasks (Step 8): --json event ids are
+  // "module-<name>", --explain lines are "module <name>".
+  // Both count as the modules step.
+  if (strncmp(name, "module-", 7) == 0 ||
+      strncmp(name, "module ", 7) == 0) {
+    return T_MODULES;
+  }
   for (size_t i = 0; i < CCB_ARRAY_LEN(TASK_BITS); i++) {
     if (strcmp(TASK_BITS[i].name, name) == 0) {
       return TASK_BITS[i].bit;

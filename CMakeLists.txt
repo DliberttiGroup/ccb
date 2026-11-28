@@ -34,6 +34,11 @@ list(REMOVE_ITEM CCB_CORE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c)
 add_library(ccb_core STATIC ${CCB_CORE_SOURCES})
 target_include_directories(ccb_core PUBLIC src)
 
+# Pthreads, for the parallel task executor only (ccb_sched). The
+# pipeline itself stays sequential; no other module spawns threads.
+find_package(Threads REQUIRED)
+target_link_libraries(ccb_core PUBLIC Threads::Threads)
+
 add_executable(ccb src/main.c)
 target_link_libraries(ccb PRIVATE ccb_core)
 if(CCB_STATIC_RELEASE)
@@ -125,7 +130,7 @@ add_test(NAME fuzz_preview_flow
 # each. `ctest -L fast` is the quick gate (no real Android build, seconds);
 # `ctest -L <area>` runs one area; plain `ctest` runs the full suite.
 # fast counts: config 2, setup 2, pipeline 9, preview 29, tui 1,
-# misc 5, graph 1 (= 49).
+# misc 5, graph 2 (= 50).
 # slow counts: pipeline 5, dexcheck 1, daemon 1, maven 1, modules 1,
 # library 1, native 1 (= 11).
 set_tests_properties(test_config test_toml
@@ -148,7 +153,7 @@ set_tests_properties(test_preview test_preview_cli_gate_diff
   PROPERTIES LABELS "fast;preview")
 set_tests_properties(test_hash test_json test_proc test_str test_zip
   PROPERTIES LABELS "fast;misc")
-set_tests_properties(test_graph PROPERTIES LABELS "fast;graph")
+set_tests_properties(test_graph test_sched PROPERTIES LABELS "fast;graph")
 set_tests_properties(test_tui PROPERTIES LABELS "fast;tui")
 set_tests_properties(test_aab test_dex_contents test_r8_minify
   test_cache_outputs test_cache_regression

@@ -37,8 +37,30 @@ static ccb_status ccb_task_libraries(void *ctx, ccb_task *t) {
   return ccb_run_step(ctx, t, ccb_step_libraries);
 }
 
-static ccb_status ccb_task_modules(void *ctx, ccb_task *t) {
-  return ccb_run_step(ctx, t, ccb_step_modules);
+// One module's graph task ("module-<name>"): build exactly that
+// module. The task ID names the module, so no extra context is
+// needed; the module is looked up in the config, which the graph
+// was built from (a missing module cannot happen — the builder
+// creates one task per configured module).
+static ccb_status ccb_task_module(void *ctx, ccb_task *t) {
+  ccb_pipe *p = ctx;
+  const char *name = t->id + strlen("module-");
+  ccb_module *m = ccb_pipe_module(p, name);
+  if (m == NULL) {
+    return CCB_ERR_CONFIG;
+  }
+  int before = p->steps_skipped;
+  ccb_str key;
+  ccb_str_init(&key);
+  ccb_str_append(&key, "module-");
+  ccb_str_append(&key, m->name);
+  ccb_status rc = ccb_build_module_at(p, m, p->modules_dir, NULL,
+    key.buf, "module", 1);
+  ccb_str_free(&key);
+  if (rc == CCB_OK && p->steps_skipped > before) {
+    t->skipped = 1;
+  }
+  return rc;
 }
 
 static ccb_status ccb_task_merge_manifest(void *ctx, ccb_task *t) {
@@ -170,6 +192,59 @@ static void ccb_gb_out(ccb_task *t, const char *name) {
   }
 }
 
+// Add a dependency edge unless the task already has it (the chain
+// dep from ccb_gb_add may already name this task).
+static void ccb_gb_dep_once(ccb_task *t, const char *dep_id) {
+  if (t == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < t->deps_count; i++) {
+    if (strcmp(t->deps[i], dep_id) == 0) {
+      return;
+    }
+  }
+  ccb_task_add_dep(t, dep_id);
+}
+
+// The per-module output name for module <name>.
+static void ccb_gb_module_out(ccb_str *s, const char *name) {
+  ccb_str_append(s, "module-aar-");
+  ccb_str_append(s, name);
+}
+
+// Declare every module AAR as a GENERATED input of t.
+static void ccb_gb_module_aars(ccb_task *t, const ccb_config *cfg) {
+  if (t == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < cfg->modules_count; i++) {
+    ccb_str out;
+    ccb_str_init(&out);
+    ccb_gb_module_out(&out, cfg->modules[i].name);
+    ccb_task_add_input(t, out.buf, CCB_TASK_INPUT_GENERATED);
+    ccb_str_free(&out);
+  }
+}
+
+// Depend on every module task (the join: merge-manifest consumes
+// every module AAR, so it must depend on every producer, not just
+// the last one the chain names — independent modules are not
+// transitive dependencies of each other). Downstream tasks ride
+// the chain through merge-manifest, so only it needs the fan-in.
+// Module task IDs are "module-<name>"; the graph itself is the
+// source of truth for which exist.
+static void ccb_gb_dep_modules(ccb_graph_builder *b, ccb_task *t) {
+  if (t == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < b->g->count; i++) {
+    ccb_task *m = b->g->tasks[i];
+    if (strncmp(m->id, "module-", 7) == 0) {
+      ccb_gb_dep_once(t, m->id);
+    }
+  }
+}
+
 static ccb_task *ccb_gb_deps(ccb_graph_builder *b,
     const ccb_resolved *resolved) {
   ccb_task *t = ccb_gb_add(b, "deps", "aar",
@@ -190,25 +265,66 @@ static void ccb_gb_app(ccb_graph_builder *b, const ccb_config *cfg,
     ccb_gb_source(t, cfg->libraries[i].dir);
   }
   ccb_gb_out(t, "library-aars");
-  t = ccb_gb_add(b, "modules", "module",
-    CCB_TASK_CACHE_FINGERPRINT, ccb_task_modules);
+  // One task per module ("module-<name>", output
+  // "module-aar-<name>"), in config order. Modules are siblings,
+  // not a chain: each depends on deps + libraries (its classpath
+  // needs the declared and library AAR classes) and on its own
+  // upstream modules, so independent modules fan out and a module
+  // rebuilds only when its own inputs or an upstream module
+  // changes. With no modules there is no module task at all. The
+  // chain continues from the last module task (or "libraries"
+  // when there are none), so downstream tasks still follow in
+  // plan order; merge-manifest additionally depends on every
+  // module task (ccb_gb_dep_modules), the fan-in join.
   for (size_t i = 0; i < cfg->modules_count; i++) {
-    ccb_gb_source(t, cfg->modules[i].dir);
+    ccb_module *m = &cfg->modules[i];
+    ccb_str id;
+    ccb_str_init(&id);
+    ccb_str_append(&id, "module-");
+    ccb_str_append(&id, m->name);
+    t = ccb_graph_add_task(b->g, id.buf, "module",
+      CCB_TASK_CACHE_FINGERPRINT, ccb_task_module, b->diags);
+    ccb_str_free(&id);
+    if (t == NULL) {
+      b->failed = 1;
+      return;
+    }
+    ccb_task_add_input(t, "project-model",
+      CCB_TASK_INPUT_GENERATED);
+    ccb_task_add_input(t, "toolchain",
+      CCB_TASK_INPUT_GENERATED);
+    ccb_task_add_dep(t, "deps");
+    ccb_task_add_dep(t, "libraries");
+    for (size_t j = 0; j < m->depends_count; j++) {
+      ccb_str dep;
+      ccb_str_init(&dep);
+      ccb_str_append(&dep, "module-");
+      ccb_str_append(&dep, m->depends[j]);
+      ccb_task_add_dep(t, dep.buf);
+      ccb_str_free(&dep);
+    }
+    ccb_gb_source(t, m->dir);
+    ccb_str out;
+    ccb_str_init(&out);
+    ccb_gb_module_out(&out, m->name);
+    ccb_gb_out(t, out.buf);
+    ccb_str_free(&out);
+    b->prev = t->id;
   }
-  ccb_gb_out(t, "module-aars");
   t = ccb_gb_add(b, "merge-manifest", "manifest",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_merge_manifest);
   ccb_gb_source(t, cfg->manifest);
   ccb_gb_gen(t, "aar-extracted");
   ccb_gb_gen(t, "library-aars");
-  ccb_gb_gen(t, "module-aars");
+  ccb_gb_module_aars(t, cfg);
+  ccb_gb_dep_modules(b, t);
   ccb_gb_out(t, "merged-manifest");
   t = ccb_gb_add(b, "compile-res", "aapt2",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_compile_res);
   ccb_gb_source(t, cfg->res);
   ccb_gb_gen(t, "aar-extracted");
   ccb_gb_gen(t, "library-aars");
-  ccb_gb_gen(t, "module-aars");
+  ccb_gb_module_aars(t, cfg);
   ccb_gb_out(t, "compiled-res");
   t = ccb_gb_add(b, "link", "aapt2",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_link);
@@ -235,13 +351,13 @@ static void ccb_gb_app(ccb_graph_builder *b, const ccb_config *cfg,
     ccb_gb_source(t, resolved->plugin_jars[i]);
   }
   ccb_gb_gen(t, "aar-extracted");
-  ccb_gb_gen(t, "module-aars");
+  ccb_gb_module_aars(t, cfg);
   ccb_gb_out(t, "classes");
   t = ccb_gb_add(b, "dex", "dex",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_dex);
   ccb_gb_gen(t, "classes");
   ccb_gb_gen(t, "aar-extracted");
-  ccb_gb_gen(t, "module-aars");
+  ccb_gb_module_aars(t, cfg);
   // Dex reads the same classpath jars, and the ProGuard rules file
   // when release minification is on (the rules text is fingerprinted
   // and passed to R8).

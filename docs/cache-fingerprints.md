@@ -480,10 +480,18 @@ present and both must hold.
 
 ## What this table does not cover
 
-- **Concurrent access.** No parallelism exists yet; cache behavior
-  under concurrent execution belongs to Step 8 (scheduler), which
-  owns single-writer atomic publication and concurrent-access tests.
-  Nothing here claims anything about two writers.
+- **Concurrent access.** Step 8 landed single-writer cache
+  publication: a completed task records its step fingerprint in a
+  task-owned `ccb_cache_delta`, the driver merges it into the
+  shared cache after the task succeeds (a failed task's delta is
+  discarded, never published), and the cache file is published at
+  most once per build, atomically, from the driver thread only.
+  Fingerprinting/planning still runs single-threaded before any
+  worker starts, so the file-hash map writes in `ccb_fp_add_file`
+  stay single-writer; the remaining steps still write their step
+  fingerprints straight into the shared cache (the module path is
+  the first delta adopter), which is why parallel execution of
+  real build tasks stays off until every step adopts deltas.
 - **`tool-probes.json`.** `build/intermediates/tool-probes.json`
   (tool version probes, keyed by path + mtime + size) still writes
   non-atomically — a Step 2 follow-up (D-5 convergence). It feeds

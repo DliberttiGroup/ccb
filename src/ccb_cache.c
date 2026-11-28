@@ -162,6 +162,31 @@ void ccb_cache_set_file(ccb_cache *c, const char *relpath, const char *hash) {
   ccb_cache_map_set(&c->file_paths, &c->file_hashes, &c->file_count, &c->file_cap, relpath, hash);
 }
 
+void ccb_cache_delta_init(ccb_cache_delta *d) {
+  memset(d, 0, sizeof(*d));
+}
+
+void ccb_cache_delta_free(ccb_cache_delta *d) {
+  if (d == NULL) {
+    return;
+  }
+  ccb_free_str_array(d->step_names, d->step_count);
+  ccb_free_str_array(d->step_fps, d->step_count);
+  memset(d, 0, sizeof(*d));
+}
+
+void ccb_cache_delta_set_step(ccb_cache_delta *d, const char *step,
+    const char *fp) {
+  ccb_cache_map_set(&d->step_names, &d->step_fps, &d->step_count,
+    &d->step_cap, step, fp);
+}
+
+void ccb_cache_delta_merge(ccb_cache *c, const ccb_cache_delta *d) {
+  for (size_t i = 0; i < d->step_count; i++) {
+    ccb_cache_set_step(c, d->step_names[i], d->step_fps[i]);
+  }
+}
+
 char *ccb_cache_hash_file(const char *path) {
   char hex[65];
   if (ccb_sha256_file(path, hex) != CCB_OK) {

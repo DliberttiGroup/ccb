@@ -40,6 +40,7 @@ severity in the tables below and by the exit code, not by the prefix.
 | CCB-E1013 | Invalid task-graph reference: unknown dependency; GENERATED input produced by no task, produced by the task itself, or produced by a task the consumer does not depend on (directly or transitively); two tasks claiming the same output; a dependency, input, or output declared twice on one task; one input declared with conflicting kinds (e.g. as both SOURCE and GENERATED, or SOURCE and ENV); a SOURCE input that is also the task's own output (names the task and the reference) |
 | CCB-E1014 | Task dependency cycle (names the cycle path, e.g. `a -> c -> b -> a`) |
 | CCB-E1015 | Task has a missing required SOURCE input file (names the task and the input). Reported only by `ccb_graph_check_source_inputs`, which the pipeline does not run (see [graph engine](graph.md)): config load already rejects missing declared paths, and the steps diagnose the rest with their own codes. Optional SOURCE inputs never report it. |
+| CCB-E1016 | Parallel executor created with zero workers (needs at least 1) |
 
 ## Toolchain (exit 3)
 
