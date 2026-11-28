@@ -5,10 +5,12 @@
 // the previous one. Stage bodies are untouched: each task's run
 // function is a thin wrapper around the existing ccb_step_* function.
 //
-// The graph is built from the config only — it never runs stage 0.
-// Stage 0 (config load, toolchain resolve, dirs, cache) is the
-// bootstrap the graph needs to exist at all, so the caller runs it
-// first and marks the "config" task DONE with its duration via
+// The graph is built from the config plus the resolved runtime state
+// (ccb_resolved: declared + Maven-resolved + path-library AARs/JARs
+// and plugin jars). It never runs stage 0: stage 0 (config load,
+// toolchain resolve, dirs, cache) is the bootstrap the graph needs
+// to exist at all, so the caller runs it first and marks the
+// "config" task DONE with its duration via
 // ccb_pipeline_graph_config_done. That keeps the plan complete (all
 // 15 stages) while staying honest about what ran when.
 //
@@ -40,10 +42,18 @@
 #include "ccb_config.h"
 #include "ccb_diag.h"
 #include "ccb_graph.h"
+#include "ccb_resolved.h"
 
-// Build the task graph for this config (aab selects the package-aab
-// task instead of package, and drops align). Validates the graph
-// before returning; on failure returns NULL with diags filled.
+// Build the task graph from the config + resolved runtime state
+// (the pipeline's call: stage 0 already resolved dependencies).
+// Validates the graph before returning; on failure returns NULL
+// with diags filled.
+ccb_graph *ccb_pipeline_graph_build_resolved(const ccb_config *cfg,
+  const ccb_resolved *resolved, int aab, ccb_diag_list *diags);
+
+// Build the task graph from the config alone, declaring the
+// config's own AAR/JAR lists (no resolution ran: ccb check, tests).
+// Same validation as the resolved variant.
 ccb_graph *ccb_pipeline_graph_build(const ccb_config *cfg, int aab,
   ccb_diag_list *diags);
 

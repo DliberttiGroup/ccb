@@ -218,8 +218,7 @@ ccb_status ccb_step_code(ccb_pipe *p) {
   {
     ccb_fp_builder b;
     memset(&b, 0, sizeof(b));
-    ccb_fp_add(&b, "kotlinc", p->sdk->kotlin_version);
-    ccb_fp_add(&b, "jvm_target", p->cfg->jvm_target);
+    ccb_fp_add_kotlin_tools(p, &b);
     ccb_fp_add(&b, "classpath", cp_str);
     int failed = 0;
     // Classpath contents, not just paths: a changed dependency jar
@@ -229,18 +228,8 @@ ccb_status ccb_step_code(ccb_pipe *p) {
     // extracted AAR classes do not exist yet, and their absence must
     // not fail planning (a missing jar still fails the build at dex
     // time with a clear error).
-    for (size_t i = 0; i < p->cfg->jars_count && !failed; i++) {
-      if (ccb_path_exists(p->cfg->jars[i]) &&
-          ccb_fp_add_file(p, &b, p->cfg->jars[i]) != 0) {
-        failed = 1;
-      }
-    }
-    for (size_t i = 0; i < p->aar_class_jars_count && !failed; i++) {
-      if (ccb_path_exists(p->aar_class_jars[i]) &&
-          ccb_fp_add_file(p, &b, p->aar_class_jars[i]) != 0) {
-        failed = 1;
-      }
-    }
+    ccb_fp_add_declared_jars(p, &b, &failed, 1);
+    ccb_fp_add_aar_class_jars(p, &b, &failed, 1);
     ccb_fp_add_plugins(p, &b, &failed);
     for (size_t i = 0; i < nkt && !failed; i++) {
       if (ccb_fp_add_file(p, &b, kt_files[i]) != 0) {
@@ -382,9 +371,9 @@ code_fail:
 // (a [deps] jar or a Maven-resolved jar), so auto-adding it would
 // make d8/R8 reject the duplicate classes.
 int ccb_dex_has_stdlib(ccb_pipe *p) {
-  for (size_t i = 0; i < p->cfg->jars_count; i++) {
-    const char *base = strrchr(p->cfg->jars[i], '/');
-    base = base != NULL ? base + 1 : p->cfg->jars[i];
+  for (size_t i = 0; i < p->resolved.jars_count; i++) {
+    const char *base = strrchr(p->resolved.jars[i], '/');
+    base = base != NULL ? base + 1 : p->resolved.jars[i];
     // kotlinc's own jar is "kotlin-stdlib.jar"; Maven's is
     // "kotlin-stdlib-<version>.jar" — both supply the same classes.
     if (strcmp(base, "kotlin-stdlib.jar") == 0 ||
@@ -490,8 +479,8 @@ uint64_t ccb_dex_input_bytes(ccb_pipe *p, const char *stdlib_input) {
     total += ccb_dex_file_bytes(cfiles[i]);
   }
   ccb_free_str_array(cfiles, ncfiles);
-  for (size_t i = 0; i < p->cfg->jars_count; i++) {
-    total += ccb_dex_file_bytes(p->cfg->jars[i]);
+  for (size_t i = 0; i < p->resolved.jars_count; i++) {
+    total += ccb_dex_file_bytes(p->resolved.jars[i]);
   }
   for (size_t i = 0; i < p->aar_class_jars_count; i++) {
     total += ccb_dex_file_bytes(p->aar_class_jars[i]);

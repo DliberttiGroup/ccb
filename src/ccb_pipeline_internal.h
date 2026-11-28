@@ -17,6 +17,7 @@
 #include "ccb_maven.h"
 #include "ccb_net.h"
 #include "ccb_resns.h"
+#include "ccb_resolved.h"
 #include "ccb_zip.h"
 #include "ccb_bundle.h"
 #include "ccb_dexcheck.h"
@@ -29,8 +30,15 @@ typedef struct {
   const ccb_build_opts *opts;
   ccb_log log;
   ccb_diag_list *diags;
+  // Validated, immutable config: what ccb.toml declares. Stage 0
+  // must not append resolved artifacts to it (Step 7, audit D-2).
   ccb_config *cfg;
+  // Resolved toolchain (ccb_sdk) and resolved dependencies
+  // (ccb_resolved): runtime state, filled by stage 0 from the
+  // config plus cache-only resolution. Steps read resolved lists
+  // here, never from cfg.
   ccb_sdk *sdk;
+  ccb_resolved resolved;
   ccb_cache *cache;
   int cache_dirty;
   // Directories.
@@ -70,9 +78,9 @@ typedef struct {
   char **aar_jni_dirs;
   size_t aar_jni_count;
   size_t aar_jni_cap;
-  // AARs the manifest merge sees, in merge order: declared AARs first
+  // AARs the manifest merge sees, in merge order: resolved AARs first
   // (existing order), then built library-module AARs in topological
-  // order. Without modules this is exactly cfg->aars.
+  // order. Without modules this is exactly the resolved AAR list.
   char **merge_aar_paths;
   size_t merge_aar_paths_count;
   size_t merge_aar_paths_cap;
@@ -140,6 +148,17 @@ typedef struct {
   int has_res_files;
 } ccb_mod_ctx;
 
+// One module's build plan (Step 7, audit D-4): the read-only
+// fingerprint + run/skip decision, separate from execution
+// (ccb_mod_run, writes outputs) and registration (ccb_mod_register,
+// mutates the pipe's shared AAR lists). A future per-module graph
+// task owns one plan; the plan carries no shared mutable state.
+typedef struct {
+  ccb_mod_ctx ctx;
+  char *fp; // owned fingerprint, NULL when inputs unreadable
+  int run; // 1 when the module must build
+} ccb_mod_plan;
+
 typedef struct {
   char **kt;
   size_t nkt;
@@ -185,6 +204,25 @@ void ccb_push_plugin_args(ccb_pipe *p, ccb_argv *av);
 void ccb_fp_add(ccb_fp_builder *b, const char *key, const char *val);
 void ccb_fp_addl(ccb_fp_builder *b, const char *key, long val);
 void ccb_fp_free(ccb_fp_builder *b);
+// Shared fingerprint key groups (Step 7, audit D3/R-2): the same
+// logical inputs were listed inline in three places each, so a fix
+// to one never reached the others. Each helper adds exactly the
+// keys the callers added before, in the same order, so fingerprints
+// are unchanged; the skip_missing flag preserves each caller's
+// deliberate planning-mode semantics (a missing file fails the
+// build, except where the caller skips it on a fresh tree).
+// aapt2 tool versions: compile-res, link, module.
+void ccb_fp_add_aapt2_tools(ccb_pipe *p, ccb_fp_builder *b);
+// Kotlin tool versions: compile-code, module.
+void ccb_fp_add_kotlin_tools(ccb_pipe *p, ccb_fp_builder *b);
+// Declared jars by content hash: compile-code (skip_missing 1),
+// dex (0), module (0).
+void ccb_fp_add_declared_jars(ccb_pipe *p, ccb_fp_builder *b,
+  int *failed, int skip_missing);
+// AAR classes.jars by content hash: compile-code (skip_missing 1),
+// dex (skip iff explain/dry-run), module (1).
+void ccb_fp_add_aar_class_jars(ccb_pipe *p, ccb_fp_builder *b,
+  int *failed, int skip_missing);
 int ccb_fp_add_file(ccb_pipe *p, ccb_fp_builder *b, const char *path);
 void ccb_fp_add_plugins(ccb_pipe *p, ccb_fp_builder *b,
     int *failed);
@@ -209,6 +247,13 @@ ccb_status ccb_mod_zip_tree_filtered(ccb_zip_writer *w, const char *dir,
 int ccb_mod_is_r_class(const char *path);
 void ccb_mod_register(ccb_pipe *p, ccb_module *m, const char *aar_path,
     const char *classes_jar, const char *kind);
+// Plan one module build: fingerprint + run/skip decision. Returns 0
+// on success, -1 when inputs are unreadable (plan->fp NULL, run 1);
+// the caller frees the plan either way.
+int ccb_mod_plan_init(ccb_pipe *p, ccb_module *m,
+    const char *work_root, char *aar_path, const char *key,
+    ccb_mod_plan *plan);
+void ccb_mod_plan_free(ccb_mod_plan *plan);
 ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
     const char *work_root, char *aar_path, const char *key,
     const char *kind, int do_register);

@@ -296,26 +296,29 @@ typedef struct {
   const char *fn;
   const char *task;
   const char *task2; // shared helper: also attributed here
+  const char *task3; // shared helper: and here
   const char *variant;
 } fn_map;
 
 static const fn_map FN_MAP[] = {
-  { "ccb_step_compile_res", "compile-res", "", "" },
-  { "ccb_step_link", "link", "", "" },
-  { "ccb_step_code", "compile-code", "", "" },
-  { "ccb_step_dex", "dex", "", "" },
-  { "ccb_step_deps", "deps", "", "" },
-  { "ccb_step_merge_manifest", "merge-manifest", "", "" },
-  { "ccb_native_fingerprint", "native", "", "clang" },
-  { "ccb_native_add_depfile", "native", "", "clang" },
-  { "ccb_step_native", "native", "", "cmake" },
-  { "ccb_mod_fingerprint", "module", "", "" },
-  { "ccb_mod_fp_dep", "module", "", "" },
-  { "ccb_mod_fp_files", "module", "", "" },
-  { "ccb_pkg_fingerprint", "package", "", "" },
-  { "ccb_fp_add_plugins", "compile-code", "module", "" },
-  { "ccb_stdlib_dex_key", "dex-stdlib", "", "" },
-  { "ccb_classes_fingerprint", "dex", "", "" },
+  { "ccb_step_compile_res", "compile-res", "", "", "" },
+  { "ccb_step_link", "link", "", "", "" },
+  { "ccb_step_code", "compile-code", "", "", "" },
+  { "ccb_step_dex", "dex", "", "", "" },
+  { "ccb_step_deps", "deps", "", "", "" },
+  { "ccb_step_merge_manifest", "merge-manifest", "", "", "" },
+  { "ccb_native_fingerprint", "native", "", "", "clang" },
+  { "ccb_native_add_depfile", "native", "", "", "clang" },
+  { "ccb_step_native", "native", "", "", "cmake" },
+  { "ccb_mod_fingerprint", "module", "", "", "" },
+  { "ccb_mod_fp_dep", "module", "", "", "" },
+  { "ccb_mod_fp_files", "module", "", "", "" },
+  { "ccb_pkg_fingerprint", "package", "", "", "" },
+  { "ccb_fp_add_plugins", "compile-code", "module", "", "" },
+  { "ccb_fp_add_aapt2_tools", "compile-res", "link", "module", "" },
+  { "ccb_fp_add_kotlin_tools", "compile-code", "module", "", "" },
+  { "ccb_stdlib_dex_key", "dex-stdlib", "", "", "" },
+  { "ccb_classes_fingerprint", "dex", "", "", "" },
 };
 
 static code_entry *code_entry_for(const char *task, const char *variant) {
@@ -352,8 +355,8 @@ static void record_literal(const char *fn, const char *key) {
     CHECK(0);
     return;
   }
-  const char *tasks[2] = { m->task, m->task2 };
-  for (size_t t = 0; t < 2; t++) {
+  const char *tasks[3] = { m->task, m->task2, m->task3 };
+  for (size_t t = 0; t < 3; t++) {
     if (tasks[t][0] == '\0') {
       continue;
     }
@@ -380,8 +383,8 @@ static void record_file_call(const char *fn) {
   if (m == NULL) {
     return; // file calls in untracked functions are not fingerprint keys
   }
-  const char *tasks[2] = { m->task, m->task2 };
-  for (size_t t = 0; t < 2; t++) {
+  const char *tasks[3] = { m->task, m->task2, m->task3 };
+  for (size_t t = 0; t < 3; t++) {
     if (tasks[t][0] == '\0') {
       continue;
     }
@@ -855,11 +858,12 @@ static void check_adhoc(void) {
   free(text);
 }
 
-// The global tool fingerprint's components, in ccb_pipeline.c.
+// The global tool fingerprint's components, in ccb_sdk.c
+// (ccb_sdk_toolchain_identity, the single definition).
 static void check_tool_fp(void) {
   static const char *markers[] = { "\"bt=\"", "\"|aapt2=\"", "\"|zipalign=\"",
     "\"|kt=\"", "\"|java=", "\"|compile=" };
-  char *path = root_path("src/ccb_pipeline.c");
+  char *path = root_path("src/ccb_sdk.c");
   char *text = ccb_test_try_read(path);
   free(path);
   CHECK(text != NULL);

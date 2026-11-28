@@ -71,8 +71,8 @@ static void ccb_mod_ctx_free(ccb_mod_ctx *c) {
 // directory (aar/<base>), or the two would overwrite each other.
 // Returns 1 on collision (diagnostic recorded), 0 otherwise.
 static int ccb_mod_name_clash(ccb_pipe *p, ccb_module *m) {
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
-    char *base = ccb_basename(p->cfg->aars[i]);
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
+    char *base = ccb_basename(p->resolved.aars[i]);
     char *dot = strrchr(base, '.');
     if (dot != NULL) {
       *dot = '\0';
@@ -85,7 +85,7 @@ static int ccb_mod_name_clash(ccb_pipe *p, ccb_module *m) {
       ccb_str_append(&msg, "module '");
       ccb_str_append(&msg, m->name);
       ccb_str_append(&msg, "' collides with declared AAR '");
-      ccb_str_append(&msg, p->cfg->aars[i]);
+      ccb_str_append(&msg, p->resolved.aars[i]);
       ccb_str_append(&msg, "'");
       ccb_pipe_diag(p, "CCB-E3022", "modules", msg.buf);
       ccb_str_free(&msg);
@@ -136,10 +136,8 @@ static int ccb_mod_fingerprint(ccb_pipe *p, ccb_module *m, char **fp_out,
     const char **old_out, const char *key) {
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
-  ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
-  ccb_fp_add(&b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
-  ccb_fp_add(&b, "kotlinc", p->sdk->kotlin_version);
-  ccb_fp_add(&b, "jvm_target", p->cfg->jvm_target);
+  ccb_fp_add_aapt2_tools(p, &b);
+  ccb_fp_add_kotlin_tools(p, &b);
   int failed = 0;
   if (ccb_fp_add_file(p, &b, p->sdk->android_jar) != 0) {
     failed = 1;
@@ -162,17 +160,8 @@ static int ccb_mod_fingerprint(ccb_pipe *p, ccb_module *m, char **fp_out,
       ccb_mod_fp_files(p, &b, m->java_dir, ".java") != 0) {
     failed = 1;
   }
-  for (size_t i = 0; i < p->cfg->jars_count && !failed; i++) {
-    if (ccb_fp_add_file(p, &b, p->cfg->jars[i]) != 0) {
-      failed = 1;
-    }
-  }
-  for (size_t i = 0; i < p->aar_class_jars_count && !failed; i++) {
-    if (ccb_path_exists(p->aar_class_jars[i]) &&
-        ccb_fp_add_file(p, &b, p->aar_class_jars[i]) != 0) {
-      failed = 1;
-    }
-  }
+  ccb_fp_add_declared_jars(p, &b, &failed, 0);
+  ccb_fp_add_aar_class_jars(p, &b, &failed, 1);
   ccb_fp_add_plugins(p, &b, &failed);
   for (size_t j = 0; j < m->depends_count && !failed; j++) {
     ccb_module *d = ccb_pipe_module(p, m->depends[j]);
@@ -464,60 +453,77 @@ static ccb_status ccb_mod_run(ccb_mod_ctx *c, const char *fp,
   return CCB_OK;
 }
 
+// Plan one module build: fingerprint + run/skip decision. The plan
+// owns the context paths and the fingerprint; the caller frees it
+// either way (also on fingerprint failure, where fp is NULL).
+int ccb_mod_plan_init(ccb_pipe *p, ccb_module *m,
+    const char *work_root, char *aar_path, const char *key,
+    ccb_mod_plan *plan) {
+  memset(plan, 0, sizeof(*plan));
+  ccb_mod_ctx_init_at(&plan->ctx, p, m,
+    ccb_path_join(work_root, m->name), aar_path);
+  const char *old = NULL;
+  if (ccb_mod_fingerprint(p, m, &plan->fp, &old, key) != 0) {
+    return -1;
+  }
+  plan->run = 1;
+  if (!p->opts->dry_run && old != NULL && strcmp(old, plan->fp) == 0 &&
+      ccb_path_exists(plan->ctx.aar_path) &&
+      (!plan->ctx.has_sources ||
+        ccb_path_exists(plan->ctx.classes_jar))) {
+    plan->run = 0;
+  }
+  return 0;
+}
+
+void ccb_mod_plan_free(ccb_mod_plan *plan) {
+  free(plan->fp);
+  ccb_mod_ctx_free(&plan->ctx);
+  memset(plan, 0, sizeof(*plan));
+}
+
 // Build one module (or path library, or the standalone library
-// project): fingerprint, run or skip, register outputs. work_root is
-// the parent of the <name> work dir; aar_path NULL means
+// project): plan, run or skip, register outputs. work_root is the
+// parent of the <name> work dir; aar_path NULL means
 // <work>/<name>.aar. kind is "module" or "library" (display names,
 // explain lines, cache stage). do_register 0 builds the AAR without
 // registering it in the app's merge lists (standalone library).
+// Per-module graph tasks are NOT done here: graph tasks still
+// execute through the shared mutable pipe, so splitting the
+// "modules" task would not gain any ownership — registration into
+// the shared merge/classpath lists would stay shared and ordered
+// by this loop. That needs Step 8 (per-task artifact ownership +
+// scheduler); the plan struct is the unit a module task will own.
 ccb_status ccb_build_module_at(ccb_pipe *p, ccb_module *m,
     const char *work_root, char *aar_path, const char *key,
     const char *kind, int do_register) {
   if (do_register && ccb_mod_name_clash(p, m)) {
     return CCB_ERR_BUILD;
   }
-  ccb_mod_ctx c;
-  ccb_mod_ctx_init_at(&c, p, m, ccb_path_join(work_root, m->name), aar_path);
-  char *fp = NULL;
-  const char *old = NULL;
-  ccb_status rc = CCB_OK;
-  if (ccb_mod_fingerprint(p, m, &fp, &old, key) != 0) {
+  ccb_mod_plan plan;
+  if (ccb_mod_plan_init(p, m, work_root, aar_path, key, &plan) != 0) {
     ccb_pipe_diag(p, "CCB-E3016", "modules", "cannot read module inputs");
-    rc = CCB_ERR_BUILD;
-    goto done;
+    ccb_mod_plan_free(&plan);
+    return CCB_ERR_BUILD;
   }
-  int run = 1;
-  if (!p->opts->dry_run && old != NULL && strcmp(old, fp) == 0 &&
-      ccb_path_exists(c.aar_path) &&
-      (!c.has_sources || ccb_path_exists(c.classes_jar))) {
-    run = 0;
-  }
+  ccb_status rc = CCB_OK;
   if (p->opts->explain) {
     printf("%s %s: %s\n", kind, m->name,
-      run ? "run (inputs changed)" : "skip (inputs unchanged)");
-    if (do_register) {
-      ccb_mod_register(p, m, c.aar_path,
-        c.has_sources ? c.classes_jar : NULL, kind);
-    }
-    goto done;
-  }
-  if (run) {
-    if (ccb_mod_run(&c, fp, key) != CCB_OK) {
+      plan.run ? "run (inputs changed)" : "skip (inputs unchanged)");
+  } else if (plan.run) {
+    if (ccb_mod_run(&plan.ctx, plan.fp, key) != CCB_OK) {
       rc = CCB_ERR_BUILD;
-      goto done;
     }
   } else {
     p->steps_skipped++;
     ccb_log_cache(&p->log, strcmp(kind, "library") == 0 ? "libraries" : "modules",
       1, strcmp(kind, "library") == 0 ? "library inputs unchanged" : "module inputs unchanged");
   }
-  if (do_register) {
-    ccb_mod_register(p, m, c.aar_path,
-      c.has_sources ? c.classes_jar : NULL, kind);
+  if (rc == CCB_OK && do_register) {
+    ccb_mod_register(p, m, plan.ctx.aar_path,
+      plan.ctx.has_sources ? plan.ctx.classes_jar : NULL, kind);
   }
-done:
-  free(fp);
-  ccb_mod_ctx_free(&c);
+  ccb_mod_plan_free(&plan);
   return rc;
 }
 

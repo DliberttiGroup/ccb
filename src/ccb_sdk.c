@@ -104,6 +104,29 @@ static void ccb_sdk_diag_override(ccb_diag_list *diags, const char *label, const
   ccb_str_free(&s);
 }
 
+char *ccb_sdk_toolchain_identity(const ccb_sdk *sdk,
+    const ccb_config *cfg) {
+  ccb_str fp;
+  ccb_str_init(&fp);
+  ccb_str_append(&fp, "bt=");
+  ccb_str_append(&fp, sdk->build_tools_version != NULL ?
+    sdk->build_tools_version : "");
+  if (sdk->aapt2 != NULL) {
+    ccb_str_append(&fp, "|aapt2=");
+    ccb_str_append(&fp, sdk->aapt2);
+  }
+  if (sdk->zipalign != NULL) {
+    ccb_str_append(&fp, "|zipalign=");
+    ccb_str_append(&fp, sdk->zipalign);
+  }
+  ccb_str_append(&fp, "|kt=");
+  ccb_str_append(&fp, sdk->kotlin_version != NULL ?
+    sdk->kotlin_version : "");
+  ccb_str_appendf(&fp, "|java=%d", sdk->java_major);
+  ccb_str_appendf(&fp, "|compile=%ld", cfg->compile_sdk);
+  return ccb_str_steal(&fp);
+}
+
 void ccb_sdk_free(ccb_sdk *sdk) {
   if (sdk == NULL) {
     return;

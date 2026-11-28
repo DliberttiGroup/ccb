@@ -60,8 +60,7 @@ ccb_status ccb_step_compile_res(ccb_pipe *p) {
   // Fingerprint over every resource file.
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
-  ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
-  ccb_fp_add(&b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
+  ccb_fp_add_aapt2_tools(p, &b);
   int failed = 0;
   for (size_t i = 0; i < tcount && !failed; i++) {
     char **files = NULL;
@@ -245,8 +244,7 @@ ccb_status ccb_step_link(ccb_pipe *p) {
   const char *link_out = is_aab ? p->linked_aab : p->linked_apk;
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
-  ccb_fp_add(&b, "build_tools", p->sdk->build_tools_version);
-  ccb_fp_add(&b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
+  ccb_fp_add_aapt2_tools(p, &b);
   ccb_fp_add(&b, "package", p->cfg->package);
   // Overlay order: libraries link as -R overlays with the app last,
   // so the app wins conflicts (see the argv below).

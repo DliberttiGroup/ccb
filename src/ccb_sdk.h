@@ -38,6 +38,23 @@ typedef struct {
   char *ndk_clang;
 } ccb_sdk;
 
+// The single toolchain identity (Step 7, audit D-3): one canonical
+// string over the resolved tools, used as the global tool
+// fingerprint (a mismatch empties the whole cache). Components are
+// exactly the ones stage 0 recorded before: build-tools version,
+// aapt2/zipalign paths, kotlinc version, java major, compile SDK.
+// Deliberately NOT recorded here, and where they are keyed instead:
+// NDK version and clang path — the native step keys the NDK version
+// itself (resolve verifies the installed NDK matches it); cmake/make
+// paths — not keyed anywhere (same accepted limitation as a
+// same-version kotlinc/java swap, Step 2 decision); r8 — the dex
+// step keys the r8 jar by content hash; kotlinc/java paths — only
+// the versions are recorded, so a same-version swap stays a no-op.
+// Owned; NULL fields read as "" (a successful resolve never leaves
+// build-tools/kotlinc/java unset, but the identity must not crash
+// on a partially-resolved SDK in tests).
+char *ccb_sdk_toolchain_identity(const ccb_sdk *sdk,
+  const ccb_config *cfg);
 // 1 when the tool at path spawns: any exit code except 127 (the
 // child's exec-failure exit) and no fatal signal. arg may be NULL
 // for no arguments.

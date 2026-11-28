@@ -49,11 +49,11 @@ void ccb_argv_pushf(ccb_argv *a, const char *fmt, long num) {
 // the "-P plugin:" prefix is added here, so the config never
 // carries kotlinc's flag syntax.
 void ccb_push_plugin_args(ccb_pipe *p, ccb_argv *av) {
-  for (size_t i = 0; i < p->cfg->kotlin_plugin_jars_count; i++) {
+  for (size_t i = 0; i < p->resolved.plugin_jars_count; i++) {
     ccb_str s;
     ccb_str_init(&s);
     ccb_str_append(&s, "-Xplugin=");
-    ccb_str_append(&s, p->cfg->kotlin_plugin_jars[i]);
+    ccb_str_append(&s, p->resolved.plugin_jars[i]);
     ccb_argv_push(av, s.buf);
     ccb_str_free(&s);
   }
@@ -123,15 +123,49 @@ int ccb_fp_add_file(ccb_pipe *p, ccb_fp_builder *b, const char *path) {
 // change recompiles instead of serving stale classes.
 void ccb_fp_add_plugins(ccb_pipe *p, ccb_fp_builder *b,
     int *failed) {
-  for (size_t i = 0; i < p->cfg->kotlin_plugin_jars_count && !*failed; i++) {
-    if (ccb_path_exists(p->cfg->kotlin_plugin_jars[i]) &&
-        ccb_fp_add_file(p, b, p->cfg->kotlin_plugin_jars[i]) != 0) {
+  for (size_t i = 0; i < p->resolved.plugin_jars_count && !*failed; i++) {
+    if (ccb_path_exists(p->resolved.plugin_jars[i]) &&
+        ccb_fp_add_file(p, b, p->resolved.plugin_jars[i]) != 0) {
       *failed = 1;
     }
   }
   for (size_t i = 0; i < p->cfg->kotlin_plugin_options_count; i++) {
     ccb_fp_add(b, "kotlin_plugin_option",
       p->cfg->kotlin_plugin_options[i]);
+  }
+}
+
+void ccb_fp_add_aapt2_tools(ccb_pipe *p, ccb_fp_builder *b) {
+  ccb_fp_add(b, "build_tools", p->sdk->build_tools_version);
+  ccb_fp_add(b, "aapt2", p->sdk->aapt2 == NULL ? "" : p->sdk->aapt2);
+}
+
+void ccb_fp_add_kotlin_tools(ccb_pipe *p, ccb_fp_builder *b) {
+  ccb_fp_add(b, "kotlinc", p->sdk->kotlin_version);
+  ccb_fp_add(b, "jvm_target", p->cfg->jvm_target);
+}
+
+void ccb_fp_add_declared_jars(ccb_pipe *p, ccb_fp_builder *b,
+    int *failed, int skip_missing) {
+  for (size_t i = 0; i < p->resolved.jars_count && !*failed; i++) {
+    if (skip_missing && !ccb_path_exists(p->resolved.jars[i])) {
+      continue;
+    }
+    if (ccb_fp_add_file(p, b, p->resolved.jars[i]) != 0) {
+      *failed = 1;
+    }
+  }
+}
+
+void ccb_fp_add_aar_class_jars(ccb_pipe *p, ccb_fp_builder *b,
+    int *failed, int skip_missing) {
+  for (size_t i = 0; i < p->aar_class_jars_count && !*failed; i++) {
+    if (skip_missing && !ccb_path_exists(p->aar_class_jars[i])) {
+      continue;
+    }
+    if (ccb_fp_add_file(p, b, p->aar_class_jars[i]) != 0) {
+      *failed = 1;
+    }
   }
 }
 
@@ -326,6 +360,10 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     return CCB_ERR_CONFIG;
   }
   free(config_path);
+  // Seed the resolved dependency lists from the declared config;
+  // stage 0 appends resolved artifacts to these lists below. The
+  // config itself is never mutated after this point.
+  ccb_resolved_from_config(&p->resolved, p->cfg);
   // The manifest's package must match [project] package: aapt2 takes the
   // package from the manifest, so a mismatch would silently ship the
   // wrong application ID.
@@ -393,9 +431,11 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     }
   }
   // Maven dependencies (cache-only: builds never touch the network).
-  // Resolved AARs/JARs join the local deps, so the deps step, manifest
-  // merge, classpath, and dex all treat them as local files. A cache
-  // miss fails here, before any stage runs, naming the coordinate and
+  // Resolved AARs/JARs join the resolved lists, so the deps step,
+  // manifest merge, classpath, and dex all treat them as local
+  // files. The config is immutable after load: resolved artifacts
+  // live in p->resolved, never in cfg->aars/cfg->jars. A cache miss
+  // fails here, before any stage runs, naming the coordinate and
   // pointing at `ccb setup`.
   if (p->cfg->maven_count > 0) {
     ccb_maven_result mv;
@@ -405,19 +445,15 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
       return CCB_ERR_TOOLCHAIN;
     }
     for (size_t i = 0; i < mv.aars_count; i++) {
-      p->cfg->aars = ccb_xrealloc(p->cfg->aars,
-        (p->cfg->aars_count + 1) * sizeof(*p->cfg->aars));
-      p->cfg->aars[p->cfg->aars_count++] = mv.aars[i];
+      ccb_resolved_push_aar(&p->resolved, mv.aars[i]);
     }
     for (size_t i = 0; i < mv.jars_count; i++) {
-      p->cfg->jars = ccb_xrealloc(p->cfg->jars,
-        (p->cfg->jars_count + 1) * sizeof(*p->cfg->jars));
-      p->cfg->jars[p->cfg->jars_count++] = mv.jars[i];
+      ccb_resolved_push_jar(&p->resolved, mv.jars[i]);
     }
-    // Ownership of the paths moved into cfg; only the arrays themselves
-    // are freed here (result_free would free the paths too). The
-    // lockfile entries are not consumed by the build, so they are
-    // freed in full.
+    // Ownership of the paths moved into resolved; only the arrays
+    // themselves are freed here (result_free would free the paths
+    // too). The lockfile entries are not consumed by the build, so
+    // they are freed in full.
     free(mv.aars);
     free(mv.jars);
     ccb_maven_entries_free(mv.entries, mv.entries_count);
@@ -429,16 +465,14 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
     return CCB_ERR_CONFIG;
   }
   // Path libraries that point at a built .aar need no build: they
-  // join the declared AARs, so deps/merge/classpath/dex treat them as
+  // join the resolved AARs, so deps/merge/classpath/dex treat them as
   // local files. Project dirs are built by the libraries step.
   for (size_t i = 0; i < p->cfg->libraries_count; i++) {
     if (!p->cfg->libraries[i].is_file) {
       continue;
     }
-    p->cfg->aars = ccb_xrealloc(p->cfg->aars,
-      (p->cfg->aars_count + 1) * sizeof(*p->cfg->aars));
-    p->cfg->aars[p->cfg->aars_count++] =
-      ccb_xstrdup(p->cfg->libraries[i].dir);
+    ccb_resolved_push_aar(&p->resolved,
+      ccb_xstrdup(p->cfg->libraries[i].dir));
   }
   // Compiler plugins (cache-only: builds never touch the network).
   // Resolved jars are passed to kotlinc as -Xplugin=... in the
@@ -452,8 +486,10 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
         p->diags) != CCB_OK) {
       return CCB_ERR_TOOLCHAIN;
     }
-    p->cfg->kotlin_plugin_jars = pjars;
-    p->cfg->kotlin_plugin_jars_count = pjars_count;
+    for (size_t i = 0; i < pjars_count; i++) {
+      ccb_resolved_push_plugin_jar(&p->resolved, pjars[i]);
+    }
+    free(pjars);
   }
   // Directories.
   p->intermediates = ccb_path_join(p->cfg->build_dir, "intermediates");
@@ -489,26 +525,9 @@ static ccb_status ccb_stage0(ccb_pipe *p) {
       ccb_sdk_probe_cache_store(p->cfg->build_dir, "kotlinc", p->sdk->kotlinc, p->sdk->kotlin_version);
     }
   }
-  // Tool fingerprint.
-  {
-    ccb_str fp;
-    ccb_str_init(&fp);
-    ccb_str_append(&fp, "bt=");
-    ccb_str_append(&fp, p->sdk->build_tools_version);
-    if (p->sdk->aapt2 != NULL) {
-      ccb_str_append(&fp, "|aapt2=");
-      ccb_str_append(&fp, p->sdk->aapt2);
-    }
-    if (p->sdk->zipalign != NULL) {
-      ccb_str_append(&fp, "|zipalign=");
-      ccb_str_append(&fp, p->sdk->zipalign);
-    }
-    ccb_str_append(&fp, "|kt=");
-    ccb_str_append(&fp, p->sdk->kotlin_version);
-    ccb_str_appendf(&fp, "|java=%d", p->sdk->java_major);
-    ccb_str_appendf(&fp, "|compile=%ld", p->cfg->compile_sdk);
-    p->tool_fingerprint = ccb_str_steal(&fp);
-  }
+  // Tool fingerprint: the single toolchain identity
+  // (ccb_sdk_toolchain_identity). A mismatch empties the cache.
+  p->tool_fingerprint = ccb_sdk_toolchain_identity(p->sdk, p->cfg);
   // Cache: loaded for build and explain (explain is read-only and never
   // saves). Dry-run skips it entirely: it prints every command anyway.
   if (!p->opts->dry_run) {
@@ -544,6 +563,7 @@ static ccb_status ccb_save_cache(ccb_pipe *p) {
 static void ccb_pipe_free(ccb_pipe *p) {
   ccb_config_free(p->cfg);
   ccb_sdk_free(p->sdk);
+  ccb_resolved_free(&p->resolved);
   ccb_cache_free(p->cache);
   free(p->intermediates);
   free(p->gen_dir);
@@ -600,7 +620,8 @@ ccb_status ccb_pipeline_build(const ccb_build_opts *opts, ccb_build_result *resu
     ccb_pipe_free(&p);
     return rc;
   }
-  ccb_graph *g = ccb_pipeline_graph_build(p.cfg, opts->aab, diags);
+  ccb_graph *g = ccb_pipeline_graph_build_resolved(p.cfg, &p.resolved,
+    opts->aab, diags);
   if (g == NULL) {
     ccb_pipe_free(&p);
     return CCB_ERR_CONFIG;

@@ -88,7 +88,6 @@ typedef struct {
   // tree): [paths] java_extra = [...]. Collected alongside java_dir.
   char **java_extra_dirs;
   size_t java_extra_dirs_count;
-  char *libs_dir;
   // [sdk]
   char *sdk_home;
   char *build_tools;
@@ -123,20 +122,16 @@ typedef struct {
   long kotlinc_daemon_idle_seconds;
   // [build] kotlin_plugins: exact "group:artifact:version" coordinates
   // of kotlinc compiler-plugin jars, resolved via Maven (setup
-  // prefetches, builds read the cache) and passed to kotlinc as
-  // -Xplugin=<jar>. kotlin_plugin_options: "plugin-id:key=value"
-  // strings, passed as -P plugin:<id>:<key>=<value>. Plugin
-  // coordinates must be exact versions: a compiler plugin has to
-  // match the kotlinc version, so ranges and snapshots are rejected.
+  // prefetches, builds read the cache) into ccb_resolved by the
+  // pipeline's stage 0 and passed to kotlinc as -Xplugin=<jar>.
+  // kotlin_plugin_options: "plugin-id:key=value" strings, passed as
+  // -P plugin:<id>:<key>=<value>. Plugin coordinates must be exact
+  // versions: a compiler plugin has to match the kotlinc version, so
+  // ranges and snapshots are rejected.
   char **kotlin_plugins;
   size_t kotlin_plugins_count;
   char **kotlin_plugin_options;
   size_t kotlin_plugin_options_count;
-  // Resolved plugin jar paths, filled in by the pipeline's stage 0
-  // (cache-only resolve) and consumed by the kotlinc step. Owned by
-  // the config once filled; freed by ccb_config_free.
-  char **kotlin_plugin_jars;
-  size_t kotlin_plugin_jars_count;
   // [deps]
   char **jars;
   size_t jars_count;

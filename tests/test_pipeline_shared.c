@@ -44,25 +44,25 @@ int main(void) {
   sdk.javac = "javac";
   CCB_AUTO_ARENA ccb_arena *ar = ccb_arena_create();
 
-  // Classpath: android.jar + [deps] jars + AAR classes.jars, in
-  // that order, for both paths.
+  // Classpath: android.jar + resolved [deps] jars + AAR classes.jars,
+  // in that order, for both paths.
   {
     char *jars[] = { "libs/a.jar", "libs/b.jar" };
     char *aars[] = { "mod/classes.jar" };
-    cfg.jars = jars;
-    cfg.jars_count = 2;
+    p.resolved.jars = jars;
+    p.resolved.jars_count = 2;
     p.aar_class_jars = aars;
     p.aar_class_jars_count = 1;
     char *cp = ccb_build_classpath(&p);
     CHECK_STR_EQ(cp, "android.jar:libs/a.jar:libs/b.jar:mod/classes.jar");
     free(cp);
-    cfg.jars_count = 0;
+    p.resolved.jars_count = 0;
     p.aar_class_jars_count = 0;
     cp = ccb_build_classpath(&p);
     CHECK_STR_EQ(cp, "android.jar");
     free(cp);
-    cfg.jars = jars;
-    cfg.jars_count = 2;
+    p.resolved.jars = jars;
+    p.resolved.jars_count = 2;
     p.aar_class_jars = aars;
     p.aar_class_jars_count = 1;
   }
@@ -123,8 +123,8 @@ int main(void) {
   {
     char *plug_jars[] = { "plug.jar" };
     char *plug_opts[] = { "id:key=value" };
-    cfg.kotlin_plugin_jars = plug_jars;
-    cfg.kotlin_plugin_jars_count = 1;
+    p.resolved.plugin_jars = plug_jars;
+    p.resolved.plugin_jars_count = 1;
     cfg.kotlin_plugin_options = plug_opts;
     cfg.kotlin_plugin_options_count = 1;
     char *kt[] = { "Main.kt" };
@@ -152,7 +152,7 @@ int main(void) {
       "dep/R.java App.java");
     free(cmd);
     free(av.v);
-    cfg.kotlin_plugin_jars_count = 0;
+    p.resolved.plugin_jars_count = 0;
     cfg.kotlin_plugin_options_count = 0;
   }
 

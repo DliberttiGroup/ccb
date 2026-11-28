@@ -319,11 +319,11 @@ static int ccb_r8_collect_names(ccb_pipe *p, char ***out, size_t *n, size_t *cap
   if (ccb_r8_scan_layout_dir(p->cfg->res, out, n, cap) != 0) {
     return -1;
   }
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
-    if (ccb_r8_add_aar_manifest(p->cfg->aars[i], p->cfg->package, out, n, cap) != 0) {
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
+    if (ccb_r8_add_aar_manifest(p->resolved.aars[i], p->cfg->package, out, n, cap) != 0) {
       return -1;
     }
-    if (ccb_r8_scan_aar_layouts(p->cfg->aars[i], out, n, cap) != 0) {
+    if (ccb_r8_scan_aar_layouts(p->resolved.aars[i], out, n, cap) != 0) {
       return -1;
     }
   }
@@ -488,7 +488,7 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
     ccb_free_str_array(class_files, nclass);
     return CCB_ERR_BUILD;
   }
-  if (nclass == 0 && p->cfg->jars_count == 0 && p->aar_class_jars_count == 0) {
+  if (nclass == 0 && p->resolved.jars_count == 0 && p->aar_class_jars_count == 0) {
     if (p->opts->explain) {
       if (ccb_dex_has_sources(p) && p->code_will_run) {
         printf("dex: run (classes will change)\n");
@@ -526,24 +526,13 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
       ccb_fp_add(&b, "r8-keep", keep_rules);
     }
   }
-  for (size_t i = 0; i < p->cfg->jars_count && !failed; i++) {
-    if (ccb_fp_add_file(p, &b, p->cfg->jars[i]) != 0) {
-      failed = 1;
-    }
-  }
-  for (size_t i = 0; i < p->aar_class_jars_count && !failed; i++) {
-    // In explain/dry-run mode on a fresh tree, a library module's
-    // classes.jar does not exist yet (modules never execute in
-    // planning modes); skipping it here keeps planning working, and
-    // the missing jar still fails the real build at d8 time.
-    if ((p->opts->explain || p->opts->dry_run) &&
-        !ccb_path_exists(p->aar_class_jars[i])) {
-      continue;
-    }
-    if (ccb_fp_add_file(p, &b, p->aar_class_jars[i]) != 0) {
-      failed = 1;
-    }
-  }
+  ccb_fp_add_declared_jars(p, &b, &failed, 0);
+  // In explain/dry-run mode on a fresh tree, a library module's
+  // classes.jar does not exist yet (modules never execute in
+  // planning modes); skipping it here keeps planning working, and
+  // the missing jar still fails the real build at d8 time.
+  ccb_fp_add_aar_class_jars(p, &b, &failed,
+    p->opts->explain || p->opts->dry_run);
   if (!failed && stdlib != NULL && ccb_fp_add_file(p, &b, stdlib) != 0) {
     failed = 1;
   }
@@ -692,8 +681,8 @@ ccb_status ccb_step_dex(ccb_pipe *p) {
     }
     ccb_free_str_array(cfiles, ncfiles);
   }
-  for (size_t i = 0; i < p->cfg->jars_count; i++) {
-    ccb_argv_push(&av, p->cfg->jars[i]);
+  for (size_t i = 0; i < p->resolved.jars_count; i++) {
+    ccb_argv_push(&av, p->resolved.jars[i]);
   }
   for (size_t i = 0; i < p->aar_class_jars_count; i++) {
     ccb_argv_push(&av, p->aar_class_jars[i]);
@@ -759,7 +748,7 @@ ccb_status ccb_step_dexcheck(ccb_pipe *p) {
     ccb_free_str_array(class_files, nclass);
     return CCB_ERR_BUILD;
   }
-  if (nclass == 0 && p->cfg->jars_count == 0 &&
+  if (nclass == 0 && p->resolved.jars_count == 0 &&
       p->aar_class_jars_count == 0) {
     ccb_log_info(&p->log, "no classes or jars, skipping dexcheck");
     ccb_free_str_array(class_files, nclass);

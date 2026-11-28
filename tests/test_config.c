@@ -423,6 +423,54 @@ int main(void) {
     }
   }
 
+  // Dead config verdicts (Step 7): shrink_resources = true is a
+  // load error (no task reads it, so true would silently promise
+  // shrinking that never happens); false stays accepted. [paths]
+  // libs is removed entirely, so it fails as an unknown key.
+  {
+    const char *shrink =
+      "ccb_version = 1\n"
+      "[project]\n"
+      "name = \"x\"\n"
+      "package = \"com.x\"\n"
+      "version = \"1.0\"\n"
+      "min_sdk = 26\n"
+      "target_sdk = 35\n"
+      "compile_sdk = 35\n"
+      "[paths]\n"
+      "manifest = \"src/main/AndroidManifest.xml\"\n"
+      "[build]\n"
+      "shrink_resources = true\n";
+    CHECK(ccb_mkdir_p(B("shrink/src/main")) == CCB_OK);
+    CHECK(ccb_write_file(B("shrink/src/main/AndroidManifest.xml"), "<manifest/>", 11) == CCB_OK);
+    CHECK(ccb_write_file(B("shrink/ccb.toml"), shrink, strlen(shrink)) == CCB_OK);
+    ccb_diag_list diags;
+    ccb_diag_list_init(&diags);
+    ccb_config *c = NULL;
+    CHECK(ccb_config_load(B("shrink/ccb.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+    CHECK(c == NULL);
+    CHECK(has_code(&diags, "CCB-E1005"));
+    ccb_diag_list_free(&diags);
+    const char *libs =
+      "ccb_version = 1\n"
+      "[project]\n"
+      "name = \"x\"\n"
+      "package = \"com.x\"\n"
+      "version = \"1.0\"\n"
+      "min_sdk = 26\n"
+      "target_sdk = 35\n"
+      "compile_sdk = 35\n"
+      "[paths]\n"
+      "manifest = \"src/main/AndroidManifest.xml\"\n"
+      "libs = \"app/libs\"\n";
+    CHECK(ccb_write_file(B("shrink/libs.toml"), libs, strlen(libs)) == CCB_OK);
+    ccb_diag_list_init(&diags);
+    CHECK(ccb_config_load(B("shrink/libs.toml"), NULL, &c, &diags) == CCB_ERR_CONFIG);
+    CHECK(c == NULL);
+    CHECK(has_code(&diags, "CCB-E1001"));
+    ccb_diag_list_free(&diags);
+  }
+
   ccb_remove_recursive(base);
   TEST_MAIN_END();
 }

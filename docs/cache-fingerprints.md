@@ -40,8 +40,9 @@ libs, library `version` for the AAR filename).
 
 *ccb-cache-fingerprints-tool*
 
-One string, built in `ccb_pipeline.c` and stored as `tools` in
-`build/ccb-cache.json`:
+One string, built by `ccb_sdk_toolchain_identity()` in
+`src/ccb_sdk.c` — the single definition of the toolchain identity —
+and stored as `tools` in `build/ccb-cache.json`:
 
 ```
 bt=<build-tools version>|aapt2=<aapt2 path>|zipalign=<zipalign path>
@@ -404,8 +405,7 @@ fields are not config keys and are not listed.)
 | kotlin_dir | [paths] kotlin | compile-code |
 | java_dir | [paths] java | compile-code |
 | java_extra_dirs | [paths] java_extra | compile-code |
-| libs_dir | [paths] libs | none: parsed and validated as a directory, but no task reads it (dead config; Step 7 owns removing it or wiring it in) |
-| sdk_home | [sdk] home | indirect: resolved tool paths and versions land in the tool fingerprint and per-step keys; an identical SDK at a new path changes nothing, a different-version one changes the recorded versions |
+| sdk_home | [sdk] home | indirect: resolved tool paths and versions form the single toolchain identity (ccb_sdk_toolchain_identity) and per-step keys; an identical SDK at a new path changes the recorded tool paths, so the cache invalidates |
 | build_tools | [sdk] build_tools | tool, compile-res, link, dex, module |
 | ndk_version | [sdk] ndk_version | native |
 | kotlin_home | [sdk] kotlin_home | indirect: the resolved kotlinc version is in the tool fingerprint and the compile-code kotlinc key; the path itself is not recorded |
@@ -422,17 +422,16 @@ fields are not config keys and are not listed.)
 | release_key_pw_env | [signing.release] key_password_env | none: password values are never fingerprinted or stored; the password unlocks the keystore and does not change signature bytes |
 | variant | [build] variant | sign, dex, native |
 | minify | [build] minify | dex |
-| shrink_resources | [build] shrink_resources | none: parsed but no task reads it (dead config; Step 7 owns it) |
+| shrink_resources | [build] shrink_resources | none: parsed; true is a load error (unsupported, Step 7 verdict), false is accepted and ignored |
 | jvm_target | [build] jvm_target | compile-code, module |
 | proguard_rules | [build] proguard_rules | dex |
 | build_dir | [build] build_dir | none: output location, not an input |
 | kotlinc_daemon | [build] kotlinc_daemon | none: execution mode (daemon vs direct kotlinc); same version, same args, same output by design, with fallback to direct |
 | kotlinc_daemon_idle_seconds | [build] kotlinc_daemon_idle_seconds | none: daemon lifetime, not a build input |
-| kotlin_plugins | [build] kotlin_plugins | indirect: resolved to kotlin_plugin_jars, hashed by compile-code and module |
+| kotlin_plugins | [build] kotlin_plugins | indirect: resolved to plugin jars in ccb_resolved, hashed by compile-code and module |
 | kotlin_plugin_options | [build] kotlin_plugin_options | compile-code, module |
-| kotlin_plugin_jars | (resolved) | compile-code, module |
-| jars | [deps] jars | compile-code, dex, module |
-| aars | [deps] aars | deps |
+| jars | [deps] jars | compile-code, dex, module: resolved Maven jars join the declared list in ccb_resolved |
+| aars | [deps] aars | deps: resolved Maven and path-library AARs join the declared list in ccb_resolved |
 | maven | [deps] maven | indirect: resolved artifacts are hashed as jars/AARs by compile-code, dex, deps |
 | maven_central | [deps] maven_central | indirect: resolution input; resolved artifact contents are hashed |
 | maven_repos | [deps] maven_repos | indirect: resolution input; resolved artifact contents are hashed (credentials never fingerprinted) |

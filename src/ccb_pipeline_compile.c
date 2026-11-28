@@ -107,9 +107,9 @@ char *ccb_build_classpath(ccb_pipe *p) {
   ccb_str cp;
   ccb_str_init(&cp);
   ccb_str_append(&cp, p->sdk->android_jar);
-  for (size_t i = 0; i < p->cfg->jars_count; i++) {
+  for (size_t i = 0; i < p->resolved.jars_count; i++) {
     ccb_str_append_c(&cp, ':');
-    ccb_str_append(&cp, p->cfg->jars[i]);
+    ccb_str_append(&cp, p->resolved.jars[i]);
   }
   for (size_t i = 0; i < p->aar_class_jars_count; i++) {
     ccb_str_append_c(&cp, ':');

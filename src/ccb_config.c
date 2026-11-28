@@ -485,7 +485,6 @@ void ccb_config_free(ccb_config *c) {
   free(c->kotlin_dir);
   free(c->java_dir);
   ccb_free_str_array(c->java_extra_dirs, c->java_extra_dirs_count);
-  free(c->libs_dir);
   free(c->sdk_home);
   free(c->build_tools);
   free(c->ndk_version);
@@ -524,7 +523,6 @@ void ccb_config_free(ccb_config *c) {
   ccb_free_str_array(c->kotlin_plugins, c->kotlin_plugins_count);
   ccb_free_str_array(c->kotlin_plugin_options,
     c->kotlin_plugin_options_count);
-  ccb_free_str_array(c->kotlin_plugin_jars, c->kotlin_plugin_jars_count);
   ccb_free_str_array(c->ndk_abis, c->ndk_abis_count);
   ccb_free_str_array(c->ndk_sources, c->ndk_sources_count);
   ccb_free_str_array(c->ndk_cflags, c->ndk_cflags_count);
@@ -803,7 +801,7 @@ static void ccb_load_required_str(ccb_validator *v, const ccb_toml_doc *doc,
 static void ccb_load_unknown_keys(ccb_validator *v) {
   static const char *root_keys[] = { "ccb_version" };
   static const char *project_keys[] = { "name", "package", "version", "version_code", "min_sdk", "target_sdk", "compile_sdk" };
-  static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "java_extra", "libs" };
+  static const char *paths_keys[] = { "manifest", "res", "assets", "kotlin", "java", "java_extra" };
   static const char *sdk_keys[] = { "home", "build_tools", "ndk_version", "kotlin_home", "r8_jar", "aapt2", "zipalign", "adb" };
   static const char *debug_keys[] = { "store", "alias" };
   static const char *release_keys[] = { "store", "alias", "store_password_env", "key_password_env" };
@@ -814,7 +812,7 @@ static void ccb_load_unknown_keys(ccb_validator *v) {
   static const char *preview_keys[] = { "styles", "flow", "phone_width", "phone_height", "strict", "gate", "resources", "layout", "nav_graph" };
   ccb_check_unknown_keys(v, "", root_keys, 1);
   ccb_check_unknown_keys(v, "project", project_keys, 7);
-  ccb_check_unknown_keys(v, "paths", paths_keys, 7);
+  ccb_check_unknown_keys(v, "paths", paths_keys, 6);
   ccb_check_unknown_keys(v, "sdk", sdk_keys, 7);
   ccb_check_unknown_keys(v, "signing.debug", debug_keys, 2);
   ccb_check_unknown_keys(v, "signing.release", release_keys, 4);
@@ -920,7 +918,6 @@ static void ccb_load_paths(ccb_validator *v, const ccb_toml_doc *doc,
       c->java_extra_dirs[i] = resolved;
     }
   }
-  ccb_load_resolved_str(v, c->project_root, "paths", "libs", &c->libs_dir);
 }
 
 // [sdk]
@@ -998,6 +995,13 @@ static void ccb_load_build(ccb_validator *v,
   b = 0;
   if (ccb_get_bool(v, "build", "shrink_resources", &b)) {
     c->shrink_resources = b;
+  }
+  // shrink_resources is parsed but no task reads it: accepting true
+  // would silently promise shrinking that never happens (Step 7
+  // verdict: diagnose, don't ignore). False stays accepted.
+  if (c->shrink_resources) {
+    ccb_vdiag(v, "CCB-E1005",
+      "build.shrink_resources is not supported (resource shrinking is not implemented)");
   }
   if (c->minify && strcmp(c->variant, "debug") == 0) {
     ccb_vdiag(v, "CCB-E1005", "build.minify requires variant = 'release'");
@@ -2019,9 +2023,6 @@ static void ccb_check_paths(ccb_validator *v, ccb_config *c) {
   }
   if (c->cmake_lists != NULL) {
     ccb_require_file(v, c->cmake_lists, "cmake lists file");
-  }
-  if (c->libs_dir != NULL) {
-    ccb_require_dir(v, c->libs_dir, "libs directory");
   }
   if (c->sdk_home != NULL) {
     ccb_require_dir(v, c->sdk_home, "sdk home");

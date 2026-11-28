@@ -48,8 +48,8 @@ static int ccb_deps_outputs_valid(ccb_pipe *p) {
   if (!ccb_path_is_dir(p->aar_dir)) {
     return 0;
   }
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
-    char *base = ccb_basename(p->cfg->aars[i]);
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
+    char *base = ccb_basename(p->resolved.aars[i]);
     char *dot = strrchr(base, '.');
     if (dot != NULL) {
       *dot = '\0';
@@ -90,24 +90,24 @@ static int ccb_deps_outputs_valid(ccb_pipe *p) {
 // later steps know the AAR contents even when extraction is cached.
 ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
   *ran = 0;
-  // The manifest merge sees declared AARs first; the module step
+  // The manifest merge sees resolved AARs first; the module step
   // appends built library-module AARs after this.
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
     ccb_push_str(&p->merge_aar_paths, &p->merge_aar_paths_count,
-      &p->merge_aar_paths_cap, ccb_xstrdup(p->cfg->aars[i]));
+      &p->merge_aar_paths_cap, ccb_xstrdup(p->resolved.aars[i]));
     ccb_push_str(&p->merge_aar_srcs, &p->merge_aar_srcs_count,
       &p->merge_aar_srcs_cap, NULL);
     ccb_push_str(&p->merge_aar_names, &p->merge_aar_names_count,
-      &p->merge_aar_names_cap, ccb_xstrdup(p->cfg->aars[i]));
+      &p->merge_aar_names_cap, ccb_xstrdup(p->resolved.aars[i]));
   }
-  if (p->cfg->aars_count == 0) {
+  if (p->resolved.aars_count == 0) {
     if (p->opts->explain) {
       printf("deps: skip (no AAR dependencies)\n");
     }
     return CCB_OK;
   }
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
-    const char *aar_path = p->cfg->aars[i];
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
+    const char *aar_path = p->resolved.aars[i];
     char *base = ccb_basename(aar_path);
     char *dot = strrchr(base, '.');
     if (dot != NULL) {
@@ -175,8 +175,8 @@ ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
   }
   ccb_fp_builder b;
   memset(&b, 0, sizeof(b));
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
-    if (ccb_fp_add_file(p, &b, p->cfg->aars[i]) != 0) {
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
+    if (ccb_fp_add_file(p, &b, p->resolved.aars[i]) != 0) {
       ccb_fp_free(&b);
       ccb_pipe_diag(p, "CCB-E3015", "deps", "cannot read AAR file");
       return CCB_ERR_BUILD;
@@ -214,8 +214,8 @@ ccb_status ccb_step_deps(ccb_pipe *p, int *ran) {
     free(fp);
     return CCB_ERR_BUILD;
   }
-  for (size_t i = 0; i < p->cfg->aars_count; i++) {
-    const char *aar_path = p->cfg->aars[i];
+  for (size_t i = 0; i < p->resolved.aars_count; i++) {
+    const char *aar_path = p->resolved.aars[i];
     char *base = ccb_basename(aar_path);
     char *dot = strrchr(base, '.');
     if (dot != NULL) {

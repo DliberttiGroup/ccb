@@ -171,19 +171,19 @@ static void ccb_gb_out(ccb_task *t, const char *name) {
 }
 
 static ccb_task *ccb_gb_deps(ccb_graph_builder *b,
-    const ccb_config *cfg) {
+    const ccb_resolved *resolved) {
   ccb_task *t = ccb_gb_add(b, "deps", "aar",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_deps);
-  for (size_t i = 0; i < cfg->aars_count; i++) {
-    ccb_gb_source(t, cfg->aars[i]);
+  for (size_t i = 0; i < resolved->aars_count; i++) {
+    ccb_gb_source(t, resolved->aars[i]);
   }
   ccb_gb_out(t, "aar-extracted");
   return t;
 }
 
 static void ccb_gb_app(ccb_graph_builder *b, const ccb_config *cfg,
-    int aab) {
-  ccb_gb_deps(b, cfg);
+    const ccb_resolved *resolved, int aab) {
+  ccb_gb_deps(b, resolved);
   ccb_task *t = ccb_gb_add(b, "libraries", "library",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_libraries);
   for (size_t i = 0; i < cfg->libraries_count; i++) {
@@ -228,11 +228,11 @@ static void ccb_gb_app(ccb_graph_builder *b, const ccb_config *cfg,
   // (fingerprint and -classpath/-Xplugin): a changed jar must
   // re-run compilation, so they are declared inputs, not just
   // project-model values.
-  for (size_t i = 0; i < cfg->jars_count; i++) {
-    ccb_gb_source(t, cfg->jars[i]);
+  for (size_t i = 0; i < resolved->jars_count; i++) {
+    ccb_gb_source(t, resolved->jars[i]);
   }
-  for (size_t i = 0; i < cfg->kotlin_plugin_jars_count; i++) {
-    ccb_gb_source(t, cfg->kotlin_plugin_jars[i]);
+  for (size_t i = 0; i < resolved->plugin_jars_count; i++) {
+    ccb_gb_source(t, resolved->plugin_jars[i]);
   }
   ccb_gb_gen(t, "aar-extracted");
   ccb_gb_gen(t, "module-aars");
@@ -245,8 +245,8 @@ static void ccb_gb_app(ccb_graph_builder *b, const ccb_config *cfg,
   // Dex reads the same classpath jars, and the ProGuard rules file
   // when release minification is on (the rules text is fingerprinted
   // and passed to R8).
-  for (size_t i = 0; i < cfg->jars_count; i++) {
-    ccb_gb_source(t, cfg->jars[i]);
+  for (size_t i = 0; i < resolved->jars_count; i++) {
+    ccb_gb_source(t, resolved->jars[i]);
   }
   if (cfg->minify && cfg->proguard_rules != NULL) {
     ccb_gb_source(t, cfg->proguard_rules);
@@ -310,16 +310,16 @@ static void ccb_gb_app(ccb_graph_builder *b, const ccb_config *cfg,
 }
 
 static void ccb_gb_library(ccb_graph_builder *b,
-    const ccb_config *cfg) {
-  ccb_gb_deps(b, cfg);
+    const ccb_resolved *resolved) {
+  ccb_gb_deps(b, resolved);
   ccb_task *t = ccb_gb_add(b, "library", "library",
     CCB_TASK_CACHE_FINGERPRINT, ccb_task_library);
   ccb_gb_gen(t, "aar-extracted");
   ccb_gb_out(t, "library-aar");
 }
 
-ccb_graph *ccb_pipeline_graph_build(const ccb_config *cfg, int aab,
-    ccb_diag_list *diags) {
+ccb_graph *ccb_pipeline_graph_build_resolved(const ccb_config *cfg,
+    const ccb_resolved *resolved, int aab, ccb_diag_list *diags) {
   ccb_graph *g = ccb_graph_create();
   ccb_graph_builder b;
   memset(&b, 0, sizeof(b));
@@ -348,9 +348,9 @@ ccb_graph *ccb_pipeline_graph_build(const ccb_config *cfg, int aab,
   ccb_task_add_output(config, "toolchain");
   b.prev = "config";
   if (cfg->is_library) {
-    ccb_gb_library(&b, cfg);
+    ccb_gb_library(&b, resolved);
   } else {
-    ccb_gb_app(&b, cfg, aab);
+    ccb_gb_app(&b, cfg, resolved, aab);
   }
   if (b.failed) {
     ccb_graph_free(g);
@@ -360,6 +360,19 @@ ccb_graph *ccb_pipeline_graph_build(const ccb_config *cfg, int aab,
     ccb_graph_free(g);
     return NULL;
   }
+  return g;
+}
+
+ccb_graph *ccb_pipeline_graph_build(const ccb_config *cfg, int aab,
+    ccb_diag_list *diags) {
+  // No resolution ran: declare the config's own lists. Task inputs
+  // are copied into the graph, so the resolved struct is freed
+  // here.
+  ccb_resolved resolved;
+  ccb_resolved_from_config(&resolved, cfg);
+  ccb_graph *g = ccb_pipeline_graph_build_resolved(cfg, &resolved,
+    aab, diags);
+  ccb_resolved_free(&resolved);
   return g;
 }
 

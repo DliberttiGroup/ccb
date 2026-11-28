@@ -145,7 +145,6 @@ res = "app/src/main/res"
 assets = "app/src/main/assets"
 kotlin = "app/src/main/kotlin"
 java = "app/src/main/java"
-libs = "app/libs"
 
 [sdk]
 # Resolution order: this field, then $ANDROID_HOME, then $ANDROID_SDK_ROOT,
@@ -301,7 +300,7 @@ Every key CCB accepts. Unknown keys are CCB-E1001.
 |---|---|
 | (top level) | `ccb_version` |
 | `[project]` | `name`, `package`, `version`, `version_code`, `min_sdk`, `target_sdk`, `compile_sdk` |
-| `[paths]` | `manifest`, `res`, `assets`, `kotlin`, `java`, `java_extra`, `libs` |
+| `[paths]` | `manifest`, `res`, `assets`, `kotlin`, `java`, `java_extra` |
 | `[sdk]` | `home`, `build_tools`, `ndk`, `kotlin_home`, `aapt2`, `zipalign`, `r8_jar` |
 | `[signing.debug]`, `[signing.release]` | `store`, `alias`, `store_password_env`, `key_password_env` |
 | `[build]` | `variant`, `minify`, `shrink_resources`, `jvm_target`, `kotlinc_daemon`, `kotlinc_daemon_idle_seconds`, `kotlin_plugins`, `kotlin_plugin_options`, `proguard_rules` |

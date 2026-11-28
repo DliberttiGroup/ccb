@@ -959,14 +959,17 @@ int main(void) {
     cfg->jars = ccb_xcalloc(1, sizeof(char *));
     cfg->jars[0] = ccb_xstrdup("lib.jar");
     cfg->jars_count = 1;
-    cfg->kotlin_plugin_jars = ccb_xcalloc(1, sizeof(char *));
-    cfg->kotlin_plugin_jars[0] = ccb_xstrdup("plugin.jar");
-    cfg->kotlin_plugin_jars_count = 1;
     cfg->minify = 1;
     cfg->proguard_rules = ccb_xstrdup("rules.pro");
+    // The plugin jar is a resolved artifact, not config: the graph
+    // builder takes it from ccb_resolved.
+    ccb_resolved resolved;
+    ccb_resolved_from_config(&resolved, cfg);
+    ccb_resolved_push_plugin_jar(&resolved, ccb_xstrdup("plugin.jar"));
     ccb_diag_list gdiags;
     ccb_diag_list_init(&gdiags);
-    ccb_graph *g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    ccb_graph *g = ccb_pipeline_graph_build_resolved(cfg, &resolved,
+      0, &gdiags);
     CHECK(g != NULL);
     if (g != NULL) {
       ccb_task *code = ccb_graph_find(g, "compile-code");
@@ -990,7 +993,7 @@ int main(void) {
     // Without minification the ProGuard rules are not read, so
     // they are not declared either.
     cfg->minify = 0;
-    g = ccb_pipeline_graph_build(cfg, 0, &gdiags);
+    g = ccb_pipeline_graph_build_resolved(cfg, &resolved, 0, &gdiags);
     CHECK(g != NULL);
     if (g != NULL) {
       ccb_task *dex = ccb_graph_find(g, "dex");
@@ -1002,6 +1005,7 @@ int main(void) {
       ccb_graph_free(g);
     }
     ccb_diag_list_free(&gdiags);
+    ccb_resolved_free(&resolved);
     ccb_config_free(cfg);
   }
 
