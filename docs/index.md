@@ -14,7 +14,8 @@ Human docs, English. Agent docs (Chinese) live in `docs/llm/` — see
 | [build.md](build.md) | Pipeline stages, dex, AAB, caching, reproducible builds, limits |
 | [graph.md](graph.md) | Task graph engine: task model, validation, plan, build summary |
 | [architecture-audit.md](architecture-audit.md) | Phase 0 audit: layer map, coupling, correctness risks, migration plan per phase, scope freeze, benchmark baseline |
-| [remediation-baseline.md](remediation-baseline.md) | Step 1 remediation baseline: branch/commit, fast-suite result, benchmark status, verified findings, work queue for Steps 2–12 |
+| [remediation-baseline.md](remediation-baseline.md) | Step 1 remediation baseline: branch/commit, fast-suite result, benchmark status, verified findings, work queue for Steps 2–12; §8 records the job's completion state |
+| [advanced-features-reassessment.md](advanced-features-reassessment.md) | Step 12 reassessment of the frozen advanced features (AAB split, remote cache, plugin/task API, external providers, plugin isolation, preview expansion, scheduler stage 6, N=100 retry) plus the small follow-ups, with a prioritized recommendation for the next step |
 | [cache-fingerprints.md](cache-fingerprints.md) | Step 3 fingerprint table: task → fingerprint inputs, config coverage, verified against the code by test_cache_meta |
 | [reproducibility.md](reproducibility.md) | Step 10 reproducibility contract: guaranteed inputs/outputs, what is not guaranteed, how to verify, known gaps |
 | [build-daemon.md](build-daemon.md) | Opt-in kotlinc daemon |

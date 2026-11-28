@@ -450,7 +450,14 @@ and the findings it addresses.
 11. **Step 12 — Reassess advanced features only after the above is
     demonstrably stable.** §5(d) items stay frozen until then; each
     needs its own scope note + tests + a verified critical need
-    before implementation.
+    before implementation. Done: see
+    [advanced-features-reassessment.md](advanced-features-reassessment.md)
+    and §8 (job completion). Verdicts: stage 6 split — (a)+(b) next,
+    (c)–(f) after; N=100 deferred to a memory-relief + rate-check
+    trigger; remote cache / custom task API / preview expansion
+    deferred with triggers; external providers and the AAB split
+    dropped as standalone goals; plugin isolation a standing rule;
+    small follow-ups prioritized (compile-code re-run quirk first).
 
 ## 7. Limitations of this step
 
@@ -465,3 +472,62 @@ and the findings it addresses.
 - Items marked unverified in §5 (R-6, D-8, D-9 partial, D-10) are
   audit claims, not Step 1 findings; the owning steps must verify
   them before acting on them.
+
+## 8. Job completion (Step 12)
+
+All twelve remediation steps landed, each green in CI. Final
+state at the Step 12 commit: `test` head after Step 11 is
+`d123fb1`, CI run #29 green; suite 62 tests total, 51 fast
+(`ctest -N`; fast suite 51/51 passed locally in this step).
+Per-step heads: Step 1 baseline `acece7d`; Step 2 cache validation
+`57ac37d` + fixup `de37a20`; Step 3 cache/fingerprint regression
+tests `345b546` + fixup `a874f46`; Step 4 graph validation
+`f54988b`; Step 5 explicit task I/O `6aeffec`; Step 6 provider
+consolidation `a3e33e3`; Step 7 config boundaries `7f70615`;
+Step 8 scheduler stages 1–5 `f26f2f5`; Step 9 Maven hardening
+`9b90251`; Step 10 reproducibility + benchmarks `3bdb3a8`;
+Step 11 scaling validation `d123fb1`; Step 12 this reassessment
+(see [advanced-features-reassessment.md](advanced-features-reassessment.md)).
+
+What the job demonstrated, in one line per class: the cache is
+safe (atomic publication, output-existence + validity checks on
+skips, audited fingerprint table with mutation tests); the graph
+is validated and deterministic (validators, overlap invariant
+pinned, `--explain` exact); tasks declare their inputs/outputs/
+deps and diagnostics carry task IDs; the pipeline providers are
+consolidated with byte-identical output; config/runtime-state
+boundaries are split; the scheduler is proven through stage 5
+with single-writer cache deltas; Maven semantics are audited
+with support-or-diagnose verdicts; reproducibility is pinned
+(two clean builds byte-identical) and benchmarks exist with a
+scaling record (N=15/25/50 medians, N=100 infeasible with
+evidence).
+
+What the job did not do, and why it matters: the directive
+targets (cold <10 s, incremental <2 s) are still missed by both
+CCB and Gradle on every measurement; Step 11 showed the gap is
+per-module compiler work (one JVM spawn per module, O(N²)
+classpath from every-upstream-jars-on-classpath), not scheduling
+overhead. Stage 6 (parallel real builds) was audited and stopped
+with verdict STOP — missing list (a)–(f) in `docs/graph.md`.
+The next-step priority is in the reassessment, §10:
+(1) compile-code re-run quirk + small follow-ups batch
+(winning-branch E3021, tool-probes atomic write);
+(2) stage 6 (a)+(b); (3) stage 6 (c)–(f) + equivalence test;
+(4) N=100 retry only if its trigger fires; (5) deferred features
+in trigger order; (6) external providers and the AAB split
+dropped as standalone goals; plugin isolation recorded as a
+standing rule.
+
+Open items carried out of the job (all in the reassessment, §9):
+winning-branch E3021 prefetch gap; `tool-probes.json`
+non-atomic writes; `ccb_cache_delta` adoption in the remaining
+steps (blocked behind stage 6 (a)+(b)); compile-code re-run
+quirk after every clean build (root cause unknown);
+`requirement.md:861` still says 55 tests (spec line, left to a
+spec change). The scope freeze in
+`docs/architecture-audit.md` §6 stands until a later roadmap
+reopens it: no advanced feature from the frozen list is
+authorized by this job's completion — each needs its own scope
+note + tests + verified critical need, per the reassessment's
+triggers.
